@@ -14,10 +14,17 @@
    `dataset/` holds face images of three identifiable students — sensitive
    personal information under RA 10173. Git history is permanent and is
    copied to every clone. If you ever run `git add -f` on those paths, stop
-   and tell the user. Verify before any bulk `git add`:
+   and tell the user. Two checks, both verified to work:
    ```bash
-   git check-ignore -q dataset trainer && echo SAFE || echo STOP
+   # 1. Ignore rules still in place? (expects exactly 2 matches)
+   [ "$(git check-ignore dataset trainer | wc -l)" -eq 2 ] && echo SAFE || echo STOP
+
+   # 2. After staging, before committing - anything sensitive slip in?
+   git diff --cached --name-only | grep -qE '^(dataset|trainer)/' \
+     && echo "STOP - sensitive data staged" || echo "SAFE"
    ```
+   Do not use `git check-ignore -q` with more than one path — `-q` accepts a
+   single pathname only and exits non-zero, producing a false alarm.
 
 2. **There is no pre-Phase-0 state to diff against.** The repository was
    created *after* Phase 0's changes. `2ec776d` already contains them. The

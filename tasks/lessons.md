@@ -71,3 +71,41 @@ restate it — `LBPH_PARAMS` now lives in `train_model.py` and both evaluators
 import it. And a metric harness needs at least one assertion that fails when
 it silently measures nothing: `assert total_images > 0`. A summary table full
 of zeros should be an error, not a result.
+
+---
+
+## L4 — Run the commands you put in documentation
+
+**2026-08-08, writing the handover and CLAUDE.md.**
+
+I documented a safety check for the single most consequential rule in this
+project — never commit biometric data:
+
+```bash
+git check-ignore -q dataset trainer && echo SAFE || echo STOP
+```
+
+It does not work. `-q` accepts only one pathname, so git exits non-zero with
+`fatal: --quiet is only valid with a single pathname`. The command prints
+`STOP` **even when both paths are correctly ignored**. I had written it into
+two files before running it once.
+
+**Why it matters more than a typo:** a safety check that cries wolf gets
+ignored. The next agent sees `STOP` on a clean repository, concludes the check
+is unreliable, and stops running it — leaving the real rule unguarded. A
+broken check is worse than no check, because it looks like protection.
+
+**How to apply:** any command written into documentation gets executed before
+the file is saved — no exceptions for "obvious" one-liners. For a check whose
+job is to detect a problem, also run a **negative test**: break the input
+deliberately and confirm it actually fails. The replacement was validated both
+ways:
+
+```bash
+[ "$(git check-ignore dataset trainer | wc -l)" -eq 2 ] && echo SAFE || echo STOP
+# passes on a healthy repo; correctly reports STOP when a rule is missing
+```
+
+The same applies to reproduction steps, setup instructions, and any `bash`
+block in a handover: if it was not run, mark it untested rather than implying
+it works.

@@ -25,8 +25,19 @@ these; discovering them yourself costs hours.
   identifiable students and biometric templates derived from them — sensitive
   personal information under RA 10173. Git history is permanent and copies to
   every clone; deleting the files later does not undo it. Both are
-  gitignored. Never `git add -f` them. Before any bulk `git add`, verify:
-  `git check-ignore -q dataset trainer && echo SAFE || echo STOP`
+  gitignored. Never `git add -f` them. Two checks, both verified to work:
+
+  ```bash
+  # 1. Are the ignore rules still in place? (expects exactly 2 matches)
+  [ "$(git check-ignore dataset trainer | wc -l)" -eq 2 ] && echo SAFE || echo STOP
+
+  # 2. After staging, before committing - did anything sensitive slip in?
+  git diff --cached --name-only | grep -qE '^(dataset|trainer)/' \
+    && echo "STOP - sensitive data staged" || echo "SAFE"
+  ```
+
+  Do not use `git check-ignore -q` with more than one path: `-q` accepts only
+  a single pathname and exits non-zero, which reads as a false alarm.
 - **Decisions marked as the user's are not yours.** `tasks/todo.md` §7 lists
   open decisions that shape the thesis. Bring measured evidence and options;
   do not choose unilaterally.
