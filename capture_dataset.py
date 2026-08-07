@@ -13,7 +13,7 @@ from camera_utils import (
     get_saved_camera_index,
     open_best_camera,
     open_camera_by_index,
-    save_camera_index
+    save_camera_index,
 )
 from config.logging_config import configure_logging
 from config.settings import settings
@@ -170,8 +170,8 @@ try:
     mp_face_mesh = mp.solutions.face_mesh
     mp_draw = mp.solutions.drawing_utils
 except AttributeError:
-    import mediapipe.python.solutions.face_mesh as mp_face_mesh
     import mediapipe.python.solutions.drawing_utils as mp_draw
+    import mediapipe.python.solutions.face_mesh as mp_face_mesh
 
 face_mesh = mp_face_mesh.FaceMesh(
     static_image_mode=False,

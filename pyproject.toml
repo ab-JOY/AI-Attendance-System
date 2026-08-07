@@ -84,6 +84,22 @@ select = [
     "G",    # flake8-logging-format - enforces lazy %-style logging calls
 ]
 
+ignore = [
+    # SIM103 "return the condition directly" fires on the last check of a
+    # guard-clause chain (`if bad: return False` x4, then `return True`).
+    # Taking its advice makes the final check read differently from the four
+    # identical ones above it, which is harder to scan, not easier. The
+    # geometry validators in recognize_face.py and capture_dataset.py are
+    # both built this way deliberately.
+    "SIM103",
+
+    # SIM108 rewrites if/else blocks as ternaries. This codebase is written
+    # in a deliberately vertical style - one argument per line, explicit
+    # blocks - and the suggested one-liners run past the line limit as often
+    # as not. Matching the surrounding style beats satisfying the rule.
+    "SIM108",
+]
+
 [tool.ruff.lint.per-file-ignores]
 # recognize_face.py falls back to a private mediapipe path when
 # mp.solutions.face_mesh is unavailable, which requires an import inside an

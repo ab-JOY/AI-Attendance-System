@@ -20,7 +20,14 @@ from flask import (
 )
 
 from config.logging_config import configure_logging
-from config.settings import settings
+
+# Aliased deliberately. There is a route handler named `settings()` at the
+# bottom of this file, and importing the config object as a bare `settings`
+# let that def shadow it. Nothing failed at import - app.secret_key is read
+# before the def executes - but get_db_connection() runs per request, by
+# which point `settings` was the view function and every database call
+# raised AttributeError. Do not rename this back without renaming the route.
+from config.settings import settings as app_config
 
 # app.py is the entry point, so it owns logging configuration for the process.
 #
@@ -31,11 +38,7 @@ from config.settings import settings
 # The noqa markers below come off when PE-4 is fixed and the import is cheap.
 configure_logging()
 
-from recognize_face import (  # noqa: E402
-    generate_frames,
-    start_camera,
-    stop_camera
-)
+from recognize_face import generate_frames, start_camera, stop_camera  # noqa: E402
 from train_model import train_model  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -45,14 +48,14 @@ app = Flask(__name__)
 # Was hardcoded as "ai_attendance_secret_key" (SE-8). That value is in git
 # history, and a known Flask secret key means session cookies can be forged.
 # Now required from the environment - see .env.example.
-app.secret_key = settings.secret_key
+app.secret_key = app_config.secret_key
 
 
 # ==============================
 # DATABASE CONNECTION
 # ==============================
 def get_db_connection():
-    return mysql.connector.connect(**settings.db_kwargs())
+    return mysql.connector.connect(**app_config.db_kwargs())
 
 # ==============================
 # DELETE READ-ONLY FILES/FOLDERS
@@ -363,7 +366,7 @@ def delete_student(student_id):
 
         return redirect(url_for('manage_students'))
 
-    except PermissionError as error:
+    except PermissionError:
         if conn is not None:
             conn.rollback()
 
@@ -556,7 +559,7 @@ def update_student(student_id):
 
                 folder_was_renamed = True
 
-            except PermissionError as error:
+            except PermissionError:
                 logger.exception(
                     "Dataset folder rename denied by the operating system"
                 )
@@ -610,7 +613,7 @@ def update_student(student_id):
                     old_dataset_path
                 )
 
-            except OSError as rename_error:
+            except OSError:
                 logger.exception(
                     "Could not restore dataset folder after a failed update"
                 )
@@ -698,7 +701,7 @@ def recapture_face():
                 onerror=remove_readonly_and_retry
             )
 
-    except PermissionError as error:
+    except PermissionError:
         logger.exception(
             "Recapture failed: dataset folder is in use"
         )
@@ -753,7 +756,7 @@ def recapture_face():
             500
         )
 
-    except PermissionError as error:
+    except PermissionError:
         logger.exception("Permission denied starting the face-capture process")
 
         return (
@@ -1135,7 +1138,7 @@ def start_attendance():
 
     logger.info("Start attendance requested for subject %s", subject_code)
 
-    
+
 
     if not subject_code:
         return jsonify({
@@ -1343,7 +1346,7 @@ def reports():
         total_absent=total_absent,
         total_records=total_records
     )
-    
+
 @app.route('/export_excel')
 def export_excel():
 
@@ -1481,4 +1484,4 @@ def video_feed():
 if __name__ == '__main__':
     # Still the Flask development server binding loopback only - that is PO-4,
     # scoped to a later phase. Only the debug flag moves to configuration here.
-    app.run(debug=settings.flask_debug)
+    app.run(debug=app_config.flask_debug)

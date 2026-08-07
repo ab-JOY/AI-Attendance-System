@@ -78,7 +78,6 @@ def load_model_and_labels():
 
     with open(
         LABELS_FILE,
-        "r",
         encoding="utf-8"
     ) as labels_file:
         for line_number, line in enumerate(
@@ -739,10 +738,7 @@ def update_liveness(liveness_state, yaw):
         if (
             challenge == "TURN_LEFT"
             and yaw >= LIVENESS_LEFT_YAW
-        ):
-            liveness_state["movement_seen"] = True
-
-        elif (
+        ) or (
             challenge == "TURN_RIGHT"
             and yaw <= LIVENESS_RIGHT_YAW
         ):

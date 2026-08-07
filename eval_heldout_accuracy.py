@@ -17,27 +17,39 @@ KNOWN LIMITATION - read before quoting these numbers:
     security-critical metric - is NOT measured here.
     A defensible evaluation needs multi-session capture plus non-enrolled
     faces. See tasks/todo.md section 3.
+
+Renamed from test_heldout_accuracy.py in Phase 1: this is a human-facing
+measurement script, not a unit test, and the old name made pytest try to
+import it at collection time. Run it directly:
+
+    python eval_heldout_accuracy.py
 """
 
 import os
-import sys
 import random
+
 import cv2
 import numpy as np
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATASET_DIR = os.path.join(BASE_DIR, "dataset")
-
+from config.settings import settings
 from face_preprocessing import preprocess_for_lbph
-from train_model import parse_dataset_folder, LBPH_PARAMS
+from train_model import LBPH_PARAMS, parse_dataset_folder
+
+DATASET_DIR = str(settings.dataset_dir)
 
 def run_heldout_evaluation(split_ratio=0.80, seed=42):
     random.seed(seed)
-    
+
+    train_pct = int(split_ratio * 100)
+    test_pct = int((1 - split_ratio) * 100)
+
     print("=" * 60)
-    print(f"STRICT HELD-OUT EVALUATION (Train: {int(split_ratio*100)}% | Test: {int((1-split_ratio)*100)}%)")
+    print(
+        f"STRICT HELD-OUT EVALUATION "
+        f"(Train: {train_pct}% | Test: {test_pct}%)"
+    )
     print("=" * 60)
-    
+
     # 1. Discover dataset folders
     folder_records = []
     for folder_name in sorted(os.listdir(DATASET_DIR)):
@@ -56,30 +68,30 @@ def run_heldout_evaluation(split_ratio=0.80, seed=42):
 
     train_faces = []
     train_labels = []
-    
+
     test_set = [] # list of (image_path, expected_label, student_id)
     label_dict = {}
-    
+
     current_label = 0
 
     for record in folder_records:
         folder_path = record["folder_path"]
         folder_name = record["folder_name"]
         student_id = record["student_id"]
-        
+
         all_images = [
             f for f in sorted(os.listdir(folder_path))
             if f.lower().endswith((".jpg", ".jpeg", ".png"))
         ]
-        
+
         # Shuffle deterministically and split
         random.shuffle(all_images)
         split_idx = int(len(all_images) * split_ratio)
         train_img_names = all_images[:split_idx]
         test_img_names = all_images[split_idx:]
-        
+
         label_dict[current_label] = folder_name
-        
+
         # Process Training Images
         # No augmentation - train_model.py does not augment either, and
         # this evaluator must mirror production or it measures a system
@@ -99,7 +111,10 @@ def run_heldout_evaluation(split_ratio=0.80, seed=42):
             img_path = os.path.join(folder_path, fname)
             test_set.append((img_path, current_label, student_id, folder_name))
 
-        print(f"Student: {folder_name:40s} | Train: {len(train_img_names)} | Test: {len(test_img_names)}")
+        print(
+            f"Student: {folder_name:40s} | "
+            f"Train: {len(train_img_names)} | Test: {len(test_img_names)}"
+        )
         current_label += 1
 
     # 2. Train Model on 80% Split ONLY
@@ -115,27 +130,29 @@ def run_heldout_evaluation(split_ratio=0.80, seed=42):
     print("\n" + "=" * 60)
     print("EVALUATING ON HELD-OUT UNSEEN TEST IMAGES")
     print("=" * 60)
-    
+
     correct = 0
     incorrect = 0
     unknown = 0
     distances = []
-    
-    RECOGNITION_THRESHOLD = 58.0
-    
+
+    # Imported from configuration rather than restated, so the evaluator can
+    # never measure a threshold that production does not use (lessons.md L3).
+    RECOGNITION_THRESHOLD = settings.recognition_threshold
+
     per_student_stats = {lbl: {"correct": 0, "total": 0} for lbl in label_dict}
 
-    for img_path, exp_label, student_id, folder_name in test_set:
+    for img_path, exp_label, _student_id, _folder_name in test_set:
         img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
         if img is None:
             continue
-            
+
         proc = preprocess_for_lbph(img)
         pred_label, distance = recognizer.predict(proc)
-        
+
         per_student_stats[exp_label]["total"] += 1
         distances.append(distance)
-        
+
         if distance <= RECOGNITION_THRESHOLD and pred_label in label_dict:
             if pred_label == exp_label:
                 correct += 1
@@ -146,16 +163,19 @@ def run_heldout_evaluation(split_ratio=0.80, seed=42):
             unknown += 1
 
     total_test = len(test_set)
-    
+
     print("\nPer-Student Held-Out Accuracy:")
     for lbl, folder_name in label_dict.items():
         st = per_student_stats[lbl]
         pct = (st["correct"] / st["total"] * 100) if st["total"] > 0 else 0
-        print(f"Student: {folder_name:40s} | Held-Out Accuracy: {pct:6.2f}% ({st['correct']}/{st['total']})")
-        
+        print(
+            f"Student: {folder_name:40s} | "
+            f"Held-Out Accuracy: {pct:6.2f}% ({st['correct']}/{st['total']})"
+        )
+
     overall_acc = (correct / total_test * 100) if total_test > 0 else 0
     avg_dist = (sum(distances) / len(distances)) if distances else 0
-    
+
     print("\n" + "=" * 60)
     print("FINAL HELD-OUT EVALUATION SUMMARY")
     print("=" * 60)

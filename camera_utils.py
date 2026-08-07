@@ -14,7 +14,7 @@ def get_saved_camera_index():
     """Reads saved camera index from file, or returns None."""
     if os.path.exists(CONFIG_FILE):
         try:
-            with open(CONFIG_FILE, "r") as f:
+            with open(CONFIG_FILE) as f:
                 idx = int(f.read().strip())
                 return idx
         except Exception:
