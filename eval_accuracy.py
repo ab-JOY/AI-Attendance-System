@@ -210,4 +210,13 @@ def main():
     conn.close()
 
 if __name__ == "__main__":
+    # This harness calls train_model(), which reports its progress through
+    # logging. Without configuring handlers here that output is discarded and
+    # a retrain looks like a silent hang - so this script is an entry point
+    # and configures logging like one. Its own results stay on print(),
+    # because they are a report rather than a log.
+    from config.logging_config import configure_logging
+
+    configure_logging()
+
     main()

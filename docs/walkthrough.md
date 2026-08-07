@@ -41,7 +41,7 @@ by capture, training, and recognition.
 
 ## 2. Measured results
 
-### Method A — In-sample verification (`test_accuracy.py`)
+### Method A — In-sample verification (`eval_accuracy.py`)
 
 ```
 Student: 23-1-1-0559_Chrizol D. Evangelista       | Accuracy: 100.00% (100/100)
@@ -60,7 +60,7 @@ histogram per training sample — so each query matches its own stored
 histogram exactly. Method A only confirms the train → save → load → predict
 pipeline is wired up correctly. It measures memorisation, not recognition.
 
-### Method B — 80/20 held-out split (`test_heldout_accuracy.py`)
+### Method B — 80/20 held-out split (`eval_heldout_accuracy.py`)
 
 ```
 Student: 23-1-1-0559_Chrizol D. Evangelista       | Held-Out Accuracy: 100.00% (20/20)
@@ -147,7 +147,7 @@ DET curve. Tracked as Phase 6 in [`tasks/todo.md`](../tasks/todo.md).
 
 | Previous claim | Status | Finding |
 |---|---|---|
-| "Method A: 100.00% (300/300), avg distance 16.57" | **Unreproducible** | `test_accuracy.py` had a variable-aliasing bug: `label_map` stored student IDs, but the evaluation loop joined those onto `DATASET_DIR` as folder names. No folder ever matched, so it scored **0 images** and reported 0.00%. Fixed; now scores 300/300 at distance 0.00. |
+| "Method A: 100.00% (300/300), avg distance 16.57" | **Unreproducible** | `eval_accuracy.py` (then `test_accuracy.py`) had a variable-aliasing bug: `label_map` stored student IDs, but the evaluation loop joined those onto `DATASET_DIR` as folder names. No folder ever matched, so it scored **0 images** and reported 0.00%. Fixed; now scores 300/300 at distance 0.00. |
 | "Method B: 100.00% (60/60), avg distance 24.36" | **Unreproducible as stated** | Ran at `neighbors=12`, which yields distances of 81–107 — all above the 58.0 threshold — so the true result was 0/60. The 24.36 figure does not correspond to this configuration. |
 | "LBPH tuning to `neighbors=12` captures larger spatial facial structures" | **Incorrect** | This change is what broke the system: it made the model unloadable *and* pushed every distance above the recognition threshold. |
 | "Augmentation expands the dataset to 1,200 training images" | **Accurate but counterproductive** | It did produce 1,200 samples. For LBPH that is 4× the storage and 4× the per-prediction cost for no measured accuracy gain. |
@@ -171,9 +171,17 @@ Two further defects were found and fixed while restoring the system:
 
 ```bash
 python train_model.py             # builds trainer/trainer.yml + labels.txt
-python test_accuracy.py           # Method A (in-sample sanity check)
-python test_heldout_accuracy.py   # Method B (80/20 held-out)
+python eval_accuracy.py           # Method A (in-sample sanity check)
+python eval_heldout_accuracy.py   # Method B (80/20 held-out)
 ```
 
 Environment: Python 3.11, `opencv-contrib-python==4.10.0.84`,
-`mediapipe==0.10.14`. See [`requirements.txt`](../requirements.txt).
+`mediapipe==0.10.14`. Exact pins are in [`pyproject.toml`](../pyproject.toml)
+(`requirements.txt` was removed in Phase 1); install with
+`pip install -e ".[dev]"`.
+
+> **Renamed in Phase 1.** These harnesses were `test_accuracy.py` and
+> `test_heldout_accuracy.py`. The `test_` prefix made `pytest` import them at
+> collection time, and they are measurement scripts with no assertions rather
+> than unit tests. The real unit tests live in [`tests/`](../tests/) and run
+> with `pytest`.

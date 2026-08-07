@@ -109,3 +109,53 @@ ways:
 The same applies to reproduction steps, setup instructions, and any `bash`
 block in a handover: if it was not run, mark it untested rather than implying
 it works.
+
+---
+
+## L5 — "It imports" is not "it runs". Exercise a request, not a module
+
+**2026-08-08, Phase 1 configuration migration.**
+
+I replaced hardcoded credentials with `from config.settings import settings`
+at the top of `app.py`. That file already had a route handler named
+`settings()` roughly 1,350 lines further down, which rebound the name.
+
+Everything I checked said it was fine:
+
+- `import app` succeeded
+- the app booted and logged the model load
+- 27 unit tests passed
+- `ruff check` was clean
+- `py_compile` was clean
+
+All five agreed because `app.secret_key = settings.secret_key` executes at
+import, *before* the `def` runs. But `get_db_connection()` executes per
+**request**, by which time `settings` was the view function — so every
+database call in the application would have raised
+`AttributeError: 'function' object has no attribute 'db_kwargs'`. Login,
+students, reports, attendance: all of it.
+
+**Why it slipped through.** Python rebinding a module-level name is legal, so
+no tool complains. Ruff's F811 covers redefinition of an *unused* name; this
+one was used, just earlier in the file. And my verification step was
+`import app`, which is precisely the operation that cannot see the problem.
+
+**How to apply:**
+
+- **Verify at the layer the code actually runs at.** For a web app that means
+  driving a request through `app.test_client()` and asserting on the status
+  code, not importing the module. The fix was confirmed with
+  `POST /login` → 302, `GET /students` → 200 against the real database.
+- **After adding a module-level import to a large file, check the name is not
+  redefined later** — `grep -n "^def <name>\|^<name> ="`. Long route files are
+  where this bites, because the import and the collision are thousands of
+  lines apart.
+- A whole-file `ast` scan is cheap and catches the class rather than the
+  instance: `tests/test_no_import_shadowing.py` does this for all eight
+  modules without importing any of them, which matters here because importing
+  `recognize_face` costs 9 s and importing `capture_dataset` opens a camera.
+
+This is the third defect in this project that **looked like working code**
+(after PE-0 and the `test_accuracy.py` zero-image bug). The pattern is
+consistent: the check that would have caught it was one layer away from where
+the failure lives.

@@ -58,6 +58,7 @@ Severity: **P0** blocker · **P1** critical · **P2** major · **P3** minor
 | FS-9 | P2 | `capture_face` **inserts the student row before capture succeeds**. Cancel the capture (ESC) and you get a student with no dataset — which then permanently breaks training (FS-2). This is how the current outage was created. | [app.py:180-231](../app.py#L180-L231) |
 | FS-10 | P2 | No attendance edit/override UI. A false negative cannot be corrected by the instructor. | — |
 | FS-11 | P3 | `/export_excel` ignores all report filters and always exports the entire table to a fixed filename. | [app.py:1332-1360](../app.py#L1332-L1360) |
+| **FS-12** | **P1** | **A fatal failure during enrolment is reported to the operator as success.** Every bare `sys.exit()` in `capture_dataset.py` exits with status **0** — a missing `face_preprocessing`, missing arguments, or an empty student ID all exit cleanly. `app.py` treats returncode 0 as success, then runs an automatic retrain. The operator sees a completed enrolment for a student who has no dataset, which then feeds FS-2/FS-9. **Found during Phase 1; deliberately not fixed there** to keep that phase behaviour-neutral — it changes enrolment control flow and cannot be verified without a camera. One-line change per exit site: `sys.exit(1)`. | [capture_dataset.py](../capture_dataset.py) exit sites vs [app.py:241](../app.py#L241); found 2026-08-08 |
 
 ### 2.2 Performance Efficiency
 
@@ -312,14 +313,26 @@ out by a later retrain: `.bak` holds only the previous generation, so
 `trainer/trainer.yml.bak` is now a 55 MB copy of the working model. Nothing
 to clean up by hand.
 
-### Phase 1 — Foundation *(≈1 day)*
-- [ ] `git init`; `.gitignore` for `.venv/`, `trainer/`, `dataset/`, `__pycache__/`, `*.db`, `*.csv`, `*.xlsx`, `.env`; commit the current state as the baseline
-- [ ] Delete dead code: `attendance_system.py`, `admin_panel.py`, `db_connection.py`, `main.py`, `face_detect.py`, `camera_test.py`, `find_camera.py`, `test_webcam.py`, `test_db.py`, `mediapipe_test.py`, `hello_flutter/`, root-level generated CSV/XLSX/DB (MA-3, MA-7, MA-8, CO-6)
-- [ ] Add `pyproject.toml`, pin all deps exactly, document Python 3.11 (PO-1)
-- [ ] Add `config/settings.py` + `.env.example`; remove every hardcoded credential and path (SE-8, PO-2)
-- [ ] Replace all `print()` with `logging` (rotating file + console, levels) (RE-5)
-- [ ] Add `pytest`, `ruff`, `pytest-cov`; CI workflow running lint + tests
-- [ ] **Verify:** `ruff check` clean, `pytest` runs (even if near-empty), app still boots
+### Phase 1 — Foundation ✅ *(done 2026-08-08)*
+- [x] `git init`; `.gitignore` for `.venv/`, `trainer/`, `dataset/`, `__pycache__/`, `*.db`, `*.csv`, `*.xlsx`, `.env`; commit the current state as the baseline
+- [x] Delete dead code: `attendance_system.py`, `admin_panel.py`, `db_connection.py`, `main.py`, `face_detect.py`, `camera_test.py`, `find_camera.py`, `test_webcam.py`, `test_db.py`, `mediapipe_test.py`, `hello_flutter/`, root-level generated CSV/XLSX/DB (MA-3, MA-7, MA-8, CO-6) — **143 files**, plus `haarcascade/` and the empty `static/js/script.js`
+- [x] Add `pyproject.toml`, pin all deps exactly, document Python 3.11 (PO-1) — `requirements.txt` deleted; `requires-python = ">=3.11,<3.12"` because `mediapipe==0.10.14` has no 3.12 wheels
+- [x] Add `config/settings.py` + `.env.example`; remove every hardcoded credential and path (SE-8, PO-2) — pydantic-settings; `SECRET_KEY` required with no default; `RECOGNITION_THRESHOLD` centralised (value unchanged at 58.0); `LBPH_PARAMS` deliberately left as a code constant so a `.env` edit cannot reintroduce PE-0
+- [x] Replace all `print()` with `logging` (rotating file + console, levels) (RE-5) — 178 call sites; hot-path recognition diagnostics routed to `DEBUG`
+- [x] Add `pytest`, `ruff`, `pytest-cov` — **35 tests, 3.0 s**; evaluators renamed `test_*.py` → `eval_*.py`
+- [ ] ~~CI workflow running lint + tests~~ → **deferred at the user's request** (2026-08-08). No git remote exists yet. `ruff` and `pytest` are configured in `pyproject.toml` and run locally; add `.github/workflows/ci.yml` when there is somewhere to push.
+- [x] **Verify:** `ruff check` clean, `pytest` runs, app still boots — all seven checks pass, and `eval_heldout_accuracy.py` still reports **60/60 at avg distance 34.95**, identical to the Phase 0 baseline
+
+**Bug found and fixed during Phase 1 verification.** `app.py` imported the
+config object as a bare `settings`, and the `def settings()` route handler
+lower in the file shadowed it. Import succeeded, the app booted, 27 tests
+passed and `ruff` was clean — but `get_db_connection()` runs per request, so
+**every database call would have raised `AttributeError`**. Fixed by aliasing
+the import to `app_config`; `tests/test_no_import_shadowing.py` now checks all
+eight modules for this class of bug by parsing them with `ast`. See
+[`lessons.md` L5](lessons.md).
+
+**New finding:** FS-12 (§2.1) — enrolment reports fatal errors as success.
 
 ### Phase 2 — Security *(≈2 days)*
 - [ ] Hash passwords with `bcrypt`; migration to rehash existing rows; force change of the seeded `admin`/`admin` (SE-1)
@@ -414,7 +427,7 @@ to clean up by hand.
 | Phase | Completed | Notes |
 |---|---|---|
 | 0 | ☑ 2026-08-08 | Restored service. Root cause was deeper than the interrupted write: `neighbors=12` made the model both unpersistable (PE-0) and unmatchable (all distances above threshold). Model 1.835 GB → 55 MB, held-out 0/60 → 60/60, predictions 26× faster. Also fixed a `test_accuracy.py` bug that made it score 0 images, and rewrote `docs/walkthrough.md` with reproducible numbers. **Two data blockers remain** (missing student rows, empty subjects table) — operator action, not code. |
-| 1 | ☐ | |
+| 1 | ☑ 2026-08-08 | Foundation. Deleted 143 dead files (incl. `hello_flutter/`, `haarcascade/`); `pyproject.toml` with exact pins and a hard `<3.12` bound for mediapipe; `config/settings.py` (pydantic-settings) absorbing all credentials, paths and the recognition threshold; 178 `print()` → `logging` with hot-path diagnostics at DEBUG; 35 unit tests and a clean `ruff` gate. Held-out accuracy unchanged at **60/60, avg 34.95** — the refactor is behaviour-neutral. Caught an import-shadowing bug that would have broken every DB call at request time while passing every other check (L5). New finding **FS-12**. CI deferred at the user's request. |
 | 2 | ☐ | |
 | 3 | ☐ | |
 | 4 | ☐ | |
