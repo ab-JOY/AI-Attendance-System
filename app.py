@@ -1,36 +1,58 @@
-print("🔥 APP.PY IS RUNNING")
-
-from flask import Flask, render_template, request, redirect, url_for, session, Response, jsonify
-import mysql.connector
-import subprocess
+import logging
 import os
-import sys
-import stat
 import shutil
-import pandas as pd
-from recognize_face import (
-    start_camera,
-    stop_camera,
-    generate_frames
-)
-from train_model import train_model
+import stat
+import subprocess
+import sys
 
-from flask import send_file
+import mysql.connector
+import pandas as pd
+from flask import (
+    Flask,
+    Response,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    send_file,
+    session,
+    url_for,
+)
+
+from config.logging_config import configure_logging
+from config.settings import settings
+
+# app.py is the entry point, so it owns logging configuration for the process.
+#
+# This has to run BEFORE importing recognize_face, which loads the LBPH model
+# and constructs a MediaPipe FaceMesh at module scope (PE-4, deferred to
+# Phase 3) and logs the outcome of both. With no handlers attached yet those
+# startup messages - including "model failed to load" - would be discarded.
+# The noqa markers below come off when PE-4 is fixed and the import is cheap.
+configure_logging()
+
+from recognize_face import (  # noqa: E402
+    generate_frames,
+    start_camera,
+    stop_camera
+)
+from train_model import train_model  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.secret_key = "ai_attendance_secret_key"
+
+# Was hardcoded as "ai_attendance_secret_key" (SE-8). That value is in git
+# history, and a known Flask secret key means session cookies can be forged.
+# Now required from the environment - see .env.example.
+app.secret_key = settings.secret_key
 
 
 # ==============================
 # DATABASE CONNECTION
 # ==============================
 def get_db_connection():
-    return mysql.connector.connect(
-        host="127.0.0.1",
-        user="root",
-        password="",
-        database="attendancesystem_db"
-    )
+    return mysql.connector.connect(**settings.db_kwargs())
 
 # ==============================
 # DELETE READ-ONLY FILES/FOLDERS
@@ -215,15 +237,15 @@ def capture_face():
 
         if result.returncode == 0:
             # Auto-train LBPH model after capturing dataset
-            print("Auto-training model after dataset capture...")
+            logger.info("Auto-training model after dataset capture")
             train_success, train_msg = train_model()
-            print(f"Train result: {train_success} - {train_msg}")
+            logger.info("Train result: %s - %s", train_success, train_msg)
 
     except subprocess.CalledProcessError as error:
         if error.returncode == 2:
-            print("[INFO] Face capture cancelled by user.")
+            logger.info("Face capture cancelled by user")
             return redirect(url_for('students'))
-        print("CAPTURE DATASET SCRIPT ERROR:", error)
+        logger.exception("Capture dataset script failed")
         return f"Face capture failed with exit code {error.returncode}.", 500
     except Exception as e:
         return f"Camera Error: {e}", 500
@@ -244,8 +266,6 @@ def manage_students():
 
     cursor.execute("SELECT * FROM students ORDER BY name ASC")
     students = cursor.fetchall()
-
-    print(students)      # <-- ADD THIS
 
     cursor.close()
     conn.close()
@@ -347,7 +367,7 @@ def delete_student(student_id):
         if conn is not None:
             conn.rollback()
 
-        print("DELETE STUDENT PERMISSION ERROR:", error)
+        logger.exception("Delete student failed: dataset folder is in use")
 
         return (
             "The student's dataset folder is currently being used. "
@@ -360,7 +380,7 @@ def delete_student(student_id):
         if conn is not None:
             conn.rollback()
 
-        print("DELETE STUDENT DATABASE ERROR:", error)
+        logger.exception("Delete student failed: database error")
 
         return f"Database deletion error: {error}", 500
 
@@ -368,7 +388,7 @@ def delete_student(student_id):
         if conn is not None:
             conn.rollback()
 
-        print("DELETE STUDENT FOLDER ERROR:", error)
+        logger.exception("Delete student failed: could not remove dataset folder")
 
         return f"Could not delete dataset folder: {error}", 500
 
@@ -376,7 +396,7 @@ def delete_student(student_id):
         if conn is not None:
             conn.rollback()
 
-        print("DELETE STUDENT ERROR:", error)
+        logger.exception("Delete student failed")
 
         return f"Student deletion error: {error}", 500
 
@@ -426,7 +446,7 @@ def edit_student(student_id):
         )
 
     except mysql.connector.Error as error:
-        print("EDIT STUDENT DATABASE ERROR:", error)
+        logger.exception("Edit student failed: database error")
         return f"Database error: {error}", 500
 
     finally:
@@ -537,9 +557,8 @@ def update_student(student_id):
                 folder_was_renamed = True
 
             except PermissionError as error:
-                print(
-                    "DATASET RENAME PERMISSION ERROR:",
-                    error
+                logger.exception(
+                    "Dataset folder rename denied by the operating system"
                 )
 
                 return (
@@ -592,19 +611,18 @@ def update_student(student_id):
                 )
 
             except OSError as rename_error:
-                print(
-                    "COULD NOT RESTORE DATASET FOLDER:",
-                    rename_error
+                logger.exception(
+                    "Could not restore dataset folder after a failed update"
                 )
 
-        print("UPDATE STUDENT DATABASE ERROR:", error)
+        logger.exception("Update student failed: database error")
         return f"Database update error: {error}", 500
 
     except Exception as error:
         if conn is not None:
             conn.rollback()
 
-        print("UPDATE STUDENT ERROR:", error)
+        logger.exception("Update student failed")
         return f"Student update error: {error}", 500
 
     finally:
@@ -650,7 +668,7 @@ def recapture_face():
         student = cursor.fetchone()
 
     except mysql.connector.Error as error:
-        print("RECAPTURE DATABASE ERROR:", error)
+        logger.exception("Recapture failed: database error")
         return f"Database error: {error}", 500
 
     finally:
@@ -681,9 +699,8 @@ def recapture_face():
             )
 
     except PermissionError as error:
-        print(
-            "RECAPTURE FOLDER PERMISSION ERROR:",
-            error
+        logger.exception(
+            "Recapture failed: dataset folder is in use"
         )
 
         return (
@@ -694,7 +711,7 @@ def recapture_face():
         )
 
     except OSError as error:
-        print("RECAPTURE FOLDER ERROR:", error)
+        logger.exception("Recapture failed: could not remove old dataset folder")
 
         return (
             f"Could not remove the old dataset folder: {error}",
@@ -713,22 +730,22 @@ def recapture_face():
             check=True
         )
 
-        print(
-            "FACE RECAPTURE FINISHED:",
+        logger.info(
+            "Face recapture finished with exit code %s",
             result.returncode
         )
 
         # Auto-train LBPH model after recapturing face dataset
-        print("Auto-training model after face recapture...")
+        logger.info("Auto-training model after face recapture")
         train_success, train_msg = train_model()
-        print(f"Train result: {train_success} - {train_msg}")
+        logger.info("Train result: %s - %s", train_success, train_msg)
 
     except subprocess.CalledProcessError as error:
         if error.returncode == 2:
-            print("[INFO] Face recapture cancelled by user.")
+            logger.info("Face recapture cancelled by user")
             return redirect(url_for('manage_students'))
 
-        print("CAPTURE DATASET SCRIPT ERROR:", error)
+        logger.exception("Capture dataset script failed")
 
         return (
             f"Face capture failed with exit code "
@@ -737,7 +754,7 @@ def recapture_face():
         )
 
     except PermissionError as error:
-        print("CAPTURE DATASET PERMISSION ERROR:", error)
+        logger.exception("Permission denied starting the face-capture process")
 
         return (
             "Permission was denied while starting the face-capture "
@@ -746,7 +763,7 @@ def recapture_face():
         )
 
     except Exception as error:
-        print("CAMERA ERROR:", error)
+        logger.exception("Camera error during face recapture")
         return f"Camera error: {error}", 500
 
     return redirect(url_for('manage_students'))
@@ -1114,11 +1131,9 @@ def attendance():
 @app.route('/start-attendance', methods=['POST'])
 def start_attendance():
 
-    print("START ATTENDANCE ROUTE HIT")
-
     subject_code = request.form.get("subject_code")
 
-    print("SUBJECT RECEIVED:", subject_code)
+    logger.info("Start attendance requested for subject %s", subject_code)
 
     
 
@@ -1133,7 +1148,7 @@ def start_attendance():
 
         started = start_camera(subject_code)
 
-        print("CAMERA START RESULT:", started)
+        logger.info("Camera start result: %s", started)
 
         return jsonify({
             "success": started
@@ -1142,7 +1157,7 @@ def start_attendance():
 
     except Exception as e:
 
-        print("CAMERA ERROR:", e)
+        logger.exception("Camera error while starting attendance")
 
         return jsonify({
             "success": False,
@@ -1249,7 +1264,7 @@ def end_attendance():
         )
 
     except mysql.connector.Error as error:
-        print("END ATTENDANCE DATABASE ERROR:", error)
+        logger.exception("End attendance failed: database error")
         return f"Database error: {error}", 500
 
     finally:
@@ -1464,4 +1479,6 @@ def video_feed():
 # RUN APP
 # ==============================
 if __name__ == '__main__':
-    app.run(debug=False)
+    # Still the Flask development server binding loopback only - that is PO-4,
+    # scoped to a later phase. Only the debug flag moves to configuration here.
+    app.run(debug=settings.flask_debug)

@@ -1,51 +1,45 @@
+import logging
+import random
+import sys
+import threading
+import time
+from collections import Counter, deque
+from datetime import datetime
+
 import cv2
 import mediapipe as mp
-import sys
-import os
-import time
-import random
-import threading
 import mysql.connector
 
-from datetime import datetime
-from collections import deque, Counter
-
 from camera_utils import open_best_camera
+from config.settings import settings
 from face_preprocessing import align_face, preprocess_for_lbph
+
+logger = logging.getLogger(__name__)
 
 
 # =====================================================
 # PATHS
+#
+# Resolved from config/settings.py rather than derived from __file__, so a
+# deployment can relocate the biometric templates without editing source
+# (PO-2). Kept as str because cv2.face read/write predate os.PathLike.
 # =====================================================
 
-BASE_DIR = os.path.dirname(
-    os.path.abspath(__file__)
-)
+TRAINER_FILE = str(settings.trainer_file)
 
-TRAINER_FILE = os.path.join(
-    BASE_DIR,
-    "trainer",
-    "trainer.yml"
-)
-
-LABELS_FILE = os.path.join(
-    BASE_DIR,
-    "trainer",
-    "labels.txt"
-)
+LABELS_FILE = str(settings.labels_file)
 
 
 # =====================================================
 # CHECK OPENCV CONTRIB
 # =====================================================
 
-print("OpenCV Version:", cv2.__version__)
+logger.info("OpenCV version: %s", cv2.__version__)
 
 if not hasattr(cv2, "face"):
-    print("ERROR: OpenCV face module not found.")
-    print(
-        "Install: python -m pip install "
-        "opencv-contrib-python==4.10.0.84"
+    logger.error(
+        "OpenCV face module not found. Install with: "
+        "python -m pip install opencv-contrib-python==4.10.0.84"
     )
     sys.exit(1)
 
@@ -64,12 +58,12 @@ def load_model_and_labels():
     global recognizer
     global label_map
 
-    if not os.path.exists(TRAINER_FILE):
+    if not settings.trainer_file.exists():
         raise FileNotFoundError(
             f"trainer.yml was not found: {TRAINER_FILE}"
         )
 
-    if not os.path.exists(LABELS_FILE):
+    if not settings.labels_file.exists():
         raise FileNotFoundError(
             f"labels.txt was not found: {LABELS_FILE}"
         )
@@ -155,19 +149,20 @@ def load_model_and_labels():
     recognizer = new_recognizer
     label_map = new_label_map
 
-    print("Trainer loaded successfully.")
-    print(
-        "Loaded",
-        len(label_map),
-        "student identities."
+    logger.info(
+        "Trainer loaded successfully: %d student identities",
+        len(label_map)
     )
 
 
 try:
     load_model_and_labels()
-except Exception as error:
-    print("MODEL LOAD WARNING:", error)
-    print("Recognition will be unavailable until a model is trained.")
+except Exception:
+    logger.warning(
+        "Model load failed. Recognition is unavailable until a model is "
+        "trained.",
+        exc_info=True
+    )
     recognizer = None
     label_map = {}
 
@@ -189,7 +184,7 @@ face_mesh = mp_face_mesh.FaceMesh(
     min_tracking_confidence=0.55
 )
 
-print("MediaPipe Face Mesh loaded successfully.")
+logger.info("MediaPipe Face Mesh loaded successfully")
 
 
 # =====================================================
@@ -250,9 +245,16 @@ TRACK_MIN_SIZE_SIMILARITY = 0.40
 # Lower LBPH distance is better.
 # These are safe starting values and should later be
 # calibrated using held-out test images.
+#
+# RECOGNITION_THRESHOLD now comes from config/settings.py so production and
+# the eval_*.py harnesses read one value and cannot drift apart. It is still
+# 58.0; making it configurable is not the same as tuning it. See
+# tasks/lessons.md L2 - this threshold is calibrated against the distance
+# scale that LBPH_PARAMS in train_model.py produces, and changing either one
+# without the other silently rejects every face.
 # =====================================================
 
-RECOGNITION_THRESHOLD = 58.0
+RECOGNITION_THRESHOLD = settings.recognition_threshold
 CONFIRMATION_CONFIDENCE = 52.0
 
 PREDICTION_HISTORY_SIZE = 20
@@ -793,10 +795,7 @@ def save_attendance(student_id, subject, status):
 
     try:
         conn = mysql.connector.connect(
-            host="127.0.0.1",
-            user="root",
-            password="",
-            database="attendancesystem_db"
+            **settings.db_kwargs()
         )
 
         cursor = conn.cursor(
@@ -815,8 +814,8 @@ def save_attendance(student_id, subject, status):
         enrolled_student = cursor.fetchone()
 
         if enrolled_student is None:
-            print(
-                f"[REJECTED] {student_id} is not enrolled."
+            logger.warning(
+                "Rejected attendance: %s is not enrolled", student_id
             )
             return False
 
@@ -867,21 +866,19 @@ def save_attendance(student_id, subject, status):
 
             conn.commit()
 
-            print(
-                f"[ATTENDANCE] {student_id} - "
-                f"{official_name}"
+            logger.info(
+                "Attendance recorded: %s - %s", student_id, official_name
             )
 
         else:
-            print(
-                f"[ATTENDANCE] {student_id} "
-                "already recorded."
+            logger.info(
+                "Attendance already recorded for %s", student_id
             )
 
         return True
 
-    except mysql.connector.Error as error:
-        print("DATABASE ERROR:", error)
+    except mysql.connector.Error:
+        logger.exception("Database error while saving attendance")
         return False
 
     finally:
@@ -909,12 +906,12 @@ def start_camera(subject_code):
 
     try:
         load_model_and_labels()
-    except Exception as error:
-        print("MODEL RELOAD ERROR:", error)
+    except Exception:
+        logger.exception("Model reload failed, cannot start attendance")
         return False
 
     if recognizer is None or not label_map:
-        print("No trained model available.")
+        logger.error("No trained model available, cannot start attendance")
         return False
 
     current_subject = subject_code
@@ -928,7 +925,7 @@ def start_camera(subject_code):
         cap = open_best_camera()
 
         if cap is None or not cap.isOpened():
-            print("Cannot open camera")
+            logger.error("Cannot open camera")
             cap = None
             return False
 
@@ -952,10 +949,9 @@ def start_camera(subject_code):
             cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
         )
 
-        print(
-            "Camera resolution:",
+        logger.info(
+            "Camera resolution: %sx%s",
             actual_width,
-            "x",
             actual_height
         )
 
@@ -965,7 +961,7 @@ def start_camera(subject_code):
         camera_reader = CameraReader(cap)
 
     attendance_running = True
-    print("Attendance Started")
+    logger.info("Attendance started")
 
     return True
 
@@ -989,7 +985,7 @@ def stop_camera():
         cap.release()
         cap = None
 
-    print("Attendance Ended")
+    logger.info("Attendance ended")
 
 
 # =====================================================
@@ -1556,16 +1552,23 @@ def generate_frames():
                             processed_face
                         )
 
-                        print(
-                            f"Track: {track_id} | "
-                            f"Label: {label} | "
-                            f"Distance: {confidence:.1f}"
+                        # DEBUG, not INFO: this fires once per tracked face
+                        # per frame. At ~15 fps with three faces in shot that
+                        # is 45 lines a second, which makes the log useless
+                        # for anything else. Set LOG_LEVEL=DEBUG in .env when
+                        # you are actually diagnosing recognition.
+                        logger.debug(
+                            "Track: %s | Label: %s | Distance: %.1f",
+                            track_id,
+                            label,
+                            confidence
                         )
 
-                except Exception as error:
-                    print(
-                        "RECOGNITION ERROR:",
-                        error
+                except Exception:
+                    logger.debug(
+                        "Recognition failed for track %s",
+                        track_id,
+                        exc_info=True
                     )
                     quality_issue = "Face alignment failed"
 

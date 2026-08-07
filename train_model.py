@@ -1,38 +1,32 @@
+import logging
 import os
 import sys
+
 import cv2
 import numpy as np
 
+from config.settings import settings
 from face_preprocessing import preprocess_for_lbph
+
+logger = logging.getLogger(__name__)
 
 
 # =====================================================
 # SETTINGS
+#
+# Paths come from config/settings.py (PO-2). They stay module-level strings
+# rather than being read from `settings` at each use, because
+# write_model_atomically() reads them as globals and the unit tests in
+# tests/test_write_model_atomically.py monkeypatch them to a tmp_path.
 # =====================================================
 
-BASE_DIR = os.path.dirname(
-    os.path.abspath(__file__)
-)
+DATASET_DIR = str(settings.dataset_dir)
 
-DATASET_DIR = os.path.join(
-    BASE_DIR,
-    "dataset"
-)
+TRAINER_DIR = str(settings.trainer_dir)
 
-TRAINER_DIR = os.path.join(
-    BASE_DIR,
-    "trainer"
-)
+TRAINER_FILE = str(settings.trainer_file)
 
-TRAINER_FILE = os.path.join(
-    TRAINER_DIR,
-    "trainer.yml"
-)
-
-LABELS_FILE = os.path.join(
-    TRAINER_DIR,
-    "labels.txt"
-)
+LABELS_FILE = str(settings.labels_file)
 
 # The new capture program normally creates 100 images.
 # Requiring at least 70 prevents incomplete datasets from
@@ -176,19 +170,17 @@ def write_model_atomically(recognizer, label_dict):
 # =====================================================
 
 def train_model():
-    print("OpenCV Version:", cv2.__version__)
+    logger.info("OpenCV version: %s", cv2.__version__)
 
     if not hasattr(cv2, "face"):
-        print("ERROR: OpenCV Contrib is not installed.")
-        print(
-            "Install it using: python -m pip install "
-            "opencv-contrib-python==4.10.0.84"
+        logger.error(
+            "OpenCV Contrib is not installed. Install it with: "
+            "python -m pip install opencv-contrib-python==4.10.0.84"
         )
         return False, "OpenCV Contrib is not installed."
 
     if not os.path.isdir(DATASET_DIR):
-        print("ERROR: Dataset folder was not found:")
-        print(DATASET_DIR)
+        logger.error("Dataset folder was not found: %s", DATASET_DIR)
         return False, f"Dataset folder was not found: {DATASET_DIR}"
 
     os.makedirs(
@@ -215,9 +207,8 @@ def train_model():
         )
 
         if parsed is None:
-            print(
-                "WARNING: Ignoring invalid dataset folder:",
-                folder_name
+            logger.warning(
+                "Ignoring invalid dataset folder: %s", folder_name
             )
             continue
 
@@ -245,27 +236,25 @@ def train_model():
     }
 
     if duplicate_student_ids:
-        print("=" * 60)
-        print("ERROR: DUPLICATE STUDENT DATASET FOLDERS")
-        print("=" * 60)
+        logger.error("Duplicate student dataset folders found")
 
         for student_id, folders in (
             duplicate_student_ids.items()
         ):
-            print("Student ID:", student_id)
+            logger.error(
+                "  student %s appears in: %s",
+                student_id,
+                ", ".join(folders)
+            )
 
-            for folder_name in folders:
-                print("  -", folder_name)
-
-        print()
-        print(
-            "Keep only one correct dataset folder for each "
-            "student ID, then run training again."
+        logger.error(
+            "Keep only one correct dataset folder for each student ID, "
+            "then run training again."
         )
         return False, "Duplicate student dataset folders found."
 
     if not folder_records:
-        print("ERROR: No valid student dataset folders found.")
+        logger.error("No valid student dataset folders found")
         return False, "No valid student dataset folders found."
 
     faces = []
@@ -275,14 +264,9 @@ def train_model():
 
     current_label = 0
 
-    print("=" * 60)
-    print("AI ATTENDANCE - TRAIN MODEL")
-    print("=" * 60)
-    print(
-        "Shared preprocessing: resize to 200x200 + CLAHE"
-    )
-    print(
-        "Each dataset image will be processed exactly once."
+    logger.info(
+        "Training start: shared preprocessing (resize 200x200 + CLAHE), "
+        "each dataset image processed exactly once"
     )
 
     for record in folder_records:
@@ -294,7 +278,7 @@ def train_model():
             "folder_path"
         ]
 
-        print("\nProcessing:", folder_name)
+        logger.info("Processing: %s", folder_name)
 
         student_faces = []
         skipped_images = 0
@@ -319,7 +303,7 @@ def train_model():
             )
 
             if image is None:
-                print("Skipped unreadable image:", filename)
+                logger.warning("Skipped unreadable image: %s", filename)
                 skipped_images += 1
                 continue
 
@@ -328,19 +312,18 @@ def train_model():
                     image
                 )
 
-            except Exception as error:
-                print(
-                    "Skipped preprocessing error:",
+            except Exception:
+                logger.warning(
+                    "Skipped image with preprocessing error: %s",
                     filename,
-                    "-",
-                    error
+                    exc_info=True
                 )
                 skipped_images += 1
                 continue
 
             if processed_face.shape != (200, 200):
-                print(
-                    "Skipped unexpected image size:",
+                logger.warning(
+                    "Skipped image with unexpected size: %s %s",
                     filename,
                     processed_face.shape
                 )
@@ -352,22 +335,22 @@ def train_model():
                 processed_face
             )
 
-        print("Usable Images :", usable_count)
-        print("Skipped Images:", skipped_images)
+        logger.info(
+            "  usable images: %d, skipped: %d",
+            usable_count,
+            skipped_images
+        )
 
         # One incomplete folder must not block every other student.
         # Skip it, keep training the rest, and report it back to the
         # caller so the operator knows who still needs a recapture.
         if usable_count < MIN_IMAGES_PER_STUDENT:
-            print(
-                "WARNING: Skipping this student - too few usable images."
-            )
-            print(
-                f"Required: {MIN_IMAGES_PER_STUDENT} | "
-                f"Found: {usable_count}"
-            )
-            print(
-                "Recapture this student, then train again."
+            logger.warning(
+                "Skipping %s - too few usable images (required %d, found "
+                "%d). Recapture this student, then train again.",
+                folder_name,
+                MIN_IMAGES_PER_STUDENT,
+                usable_count
             )
 
             skipped_folders.append(folder_name)
@@ -386,7 +369,7 @@ def train_model():
         current_label += 1
 
     if not faces:
-        print("ERROR: No training images were loaded.")
+        logger.error("No training images were loaded")
 
         if skipped_folders:
             return False, (
@@ -396,17 +379,17 @@ def train_model():
 
         return False, "No training images were loaded."
 
-    print("\n" + "=" * 60)
-    print("DATASET SUMMARY")
-    print("=" * 60)
-    print("Persons:", len(label_dict))
-    print("Images :", len(faces))
+    logger.info(
+        "Dataset summary: %d person(s), %d image(s)",
+        len(label_dict),
+        len(faces)
+    )
 
     recognizer = cv2.face.LBPHFaceRecognizer_create(
         **LBPH_PARAMS
     )
 
-    print("\nTraining LBPH model...")
+    logger.info("Training LBPH model with %s", LBPH_PARAMS)
 
     recognizer.train(
         faces,
@@ -416,7 +399,7 @@ def train_model():
         )
     )
 
-    print("Saving model...")
+    logger.info("Saving model")
 
     try:
         write_model_atomically(
@@ -425,43 +408,31 @@ def train_model():
         )
 
     except Exception as error:
-        print("ERROR: Could not save the trained model:", error)
-        print("The previously trained model was left in place.")
+        logger.exception(
+            "Could not save the trained model. The previously trained "
+            "model was left in place."
+        )
         return False, f"Could not save the trained model: {error}"
 
     trainer_size = os.path.getsize(
         TRAINER_FILE
     )
 
-    print("\nTraining completed successfully.")
-    print("Trainer:", TRAINER_FILE)
-    print("Labels :", LABELS_FILE)
-    print(
-        f"Trainer Size: {trainer_size:,} bytes"
-    )
-
-    print("\nAssigned Labels")
+    logger.info("Training completed successfully")
+    logger.info("Trainer: %s (%s bytes)", TRAINER_FILE, f"{trainer_size:,}")
+    logger.info("Labels : %s", LABELS_FILE)
 
     for label, folder_name in (
         label_dict.items()
     ):
-        print(
-            f"{label} -> {folder_name}"
-        )
+        logger.info("  label %s -> %s", label, folder_name)
 
     if skipped_folders:
-        print()
-        print(
-            "WARNING: These students are NOT in the trained model "
-            "and will not be recognised:"
+        logger.warning(
+            "These students are NOT in the trained model and will not be "
+            "recognised: %s. Recapture their faces, then train again.",
+            ", ".join(skipped_folders)
         )
-
-        for folder_name in skipped_folders:
-            print("  -", folder_name)
-
-        print("Recapture their faces, then train again.")
-
-    print("=" * 60)
 
     if skipped_folders:
         return True, (
@@ -474,8 +445,12 @@ def train_model():
 
 
 if __name__ == "__main__":
+    # Entry point, so this process owns logging configuration. When
+    # train_model() is called from app.py instead, app.py has already
+    # configured logging and this block never runs.
+    from config.logging_config import configure_logging
+
+    configure_logging()
+
     success, msg = train_model()
-    if success:
-        sys.exit(0)
-    else:
-        sys.exit(1)
+    sys.exit(0 if success else 1)

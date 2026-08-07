@@ -1,36 +1,76 @@
 """
-One-click MySQL Database Setup Script for AI Attendance System.
-Creates 'attendancesystem_db' database, all required tables, and default admin user.
+One-click MySQL database setup for the AI Attendance System.
+
+Creates the configured database, all required tables, and the default admin
+user. Connection details come from config/settings.py (see .env.example), so
+this script and the application can no longer disagree about which server or
+database they are talking to.
+
+    python setup_db.py
+
+Known limitation, unchanged here: this file and database/schema.sql both
+define the schema and must be kept in sync by hand (PO-5). Replacing both
+with migrations is Phase 4 work.
 """
+
+import logging
+import re
 
 import mysql.connector
 
-def setup_database(host="127.0.0.1", user="root", password=""):
-    print("=" * 60)
-    print("AI ATTENDANCE SYSTEM - MYSQL DATABASE SETUP")
-    print("=" * 60)
-    
-    # Connect to MySQL server (without specifying DB name first)
+from config.logging_config import configure_logging
+from config.settings import settings
+
+logger = logging.getLogger(__name__)
+
+# MySQL identifiers cannot be passed as query parameters, so the database name
+# is interpolated into the DDL. It comes from configuration rather than from a
+# request, but interpolating an unvalidated string into SQL is the habit that
+# produces injection bugs, so it is checked against a strict allowlist first.
+_VALID_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def setup_database(host=None, user=None, password=None, database=None):
+    host = host if host is not None else settings.db_host
+    user = user if user is not None else settings.db_user
+    password = password if password is not None else settings.db_password
+    database = database if database is not None else settings.db_name
+
+    if not _VALID_IDENTIFIER.match(database):
+        logger.error(
+            "Refusing to use %r as a database name: letters, digits and "
+            "underscores only, and it may not start with a digit.",
+            database,
+        )
+        return False
+
+    logger.info("AI Attendance System - MySQL database setup")
+
+    # Connect to the MySQL server without selecting a database, since the
+    # database may not exist yet.
     try:
         conn = mysql.connector.connect(
             host=host,
+            port=settings.db_port,
             user=user,
-            password=password
+            password=password,
         )
         cursor = conn.cursor()
-        print(f"[OK] Connected to MySQL server at {host}")
-    except mysql.connector.Error as err:
-        print(f"[ERROR] Could not connect to MySQL server: {err}")
-        print("Make sure your MySQL Server (XAMPP/WAMP/MySQL Workbench) is running!")
+        logger.info("Connected to MySQL server at %s:%s", host, settings.db_port)
+    except mysql.connector.Error:
+        logger.exception(
+            "Could not connect to the MySQL server. Check that MySQL "
+            "(XAMPP/WAMP/Workbench) is running and that the credentials in "
+            ".env are correct."
+        )
         return False
 
     try:
-        # Create database
-        cursor.execute("CREATE DATABASE IF NOT EXISTS attendancesystem_db")
-        print("[OK] Database 'attendancesystem_db' verified/created.")
-        
-        cursor.execute("USE attendancesystem_db")
-        
+        cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{database}`")
+        logger.info("Database %r verified/created", database)
+
+        cursor.execute(f"USE `{database}`")
+
         # 1. Admin Table
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS admin (
@@ -39,8 +79,8 @@ def setup_database(host="127.0.0.1", user="root", password=""):
             password VARCHAR(255) NOT NULL
         )
         """)
-        print("  - Table 'admin' verified.")
-        
+        logger.info("Table 'admin' verified")
+
         # 2. Instructors Table
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS instructors (
@@ -50,8 +90,8 @@ def setup_database(host="127.0.0.1", user="root", password=""):
             password VARCHAR(255) NOT NULL
         )
         """)
-        print("  - Table 'instructors' verified.")
-        
+        logger.info("Table 'instructors' verified")
+
         # 3. Students Table
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS students (
@@ -63,8 +103,8 @@ def setup_database(host="127.0.0.1", user="root", password=""):
             section VARCHAR(100)
         )
         """)
-        print("  - Table 'students' verified.")
-        
+        logger.info("Table 'students' verified")
+
         # 4. Subjects Table
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS subjects (
@@ -79,8 +119,8 @@ def setup_database(host="127.0.0.1", user="root", password=""):
             time_out VARCHAR(50)
         )
         """)
-        print("  - Table 'subjects' verified.")
-        
+        logger.info("Table 'subjects' verified")
+
         # 5. Attendance Table
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS attendance (
@@ -95,29 +135,37 @@ def setup_database(host="127.0.0.1", user="root", password=""):
             INDEX idx_date_subject (attendance_date, subject_code)
         )
         """)
-        print("  - Table 'attendance' verified.")
-        
+        logger.info("Table 'attendance' verified")
+
         # Seed Default Admin
         cursor.execute("SELECT * FROM admin WHERE id = 1")
         if cursor.fetchone() is None:
-            cursor.execute("INSERT INTO admin (id, username, password) VALUES (1, 'admin', 'admin')")
+            cursor.execute(
+                "INSERT INTO admin (id, username, password) "
+                "VALUES (1, 'admin', 'admin')"
+            )
             conn.commit()
-            print("[OK] Seeded default Admin user (Username: 'admin' | Password: 'admin')")
+            # SE-1: this password is stored in plaintext and the credentials
+            # are public knowledge. Phase 2 replaces this with a bcrypt hash
+            # and a forced change on first login.
+            logger.warning(
+                "Seeded the default admin account (username 'admin', "
+                "password 'admin'). Change it before any real use."
+            )
         else:
-            print("[OK] Admin user exists.")
-            
-        print("=" * 60)
-        print("SUCCESS! Database setup completed cleanly.")
-        print("You can now run 'python app.py'")
-        print("=" * 60)
+            logger.info("Admin user already exists")
+
+        logger.info("Database setup completed cleanly. You can now run: python app.py")
         return True
-        
-    except mysql.connector.Error as err:
-        print(f"[ERROR] SQL execution error: {err}")
+
+    except mysql.connector.Error:
+        logger.exception("SQL execution error during database setup")
         return False
     finally:
         cursor.close()
         conn.close()
 
+
 if __name__ == "__main__":
+    configure_logging()
     setup_database()

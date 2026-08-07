@@ -1,0 +1,115 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-attendance-system"
+version = "0.1.0"
+description = "Face-recognition attendance system (LBPH + MediaPipe FaceMesh)"
+readme = "README.md"
+
+# ---------------------------------------------------------------------------
+# The upper bound is load-bearing, not cosmetic.
+#
+# mediapipe 0.10.14 publishes no wheels for Python 3.12 or later. Relaxing
+# this to ">=3.11" lets `pip install` succeed on 3.12 and then fail at
+# `import mediapipe`, which is a far worse failure mode. Do not widen it
+# without first confirming a mediapipe release that supports the newer
+# interpreter AND re-running the held-out evaluator.
+# ---------------------------------------------------------------------------
+requires-python = ">=3.11,<3.12"
+
+# ---------------------------------------------------------------------------
+# Every direct dependency is pinned to the exact version this system was
+# measured against (PO-1). requirements.txt previously used ">=" for 5 of 7,
+# so two installs a week apart could produce different behaviour with no
+# change in the source tree.
+#
+# opencv-contrib-python (not opencv-python) is required: the LBPH recogniser
+# lives in cv2.face, which ships only in contrib. train_model.py and
+# recognize_face.py both guard on hasattr(cv2, "face") for this reason.
+# ---------------------------------------------------------------------------
+dependencies = [
+    "Flask==3.1.3",
+    "mysql-connector-python==26.7.0",
+    "opencv-contrib-python==4.10.0.84",
+    "mediapipe==0.10.14",
+    "pandas==3.0.5",
+    "openpyxl==3.1.5",
+    "numpy==2.4.6",
+    "pydantic-settings==2.15.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-cov==7.1.0",
+    "ruff==0.16.1",
+]
+
+[tool.setuptools]
+# Flat-layout modules at the repository root. Phase 5 (MA-1) moves these into
+# src/attendance/; until then, list them explicitly so setuptools does not try
+# to auto-discover dataset/, trainer/, templates/ and friends as packages.
+py-modules = [
+    "app",
+    "recognize_face",
+    "train_model",
+    "capture_dataset",
+    "camera_utils",
+    "face_preprocessing",
+    "setup_db",
+]
+packages = ["config"]
+
+
+# ===========================================================================
+# RUFF
+# ===========================================================================
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".venv", "dataset", "trainer", "reports"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # import sorting
+    "B",    # bugbear
+    "UP",   # pyupgrade
+    "SIM",  # flake8-simplify
+    "C4",   # comprehensions
+    "G",    # flake8-logging-format - enforces lazy %-style logging calls
+]
+
+[tool.ruff.lint.per-file-ignores]
+# recognize_face.py falls back to a private mediapipe path when
+# mp.solutions.face_mesh is unavailable, which requires an import inside an
+# except block (E402). The fallback is load-bearing across mediapipe builds.
+"recognize_face.py" = ["E402"]
+
+# The evaluators print their results as a report to stdout by design - they
+# are human-facing measurement harnesses, not application code, so the
+# logging-format rules do not apply.
+"eval_accuracy.py" = ["T201"]
+"eval_heldout_accuracy.py" = ["T201"]
+
+
+# ===========================================================================
+# PYTEST
+# ===========================================================================
+[tool.pytest.ini_options]
+# testpaths is what keeps pytest out of eval_*.py at collection time.
+#
+# This matters more than it looks: importing recognize_face costs ~9 s and a
+# 55 MB allocation because it loads the LBPH model at module scope
+# (recognize_face.py:167) and constructs a MediaPipe FaceMesh (:184). That is
+# PE-4, deferred to Phase 3. Nothing under tests/ may import recognize_face
+# or app until it is fixed.
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "slow: builds a synthetic dataset and trains a real LBPH model",
+]

@@ -1,6 +1,13 @@
-import cv2
+import logging
 import os
 
+import cv2
+
+logger = logging.getLogger(__name__)
+
+# Runtime state in a root-level text file is PO-3. Left as-is for now: moving
+# it into configuration or the database is a later phase, and it is read by
+# the enrolment subprocess as well as the web app.
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "selected_camera.txt")
 
 def get_saved_camera_index():
@@ -19,9 +26,9 @@ def save_camera_index(index):
     try:
         with open(CONFIG_FILE, "w") as f:
             f.write(str(index))
-        print(f"[CAMERA CONFIG] Saved default camera index: {index}")
-    except Exception as e:
-        print(f"[CAMERA CONFIG] Error saving camera index: {e}")
+        logger.info("Saved default camera index: %s", index)
+    except Exception:
+        logger.warning("Could not save camera index %s", index, exc_info=True)
 
 def get_available_cameras(max_tested=5):
     """Returns a list of working camera index integers."""
@@ -37,27 +44,25 @@ def get_available_cameras(max_tested=5):
 
 def open_camera_by_index(index):
     """Tries to open a specific camera index."""
-    print(f"Trying Camera Index {index}...")
+    logger.debug("Trying camera index %s", index)
     cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
     if not cap.isOpened():
-        print(f"Failed to open Camera {index}.")
+        logger.debug("Failed to open camera %s", index)
         return None
     ret, frame = cap.read()
     if not ret or frame is None:
-        print(f"Camera {index} opened but cannot read frame.")
+        logger.debug("Camera %s opened but cannot read a frame", index)
         cap.release()
         return None
-        
+
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    print(f"SUCCESS -> Opened Camera {index} ({width}x{height})")
+    logger.info("Opened camera %s (%dx%d)", index, width, height)
     return cap
 
 def open_best_camera(preferred_index=None):
     """Opens preferred camera, saved camera, or first available camera."""
-    print("=" * 60)
-    print("Searching cameras...")
-    print("=" * 60)
+    logger.info("Searching for an available camera")
 
     # 1. Try preferred index if passed explicitly
     if preferred_index is not None:
@@ -82,5 +87,5 @@ def open_best_camera(preferred_index=None):
         if cap is not None:
             return cap
 
-    print("No camera detected.")
+    logger.error("No camera detected")
     return None

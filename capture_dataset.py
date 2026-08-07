@@ -1,28 +1,56 @@
-import cv2
-import mediapipe as mp
+import ctypes
+import logging
 import os
 import sys
 import time
-import ctypes
+
+import cv2
+import mediapipe as mp
 import numpy as np
 
 from camera_utils import (
+    get_available_cameras,
+    get_saved_camera_index,
     open_best_camera,
     open_camera_by_index,
-    get_available_cameras,
-    save_camera_index,
-    get_saved_camera_index
+    save_camera_index
 )
+from config.logging_config import configure_logging
+from config.settings import settings
+
+# This module runs as a subprocess launched by app.py, so it is an entry point
+# and owns logging configuration for its own process. app.py branches on the
+# exit code only and never reads this process's stdout, so routing output
+# through logging cannot affect enrolment.
+#
+# Everything here executes at module scope with no main() guard - that is
+# MA-2, scoped to Phase 5. Importing this module runs a camera capture
+# session; do not import it to inspect it.
+configure_logging()
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# FS-12 (found during Phase 1, not fixed here): every bare `sys.exit()` below
+# exits with status 0, which app.py reads as success (app.py:238) and follows
+# with an automatic retrain. A fatal startup failure in this script is
+# therefore reported to the operator as a completed enrolment.
+#
+# The exit codes are left exactly as they were so this phase stays
+# behaviour-neutral and the held-out result remains comparable. Fixing them
+# is a one-line change per site, but it alters the enrolment control flow,
+# which cannot be tested without a camera. See tasks/todo.md FS-12.
+# ---------------------------------------------------------------------------
 
 try:
     from face_preprocessing import align_face
 
-except ImportError as error:
-    print("=" * 60)
-    print("ERROR: face_preprocessing.py could not be imported.")
-    print("Place face_preprocessing.py beside capture_dataset.py.")
-    print(error)
-    print("=" * 60)
+except ImportError:
+    logger.critical(
+        "face_preprocessing.py could not be imported. Place it beside "
+        "capture_dataset.py.",
+        exc_info=True
+    )
     sys.exit()
 
 
@@ -31,9 +59,8 @@ except ImportError as error:
 # =====================================================
 
 if len(sys.argv) < 3:
-    print(
-        "Usage: python capture_dataset.py "
-        "<student_id> <student_name>"
+    logger.error(
+        "Usage: python capture_dataset.py <student_id> <student_name>"
     )
     sys.exit()
 
@@ -42,7 +69,7 @@ student_name = sys.argv[2].strip()
 preferred_camera_idx = sys.argv[3].strip() if len(sys.argv) > 3 else None
 
 if not student_id or not student_name:
-    print("ERROR: Student ID and name are required.")
+    logger.error("Student ID and name are required")
     sys.exit()
 
 
@@ -50,17 +77,12 @@ if not student_id or not student_name:
 # DATASET DIRECTORY
 # =====================================================
 
-BASE_DIR = os.path.dirname(
-    os.path.abspath(__file__)
-)
-
 folder_name = (
     f"{student_id}_{student_name}"
 )
 
 dataset_path = os.path.join(
-    BASE_DIR,
-    "dataset",
+    str(settings.dataset_dir),
     folder_name
 )
 
@@ -159,7 +181,7 @@ face_mesh = mp_face_mesh.FaceMesh(
     min_tracking_confidence=0.50
 )
 
-print("MediaPipe Face Mesh loaded.")
+logger.info("MediaPipe Face Mesh loaded")
 
 
 # =====================================================
@@ -169,7 +191,7 @@ print("MediaPipe Face Mesh loaded.")
 cap = open_best_camera(preferred_index=preferred_camera_idx)
 
 if cap is None or not cap.isOpened():
-    print("ERROR: Cannot open any camera.")
+    logger.error("Cannot open any camera")
 
     face_mesh.close()
     cv2.destroyAllWindows()
@@ -206,19 +228,17 @@ actual_height = int(
     )
 )
 
-print(
-    "Camera resolution:",
+logger.info(
+    "Camera resolution: %sx%s",
     actual_width,
-    "x",
     actual_height
 )
 
-print("=" * 60)
-print("AI ATTENDANCE DATASET CAPTURE")
-print("=" * 60)
-print("Student ID :", student_id)
-print("Student    :", student_name)
-print("=" * 60)
+logger.info(
+    "Dataset capture starting for student %s (%s)",
+    student_id,
+    student_name
+)
 
 
 # =====================================================
@@ -1044,10 +1064,7 @@ def save_face_image(face):
     )
 
     if not saved:
-        print(
-            "ERROR: Could not save:",
-            image_path
-        )
+        logger.error("Could not save image: %s", image_path)
 
         return False
 
@@ -1056,11 +1073,8 @@ def save_face_image(face):
 
     reset_hold_counter()
 
-    print(
-        f"Captured {count}/"
-        f"{MAX_IMAGES}: "
-        f"{image_path}"
-    )
+    # DEBUG: one line per captured frame, 100 per enrolment.
+    logger.debug("Captured %d/%d: %s", count, MAX_IMAGES, image_path)
 
     return True
 
@@ -1076,7 +1090,7 @@ try:
         ret, frame = cap.read()
 
         if not ret:
-            print("Camera read error.")
+            logger.error("Camera read error")
             break
 
         display = frame.copy()
@@ -1894,31 +1908,19 @@ try:
 
         if count >= MAX_IMAGES:
 
-            print("=" * 60)
-            print(
-                "DATASET CAPTURE COMPLETE"
-            )
-            print("=" * 60)
-            print(
-                "Student :",
-                student_name
-            )
-            print(
-                "Images  :",
-                count
-            )
-            print(
-                "Saved to:",
+            logger.info(
+                "Dataset capture complete: %s, %d images, saved to %s",
+                student_name,
+                count,
                 dataset_path
             )
-            print("=" * 60)
 
             cv2.waitKey(1000)
             break
 
         # Check if window 'X' close button was clicked
         if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
-            print("[CANCEL] Capture window closed by user.")
+            logger.info("Capture window closed by user")
             cancelled = True
             break
 
@@ -1929,16 +1931,18 @@ try:
 
         if key == 27:
 
-            print(
-                "Capture cancelled by ESC key."
-            )
+            logger.info("Capture cancelled by ESC key")
             cancelled = True
 
             break
 
         elif key in (ord('c'), ord('C')):
 
-            print(f"[CAMERA SWITCH] Current Camera: {current_camera_idx}. Searching next camera...")
+            logger.info(
+                "Camera switch requested, current camera %s. Searching for "
+                "the next one.",
+                current_camera_idx
+            )
             available_cams = get_available_cameras()
             if len(available_cams) > 1:
                 # Get next index
@@ -1948,7 +1952,7 @@ try:
                 except ValueError:
                     next_idx = available_cams[0]
 
-                print(f"[CAMERA SWITCH] Switching to Camera Index {next_idx}...")
+                logger.info("Switching to camera index %s", next_idx)
                 cap.release()
                 new_cap = open_camera_by_index(next_idx)
                 if new_cap is not None:
@@ -1958,12 +1962,12 @@ try:
                     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                     current_camera_idx = next_idx
                     save_camera_index(next_idx)
-                    print(f"[CAMERA SWITCH] Successfully switched to Camera {next_idx}")
+                    logger.info("Successfully switched to camera %s", next_idx)
                 else:
                     # Reopen previous
                     cap = open_camera_by_index(current_camera_idx)
             else:
-                print("[CAMERA SWITCH] Only 1 working camera detected on system.")
+                logger.info("Only one working camera detected on this system")
 
 
 # =====================================================
@@ -1978,7 +1982,7 @@ finally:
     face_mesh.close()
     cv2.destroyAllWindows()
 
-    print("Camera released.")
+    logger.info("Camera released")
 
     if 'cancelled' in locals() and cancelled:
         sys.exit(2)
