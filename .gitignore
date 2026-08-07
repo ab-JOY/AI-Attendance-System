@@ -56,12 +56,3 @@ config/local_settings.py
 *.swp
 .DS_Store
 Thumbs.db
-
-# =====================================================
-# FLUTTER (hello_flutter/ is scheduled for deletion in Phase 1;
-# these keep its build output out of the baseline commit)
-# =====================================================
-hello_flutter/build/
-hello_flutter/.dart_tool/
-hello_flutter/android/.gradle/
-hello_flutter/**/Flutter/ephemeral/
