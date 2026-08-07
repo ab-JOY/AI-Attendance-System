@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Edit Subject</title>
+
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+
+<body>
+
+<!-- ================= SIDEBAR ================= -->
+<div class="sidebar">
+
+    <h2>AI Attendance</h2>
+
+    <ul>
+        <li><a href="/dashboard">Dashboard</a></li>
+        <li><a href="/students">Students</a></li>
+        <li><a href="/manage_students">Manage Students</a></li>
+        <li><a href="/subjects">Subjects</a></li>
+        <li><a href="/attendance">Attendance</a></li>
+        <li><a href="/reports">Reports</a></li>
+        <li><a href="/settings">Settings</a></li>
+        <li><a href="/logout">Logout</a></li>
+    </ul>
+
+</div>
+
+<!-- ================= MAIN CONTENT ================= -->
+<div class="main-content">
+
+    <h1>Edit Subject</h1>
+
+    <div class="form-container">
+
+        <form action="{{ url_for('update_subject', id=subject.id) }}" method="POST">
+
+            <label for="subject_code">Subject Code</label>
+            <input
+                type="text"
+                id="subject_code"
+                name="subject_code"
+                value="{{ subject.subject_code }}"
+                required>
+
+            <label for="subject_name">Subject Name</label>
+            <input
+                type="text"
+                id="subject_name"
+                name="subject_name"
+                value="{{ subject.subject_name }}"
+                required>
+
+            <label for="instructor">Instructor</label>
+            <input
+                type="text"
+                id="instructor"
+                name="instructor"
+                value="{{ subject.instructor }}"
+                required>
+
+            <label for="day">Day</label>
+            <select id="day" name="day" required>
+                <option value="{{ subject.day }}" selected>{{ subject.day }}</option>
+                <option value="Monday">Monday</option>
+                <option value="Tuesday">Tuesday</option>
+                <option value="Wednesday">Wednesday</option>
+                <option value="Thursday">Thursday</option>
+                <option value="Friday">Friday</option>
+            </select>
+
+            <label for="course">Course</label>
+            <input
+                type="text"
+                id="course"
+                name="course"
+                value="{{ subject.course }}"
+                required>
+
+            <label for="section">Section</label>
+            <input
+                type="text"
+                id="section"
+                name="section"
+                value="{{ subject.section }}"
+                required>
+
+            <label for="time_in">Time In</label>
+            <input
+                type="time"
+                id="time_in"
+                name="time_in"
+                value="{{ subject.time_in }}"
+                required>
+
+            <label for="time_out">Time Out</label>
+            <input
+                type="time"
+                id="time_out"
+                name="time_out"
+                value="{{ subject.time_out }}"
+                required>
+
+            <button type="submit">Update Subject</button>
+
+        </form>
+
+        <br>
+
+        <a href="{{ url_for('subjects') }}" class="back-btn">← Back to Subjects</a>
+
+    </div>
+
+</div>
+
+</body>
+</html>

@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>Manage Students</title>
+
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='css/style.css') }}"
+    >
+</head>
+
+<body>
+
+{% include 'sidebar.html' %}
+
+<!-- ================= MAIN CONTENT ================= -->
+<div class="main-content">
+
+    <h1>Manage Students</h1>
+
+    <!-- ================= SEARCH ================= -->
+    <div class="form-container">
+
+        <form
+            method="POST"
+            action="{{ url_for('search_student') }}"
+        >
+
+            <input
+                type="text"
+                name="query"
+                placeholder="Search by Student ID or Name"
+                required
+            >
+
+            <button type="submit">
+                🔍 Search
+            </button>
+
+        </form>
+
+    </div>
+
+    <br>
+
+    <!-- ================= STUDENT TABLE ================= -->
+    <h2>Student List</h2>
+
+    <table class="subject-table">
+
+        <thead>
+
+            <tr>
+                <th>Student ID</th>
+                <th>Name</th>
+                <th>College Department</th>
+                <th>Program</th>
+                <th>Year Level</th>
+                <th>Section</th>
+                <th>Actions</th>
+            </tr>
+
+        </thead>
+
+        <tbody>
+
+        {% if students %}
+
+            {% for student in students %}
+
+            <tr>
+
+                <td>
+                    {{ student.student_id }}
+                </td>
+
+                <td>
+                    {{ student.name }}
+                </td>
+
+                <td>
+                    {{ student.college_department }}
+                </td>
+
+                <td>
+                    {{ student.program }}
+                </td>
+
+                <td>
+                    {{ student.year_level }}
+                </td>
+
+                <td>
+                    {{ student.section }}
+                </td>
+
+                <td>
+
+                    <!-- EDIT STUDENT -->
+                    <a
+                        href="{{ url_for(
+                            'edit_student',
+                            student_id=student.student_id
+                        ) }}"
+                        class="action-btn"
+                    >
+                        ✏️ Edit
+                    </a>
+
+                    |
+
+                    <!-- DELETE STUDENT -->
+                    <form
+                        action="{{ url_for(
+                            'delete_student',
+                            student_id=student.student_id
+                        ) }}"
+                        method="POST"
+                        style="display:inline;"
+                        onsubmit="return confirm(
+                            'Are you sure you want to permanently delete {{ student.name }}?'
+                        );"
+                    >
+
+                        <button
+                            type="submit"
+                            class="action-btn"
+                        >
+                            ❌ Delete
+                        </button>
+
+                    </form>
+
+                    <br><br>
+
+                    <!-- RECAPTURE FACE -->
+                    <form
+                        action="{{ url_for('recapture_face') }}"
+                        method="POST"
+                        style="display:inline;"
+                        onsubmit="return confirm(
+                            'Recapture face for {{ student.name }}?'
+                        );"
+                    >
+
+                        <input
+                            type="hidden"
+                            name="student_id"
+                            value="{{ student.student_id }}"
+                        >
+
+                        <button
+                            type="submit"
+                            class="action-btn"
+                        >
+                            📷 Recapture Face
+                        </button>
+
+                    </form>
+
+                </td>
+
+            </tr>
+
+            {% endfor %}
+
+        {% else %}
+
+            <tr>
+
+                <td colspan="7">
+                    No students found.
+                </td>
+
+            </tr>
+
+        {% endif %}
+
+        </tbody>
+
+    </table>
+
+</div>
+
+</body>
+</html>

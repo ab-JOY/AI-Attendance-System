@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Attendance Dashboard</title>
+
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+{% include 'sidebar.html' %}
+
+<div class="main-content">
+
+    {% if session['role'] == 'admin' %}
+        <h1>Admin Dashboard</h1>
+    {% else %}
+        <h1>Instructor Dashboard</h1>
+    {% endif %}
+
+    <div class="cards">
+
+        <div class="card">
+            <h2>Total Students</h2>
+            <p>0</p>
+        </div>
+
+        <div class="card">
+            <h2>Total Subjects</h2>
+            <p>0</p>
+        </div>
+
+        <div class="card">
+            <h2>Today's Attendance</h2>
+            <p>0</p>
+        </div>
+
+        <div class="card">
+            <h2>Active Sessions</h2>
+            <p>0</p>
+        </div>
+
+    </div>
+
+    <div class="welcome-box">
+
+        <h2>Welcome, {{ session['user'] }}</h2>
+
+        {% if session['role'] == 'admin' %}
+
+            <p>
+                You are logged in as Administrator.
+                You have full access to Students,
+                Subjects, Attendance, Reports,
+                and Settings.
+            </p>
+
+        {% elif session['role'] == 'instructor' %}
+
+            <p>
+                You are logged in as Instructor.
+                You can access Attendance and Reports.
+            </p>
+
+        {% endif %}
+
+    </div>
+
+</div>
+
+</body>
+</html>

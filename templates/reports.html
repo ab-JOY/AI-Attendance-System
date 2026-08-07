@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Attendance Reports</title>
+
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+
+<body>
+
+{% include 'sidebar.html' %}
+
+<div class="main-content">
+
+    <h1>Attendance Reports</h1>
+
+    <!-- REPORT FILTER -->
+    <div class="report-filter">
+
+        <form method="GET" action="{{ url_for('reports') }}">
+
+            <label for="date">Date</label>
+            <input
+                type="date"
+                id="date"
+                name="date"
+                value="{{ request.args.get('date','') }}">
+
+            <label for="subject">Subject</label>
+            <select id="subject" name="subject">
+
+                <option value="">
+                    All Subjects
+                </option>
+
+                {% for subject in subjects %}
+                <option
+                    value="{{ subject.subject_code }}"
+                    {% if request.args.get('subject') == subject.subject_code %}
+                    selected
+                    {% endif %}
+                >
+                    {{ subject.subject_code }} - {{ subject.subject_name }}
+                </option>
+                {% endfor %}
+
+            </select>
+
+            <button type="submit">
+                Generate Report
+            </button>
+
+            <!-- EXPORT EXCEL -->
+            <a href="{{ url_for('export_excel') }}"
+               class="export-btn">
+                Export Excel
+            </a>
+
+        </form>
+
+    </div>
+
+    <!-- SUMMARY -->
+    <div class="cards">
+
+        <div class="card">
+            <h2>Total Present</h2>
+            <p>{{ total_present }}</p>
+        </div>
+
+        <div class="card">
+            <h2>Total Absent</h2>
+            <p>{{ total_absent }}</p>
+        </div>
+
+        <div class="card">
+            <h2>Total Records</h2>
+            <p>{{ total_records }}</p>
+        </div>
+
+    </div>
+
+    <!-- REPORT TABLE -->
+    <table class="subject-table">
+
+        <thead>
+
+            <tr>
+                <th>Date</th>
+                <th>Student ID</th>
+                <th>Name</th>
+                <th>Subject Code</th>
+                <th>Time In</th>
+                <th>Status</th>
+            </tr>
+
+        </thead>
+
+        <tbody>
+
+        {% if records %}
+
+            {% for record in records %}
+
+            <tr>
+
+                <td>{{ record.attendance_date }}</td>
+
+                <td>{{ record.student_id }}</td>
+
+                <td>{{ record.student_name }}</td>
+
+                <td>{{ record.subject_code }}</td>
+
+                <td>{{ record.time_in }}</td>
+
+                <td>
+
+                    {% if record.status == "Present" %}
+
+                        <span class="status-present">
+                            Present
+                        </span>
+
+                    {% elif record.status == "Absent" %}
+
+                        <span class="status-absent">
+                            Absent
+                        </span>
+
+                    {% else %}
+
+                        <span class="status-late">
+                            {{ record.status }}
+                        </span>
+
+                    {% endif %}
+
+                </td>
+
+            </tr>
+
+            {% endfor %}
+
+        {% else %}
+
+            <tr>
+
+                <td colspan="6" class="no-records">
+                    No attendance records found.
+                </td>
+
+            </tr>
+
+        {% endif %}
+
+        </tbody>
+
+    </table>
+
+</div>
+
+</body>
+</html>

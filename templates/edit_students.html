@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Edit Student</title>
+
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+
+<body>
+
+{% include 'sidebar.html' %}
+
+<div class="main-content">
+
+    <h1>Edit Student</h1>
+
+    <div class="form-container">
+
+        <form action="{{ url_for('update_student', student_id=student.student_id) }}"
+              method="POST">
+
+            <!-- Student ID -->
+            <label for="student_id"><strong>Student ID</strong></label>
+
+            <input
+                type="text"
+                id="student_id"
+                value="{{ student.student_id }}"
+                readonly>
+
+            <!-- Student Name -->
+            <label for="name"><strong>Student Name</strong></label>
+
+            <input
+                type="text"
+                id="name"
+                name="name"
+                value="{{ student.name }}"
+                required>
+
+            <!-- College Department -->
+            <label for="college_department"><strong>College Department</strong></label>
+
+            <select
+                id="college_department"
+                name="college_department"
+                required>
+
+                <option value="College of Computing"
+                    {% if student.college_department == "College of Computing" %}selected{% endif %}>
+                    College of Computing
+                </option>
+
+                <option value="College of Engineering"
+                    {% if student.college_department == "College of Engineering" %}selected{% endif %}>
+                    College of Engineering
+                </option>
+
+                <option value="College of Business"
+                    {% if student.college_department == "College of Business" %}selected{% endif %}>
+                    College of Business
+                </option>
+
+                <option value="College of Education"
+                    {% if student.college_department == "College of Education" %}selected{% endif %}>
+                    College of Education
+                </option>
+
+            </select>
+
+            <!-- Program -->
+            <label for="program"><strong>Program</strong></label>
+
+            <select
+                id="program"
+                name="program"
+                required>
+
+                <option value="BSCS"
+                    {% if student.program == "BSCS" %}selected{% endif %}>
+                    BSCS
+                </option>
+
+                <option value="BSIT"
+                    {% if student.program == "BSIT" %}selected{% endif %}>
+                    BSIT
+                </option>
+
+                <option value="BSIS"
+                    {% if student.program == "BSIS" %}selected{% endif %}>
+                    BSIS
+                </option>
+
+                <option value="BSEd"
+                    {% if student.program == "BSEd" %}selected{% endif %}>
+                    BSEd
+                </option>
+
+            </select>
+
+            <!-- Year Level -->
+            <label for="year_level"><strong>Year Level</strong></label>
+
+            <select
+                id="year_level"
+                name="year_level"
+                required>
+
+                <option value="1"
+                    {% if student.year_level == "1" %}selected{% endif %}>
+                    1st Year
+                </option>
+
+                <option value="2"
+                    {% if student.year_level == "2" %}selected{% endif %}>
+                    2nd Year
+                </option>
+
+                <option value="3"
+                    {% if student.year_level == "3" %}selected{% endif %}>
+                    3rd Year
+                </option>
+
+                <option value="4"
+                    {% if student.year_level == "4" %}selected{% endif %}>
+                    4th Year
+                </option>
+
+            </select>
+
+            <!-- Section -->
+            <label for="section"><strong>Section</strong></label>
+
+            <input
+                type="text"
+                id="section"
+                name="section"
+                value="{{ student.section }}"
+                required>
+
+            <button type="submit">
+                Update Student
+            </button>
+
+        </form>
+
+        <br>
+
+        <a href="{{ url_for('manage_students') }}">
+            <button type="button">
+                Back to Manage Students
+            </button>
+        </a>
+
+    </div>
+
+</div>
+
+</body>
+</html>

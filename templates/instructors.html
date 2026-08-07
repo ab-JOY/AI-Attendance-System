@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Instructor Registration</title>
+
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+<!-- ================= SIDEBAR ================= -->
+<div class="sidebar">
+
+    <h2>AI Attendance</h2>
+
+    <ul>
+        <li><a href="/dashboard">Dashboard</a></li>
+        <li><a href="/students">Students</a></li>
+        <li><a href="/manage_students">Manage Students</a></li>
+
+        <li><a href="/instructors">Instructors</a></li>
+        <li><a href="/manage_instructors">Manage Instructors</a></li>
+
+        <li><a href="/subjects">Subjects</a></li>
+        <li><a href="/attendance">Attendance</a></li>
+        <li><a href="/reports">Reports</a></li>
+        <li><a href="/settings">Settings</a></li>
+        <li><a href="/logout">Logout</a></li>
+    </ul>
+
+</div>
+
+<!-- ================= MAIN CONTENT ================= -->
+<div class="main-content">
+
+    <h1>Instructor Registration</h1>
+
+    <div class="form-container">
+
+        <form action="{{ url_for('add_instructor') }}"
+              method="POST">
+
+            <input type="number"
+                   name="instructor_id"
+                   placeholder="Instructor ID"
+                   required>
+
+            <input type="text"
+                   name="fullname"
+                   placeholder="Full Name"
+                   required>
+
+            <input type="password"
+                   name="password"
+                   placeholder="Password"
+                   required>
+
+            <button type="submit">
+                Register Instructor
+            </button>
+
+        </form>
+
+    </div>
+
+    <h2 style="margin-top:30px;">Registered Instructors</h2>
+
+    <table class="subject-table">
+
+        <tr>
+            <th>Instructor ID</th>
+            <th>Full Name</th>
+            <th>Password</th>
+        </tr>
+
+        {% if instructors %}
+            {% for instructor in instructors %}
+            <tr>
+                <td>{{ instructor.instructor_id }}</td>
+                <td>{{ instructor.fullname }}</td>
+                <td>{{ instructor.password }}</td>
+            </tr>
+            {% endfor %}
+        {% else %}
+            <tr>
+                <td colspan="3">No instructors found</td>
+            </tr>
+        {% endif %}
+
+    </table>
+
+</div>
+
+</body>
+</html>

@@ -1,0 +1,67 @@
+# =====================================================
+# BIOMETRIC / PERSONAL DATA - NEVER COMMIT
+#
+# dataset/ holds face images of identifiable students. Under RA 10173
+# (Philippine Data Privacy Act) these are sensitive personal information.
+# Git history is effectively permanent and is copied to every clone, so a
+# single accidental commit cannot be undone by deleting the files later.
+#
+# trainer/ holds LBPH histograms derived from those images - a derived
+# biometric template, and treated the same way here.
+# =====================================================
+dataset/
+trainer/
+
+# =====================================================
+# GENERATED REPORTS AND RUNTIME STATE
+# =====================================================
+attendance.csv
+attendance_report*.xlsx
+attendance_report_*.csv
+reports/*.csv
+reports/*.xlsx
+*.db
+active_session.txt
+selected_camera.txt
+
+# =====================================================
+# PYTHON
+# =====================================================
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+
+# =====================================================
+# SECRETS AND LOCAL CONFIG
+# =====================================================
+.env
+.env.*
+!.env.example
+config/local_settings.py
+*.log
+
+# =====================================================
+# EDITOR / OS
+# =====================================================
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# =====================================================
+# FLUTTER (hello_flutter/ is scheduled for deletion in Phase 1;
+# these keep its build output out of the baseline commit)
+# =====================================================
+hello_flutter/build/
+hello_flutter/.dart_tool/
+hello_flutter/android/.gradle/
+hello_flutter/**/Flutter/ephemeral/

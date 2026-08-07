@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0">
+
+    <title>Edit Instructor</title>
+
+    <link rel="stylesheet"
+          href="{{ url_for('static',
+          filename='css/style.css') }}">
+</head>
+<body>
+
+<div class="sidebar">
+
+    <h2>AI Attendance</h2>
+
+    <ul>
+        <li><a href="/dashboard">Dashboard</a></li>
+        <li><a href="/students">Students</a></li>
+        <li><a href="/manage_students">Manage Students</a></li>
+
+        <li><a href="/instructors">Instructors</a></li>
+        <li><a href="/manage_instructors">Manage Instructors</a></li>
+
+        <li><a href="/subjects">Subjects</a></li>
+        <li><a href="/attendance">Attendance</a></li>
+        <li><a href="/reports">Reports</a></li>
+        <li><a href="/settings">Settings</a></li>
+        <li><a href="/logout">Logout</a></li>
+    </ul>
+
+</div>
+
+<div class="main-content">
+
+    <h1>Edit Instructor</h1>
+
+    <div class="form-container">
+
+        <form action="{{ url_for('update_instructor',
+                                 id=instructor.id) }}"
+              method="POST">
+
+            <label for="instructor_id">Instructor ID</label>
+            <input
+                type="text"
+                id="instructor_id"
+                name="instructor_id"
+                value="{{ instructor.instructor_id }}"
+                required>
+
+            <label for="fullname">Full Name</label>
+            <input
+                type="text"
+                id="fullname"
+                name="fullname"
+                value="{{ instructor.fullname }}"
+                required>
+
+            <label for="username">Username</label>
+            <input
+                type="text"
+                id="username"
+                name="username"
+                value="{{ instructor.username }}"
+                required>
+
+            <label for="password">New Password (Optional)</label>
+            <input
+                type="password"
+                id="password"
+                name="password"
+                placeholder="Enter New Password (optional)">
+
+            <button type="submit">
+                Update Instructor
+            </button>
+
+        </form>
+
+    </div>
+
+</div>
+
+</body>
+</html>

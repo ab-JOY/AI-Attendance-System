@@ -1,0 +1,39 @@
+<div class="sidebar">
+
+    <h2>AI Attendance</h2>
+
+    <div class="user-info">
+        <h3>{{ session['user'] }}</h3>
+        <p>{{ session['role']|upper }}</p>
+    </div>
+
+    <ul>
+
+        {% if session['role'] == 'admin' %}
+
+            <li><a href="/dashboard">Dashboard</a></li>
+
+            <li><a href="/students">Students</a></li>
+            <li><a href="/manage_students">Manage Students</a></li>
+
+            <li><a href="/instructors">Instructors</a></li>
+            <li><a href="/manage_instructors">Manage Instructors</a></li>
+
+            <li><a href="/subjects">Subjects</a></li>
+            <li><a href="/attendance">Attendance</a></li>
+            <li><a href="/reports">Reports</a></li>
+            <li><a href="/settings">Settings</a></li>
+
+        {% elif session['role'] == 'instructor' %}
+
+            <li><a href="/dashboard">Dashboard</a></li>
+            <li><a href="/attendance">Attendance</a></li>
+            <li><a href="/reports">Reports</a></li>
+
+        {% endif %}
+
+        <li><a href="/logout">Logout</a></li>
+
+    </ul>
+
+</div>

@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Manage Instructors</title>
+
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+
+<body>
+
+<!-- ================= SIDEBAR ================= -->
+<div class="sidebar">
+
+    <h2>AI Attendance</h2>
+
+    <ul>
+        <li><a href="/dashboard">Dashboard</a></li>
+        <li><a href="/students">Students</a></li>
+        <li><a href="/manage_students">Manage Students</a></li>
+
+        <li><a href="/instructors">Register Instructor</a></li>
+        <li><a href="/manage_instructors">Manage Instructors</a></li>
+
+        <li><a href="/subjects">Subjects</a></li>
+        <li><a href="/attendance">Attendance</a></li>
+        <li><a href="/reports">Reports</a></li>
+        <li><a href="/settings">Settings</a></li>
+        <li><a href="/logout">Logout</a></li>
+    </ul>
+
+</div>
+
+<!-- ================= MAIN CONTENT ================= -->
+<div class="main-content">
+
+    <h1>Manage Instructors</h1>
+
+    <!-- SEARCH -->
+    <div class="form-container">
+
+        <form action="{{ url_for('search_instructor') }}"
+              method="POST">
+
+            <input type="text"
+                   name="query"
+                   placeholder="Search Instructor ID or Name">
+
+            <button type="submit">
+                Search
+            </button>
+
+        </form>
+
+    </div>
+
+    <h2 style="margin-top:30px;">Instructor List</h2>
+
+    <table class="subject-table">
+
+        <tr>
+            <th>Instructor ID</th>
+            <th>Full Name</th>
+            <th>Password</th>
+            <th>Actions</th>
+        </tr>
+
+        {% if instructors %}
+
+            {% for instructor in instructors %}
+
+            <tr>
+
+                <td>{{ instructor.instructor_id }}</td>
+                <td>{{ instructor.fullname }}</td>
+                <td>{{ instructor.password }}</td>
+
+                <td>
+
+                    <a href="{{ url_for('edit_instructor',
+                                        instructor_id=instructor.instructor_id) }}">
+                        Edit
+                    </a>
+
+                    |
+
+                    <a href="{{ url_for('delete_instructor',
+                                        instructor_id=instructor.instructor_id) }}"
+                       onclick="return confirm('Delete this instructor?')">
+                        Delete
+                    </a>
+
+                </td>
+
+            </tr>
+
+            {% endfor %}
+
+        {% else %}
+
+            <tr>
+                <td colspan="4">
+                    No instructors found.
+                </td>
+            </tr>
+
+        {% endif %}
+
+    </table>
+
+</div>
+
+</body>
+</html>

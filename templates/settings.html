@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>System Settings</title>
+
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+
+<body>
+
+{% include 'sidebar.html' %}
+
+<div class="main-content">
+
+    <h1>System Settings</h1>
+
+    <!-- =========================
+         ADMIN ACCOUNT
+    ========================== -->
+    <div class="settings-card">
+
+        <h2>Admin Account</h2>
+
+        <form action="/update_admin" method="POST">
+
+            <label for="username">Username</label>
+
+            <input
+                type="text"
+                id="username"
+                name="username"
+                value="{{ admin.username }}"
+                required>
+
+            <button type="submit">
+                Update Username
+            </button>
+
+        </form>
+
+    </div>
+
+    <!-- =========================
+         CHANGE PASSWORD
+    ========================== -->
+    <div class="settings-card">
+
+        <h2>Change Password</h2>
+
+        <form action="/change_password" method="POST">
+
+            <label for="current_password">Current Password</label>
+            <input
+                type="password"
+                id="current_password"
+                name="current_password"
+                placeholder="Current Password"
+                required>
+
+            <label for="new_password">New Password</label>
+            <input
+                type="password"
+                id="new_password"
+                name="new_password"
+                placeholder="New Password"
+                required>
+
+            <label for="confirm_password">Confirm Password</label>
+            <input
+                type="password"
+                id="confirm_password"
+                name="confirm_password"
+                placeholder="Confirm Password"
+                required>
+
+            <button type="submit">
+                Change Password
+            </button>
+
+        </form>
+
+    </div>
+
+    <!-- =========================
+         DATABASE MANAGEMENT
+    ========================== -->
+    <div class="settings-card">
+
+        <h2>Database Management</h2>
+
+        <a href="/backup_database">
+            <button type="button">
+                Backup Database
+            </button>
+        </a>
+
+    </div>
+
+    <!-- =========================
+         SYSTEM INFORMATION
+    ========================== -->
+    <div class="settings-card">
+
+        <h2>System Information</h2>
+
+        <p>
+            <strong>System:</strong>
+            AI-Based Facial Recognition Attendance System
+        </p>
+
+        <p>
+            <strong>Version:</strong>
+            1.0
+        </p>
+
+        <p>
+            <strong>Database:</strong>
+            MySQL
+        </p>
+
+        <p>
+            <strong>Recognition Algorithm:</strong>
+            LBPH
+        </p>
+
+        <p>
+            <strong>Liveness Detection:</strong>
+            Movement-Based Detection
+        </p>
+
+        <p>
+            <strong>Current User:</strong>
+            {{ session['user'] }}
+        </p>
+
+    </div>
+
+</div>
+
+</body>
+</html>

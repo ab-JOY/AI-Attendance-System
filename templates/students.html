@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Student Management</title>
+
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+
+<body>
+
+{% include 'sidebar.html' %}
+
+<!-- ================= MAIN CONTENT ================= -->
+<div class="main-content">
+
+    <h1>Student Management</h1>
+
+    <!-- ================= REGISTER STUDENT ================= -->
+    <div class="form-container">
+
+        <form action="{{ url_for('capture_face') }}" method="POST">
+
+            <label for="student_id">Student ID</label>
+            <input
+                type="text"
+                id="student_id"
+                name="student_id"
+                placeholder="Enter Student ID"
+                required>
+
+            <label for="name">Student Name</label>
+            <input
+                type="text"
+                id="name"
+                name="name"
+                placeholder="Enter Student Name"
+                required>
+
+            <label for="college_department">College Department</label>
+            <select
+                id="college_department"
+                name="college_department"
+                required>
+
+                <option value="">Select Department</option>
+                <option value="College of Computing">College of Computing</option>
+                <option value="College of Engineering">College of Engineering</option>
+                <option value="College of Business">College of Business</option>
+                <option value="College of Education">College of Education</option>
+
+            </select>
+
+            <label for="program">Program</label>
+            <select
+                id="program"
+                name="program"
+                required>
+
+                <option value="">Select Program</option>
+                <option value="BSCS">BSCS</option>
+                <option value="BSIT">BSIT</option>
+                <option value="BSIS">BSIS</option>
+                <option value="BSEd">BSEd</option>
+
+            </select>
+
+            <label for="year_level">Year Level</label>
+            <select
+                id="year_level"
+                name="year_level"
+                required>
+
+                <option value="">Select Year Level</option>
+                <option value="1">1st Year</option>
+                <option value="2">2nd Year</option>
+                <option value="3">3rd Year</option>
+                <option value="4">4th Year</option>
+
+            </select>
+
+            <label for="section">Section</label>
+            <input
+                type="text"
+                id="section"
+                name="section"
+                placeholder="Enter Section"
+                required>
+
+            <button type="submit">
+                Register Student & Capture Face
+            </button>
+
+        </form>
+
+    </div>
+
+    <!-- ================= STUDENT LIST ================= -->
+
+    <h2 style="margin-top:30px;">Registered Students</h2>
+
+    <table class="subject-table">
+
+        <tr>
+            <th>Student ID</th>
+            <th>Name</th>
+            <th>Department</th>
+            <th>Program</th>
+            <th>Year</th>
+            <th>Section</th>
+            <th>Actions</th>
+        </tr>
+
+        {% for student in students %}
+
+        <tr>
+
+            <td>{{ student.student_id }}</td>
+            <td>{{ student.name }}</td>
+            <td>{{ student.college_department }}</td>
+            <td>{{ student.program }}</td>
+            <td>{{ student.year_level }}</td>
+            <td>{{ student.section }}</td>
+
+            <td>
+
+                <a href="{{ url_for('edit_student', student_id=student.student_id) }}">
+                    Edit
+                </a>
+
+                |
+
+                <a href="{{ url_for('delete_student', student_id=student.student_id) }}"
+                   onclick="return confirm('Delete this student?')">
+
+                    Delete
+
+                </a>
+
+            </td>
+
+        </tr>
+
+        {% endfor %}
+
+    </table>
+
+</div>
+
+</body>
+</html>

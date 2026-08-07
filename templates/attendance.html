@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Attendance Monitoring</title>
+
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+
+<body>
+
+{% include 'sidebar.html' %}
+
+<div class="main-content">
+
+    <h1>Attendance Monitoring</h1>
+
+    <!-- CAMERA + SUMMARY -->
+    <div class="attendance-wrapper">
+
+        <!-- CAMERA PANEL -->
+        <div class="camera-panel">
+
+            <h2>Live Attendance Session</h2>
+
+            <div class="camera-feed">
+
+                <img
+                    id="camera"
+                    src=""
+                    alt="Live Camera"
+                    style="display:none;
+                           width:100%;
+                           height:100%;
+                           object-fit:cover;">
+
+                <p id="cameraText">
+                    Click Start Attendance Session
+                </p>
+
+            </div>
+
+            <div class="session-controls">
+
+                <!-- START -->
+                <form id="startForm">
+
+                    <input
+                        type="text"
+                        id="subject_code"
+                        name="subject_code"
+                        placeholder="Enter Subject Code (SE101)"
+                        required>
+
+                    <button
+                        type="submit"
+                        class="start-btn">
+
+                        Start Attendance Session
+
+                    </button>
+
+                </form>
+
+                <!-- END -->
+                <form
+                    id="endForm"
+                    action="{{ url_for('end_attendance') }}"
+                    method="POST">
+
+                    <input
+                        type="text"
+                        name="subject_code"
+                        placeholder="Enter Same Subject Code"
+                        required>
+
+                <button
+                    type="submit"
+                    class="stop-btn">
+
+                    End Attendance Session
+
+                </button>
+
+            </form>
+
+            </div>
+
+        </div>
+
+        <!-- SUMMARY -->
+        <div class="summary-panel">
+
+            <h2>Session Summary</h2>
+
+            <div class="stats-box">
+                <h3>Subject Code</h3>
+                <p>{{ selected_subject|default('---') }}</p>
+            </div>
+
+            <div class="stats-box">
+                <h3>Total Students</h3>
+                <p class="total-count">
+                    {{ total_students|default(0) }}
+                </p>
+            </div>
+
+            <div class="stats-box">
+                <h3>Present</h3>
+                <p class="present-count">
+                    {{ total_present|default(0) }}
+                </p>
+            </div>
+
+            <div class="stats-box">
+                <h3>Absent</h3>
+                <p class="absent-count">
+                    {{ total_absent|default(0) }}
+                </p>
+            </div>
+
+        </div>
+
+    </div>
+
+    <!-- RECOGNIZED STUDENTS -->
+    <div class="attendance-log">
+
+        <h2>Recognized Students</h2>
+
+        <div class="recognized-grid">
+
+            {% if session_results %}
+
+                {% for student in session_results %}
+
+                    {% if student.status == "Present" %}
+
+                    <div class="student-card">
+
+                        <div class="student-avatar">👤</div>
+
+                        <strong>{{ student.name }}</strong>
+
+                        <p>{{ student.student_id }}</p>
+
+                    </div>
+
+                    {% endif %}
+
+                {% endfor %}
+
+            {% else %}
+
+                <div class="empty-state">
+                    No students recognized yet
+                </div>
+
+            {% endif %}
+
+        </div>
+
+    </div>
+
+    <!-- ATTENDANCE LOG -->
+    <div class="attendance-log">
+
+        <h2>Attendance Log</h2>
+
+        <table>
+
+            <thead>
+
+            <tr>
+                <th>Student ID</th>
+                <th>Name</th>
+                <th>Status</th>
+            </tr>
+
+            </thead>
+
+            <tbody>
+
+            {% if session_results %}
+
+                {% for student in session_results %}
+
+                <tr>
+
+                    <td>{{ student.student_id }}</td>
+
+                    <td>{{ student.name }}</td>
+
+                    <td>{{ student.status }}</td>
+
+                </tr>
+
+                {% endfor %}
+
+            {% else %}
+
+                <tr>
+
+                    <td colspan="3">
+                        No attendance records yet
+                    </td>
+
+                </tr>
+
+            {% endif %}
+
+            </tbody>
+
+        </table>
+
+    </div>
+
+    <!-- SESSION RESULT -->
+    <div class="attendance-log">
+
+        <h2>Session Result</h2>
+
+        <table>
+
+            <thead>
+
+            <tr>
+                <th>Student ID</th>
+                <th>Name</th>
+                <th>Status</th>
+            </tr>
+
+            </thead>
+
+            <tbody>
+
+            {% if session_results %}
+
+                {% for student in session_results %}
+
+                <tr>
+
+                    <td>{{ student.student_id }}</td>
+
+                    <td>{{ student.name }}</td>
+
+                    <td>
+
+                        {% if student.status == "Present" %}
+
+                            <span class="status-present">
+                                Present
+                            </span>
+
+                        {% else %}
+
+                            <span class="status-absent">
+                                Absent
+                            </span>
+
+                        {% endif %}
+
+                    </td>
+
+                </tr>
+
+                {% endfor %}
+
+            {% else %}
+
+                <tr>
+
+                    <td colspan="3">
+                        Session not ended yet
+                    </td>
+
+                </tr>
+
+            {% endif %}
+
+            </tbody>
+
+        </table>
+
+    </div>
+
+</div>
+
+<script>
+
+
+// START CAMERA
+document.getElementById("startForm")
+.addEventListener("submit", async function(e){
+console.log("START BUTTON CLICKED");
+
+    e.preventDefault();
+
+
+    const subject =
+    document.getElementById("subject_code").value;
+
+
+    const response = await fetch("/start-attendance", {
+
+        method:"POST",
+
+        headers:{
+            "Content-Type":
+            "application/x-www-form-urlencoded"
+        },
+
+        body:
+        "subject_code=" + encodeURIComponent(subject)
+
+    });
+
+
+    const data = await response.json();
+
+
+    if(data.success){
+
+
+        document.getElementById("camera")
+        .style.display="block";
+
+
+        document.getElementById("cameraText")
+        .style.display="none";
+
+
+        document.getElementById("camera")
+        .src="/video_feed";
+
+
+    }
+
+    else{
+
+
+        alert(data.message);
+
+    }
+
+
+});
+
+
+
+
+// STOP CAMERA WHEN ENDING SESSION
+
+document.getElementById("endForm")
+.addEventListener("submit", async function(e){
+
+    e.preventDefault();
+
+
+    await fetch("/stop_camera",{
+
+        method:"POST"
+
+    });
+
+
+    this.submit();
+
+});
+
+</script>
+
+</body>
+</html>
