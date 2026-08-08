@@ -1,6 +1,5 @@
 import logging
 import random
-import threading
 import time
 from datetime import datetime
 
@@ -10,6 +9,7 @@ import mysql.connector
 from camera_utils import open_best_camera
 from config.settings import settings
 from face_preprocessing import align_face, preprocess_for_lbph
+from infra.camera import CameraReader
 from vision.geometry import get_face_box
 from vision.landmarks import LEFT_EYE_OUTER, NOSE_TIP, RIGHT_EYE_OUTER
 from vision.quality import RECOGNITION_QUALITY, quality_issue
@@ -318,44 +318,14 @@ STREAM_FRAME_DELAY = 0.0
 
 
 # =====================================================
-# THREADED CAMERA READER
+# THREADED CAMERA READER (PE-6)
+#
+# The class used to be defined here: a `while self._running: cap.read()` loop
+# with a plain Lock and no frame-ready signal. It moved to infra/camera.py and
+# grew a Condition, so the producer stops spinning when the camera stops
+# producing and the consumer stops re-processing frames it has already seen.
+# See that module for what each half of PE-6 actually cost.
 # =====================================================
-
-
-class CameraReader:
-    """Reads camera frames in a background thread
-    so the processing loop always gets the freshest
-    frame without blocking on USB/camera latency."""
-
-    def __init__(self, cap):
-        self._cap = cap
-        self._frame = None
-        self._ret = False
-        self._lock = threading.Lock()
-        self._running = True
-        self._thread = threading.Thread(
-            target=self._reader,
-            daemon=True
-        )
-        self._thread.start()
-
-    def _reader(self):
-        while self._running:
-            ret, frame = self._cap.read()
-            with self._lock:
-                self._ret = ret
-                self._frame = frame
-
-    def read(self):
-        with self._lock:
-            if self._frame is None:
-                return False, None
-            return self._ret, self._frame.copy()
-
-    def stop(self):
-        self._running = False
-        if self._thread.is_alive():
-            self._thread.join(timeout=2.0)
 
 
 # =====================================================
@@ -1245,7 +1215,11 @@ def _stream_frames():
         ret, frame = context.reader.read()
 
         if not ret:
-            time.sleep(0.02)
+            # PE-6: `read()` blocks until a frame the loop has not seen
+            # arrives, or its timeout expires, so there is nothing to sleep
+            # off here any more. Falling through re-snapshots the session,
+            # which is how a stop that happened while we were waiting is
+            # noticed.
             continue
 
         frame_height, frame_width = frame.shape[:2]
