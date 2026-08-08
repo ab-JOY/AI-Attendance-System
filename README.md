@@ -90,6 +90,13 @@ pytest -m "not slow"    # skip the tests that train a real LBPH model
 Set `LOG_LEVEL=DEBUG` in `.env` to see per-frame recognition diagnostics. They
 fire once per tracked face per frame, so expect the log to grow quickly.
 
+## Writing about this system?
+
+[`docs/limitations.md`](docs/limitations.md) is the single source for
+limitations, hard constraints and every measured figure, written to be handed
+to a technical writer. It also lists six claims from earlier documentation that
+could not be reproduced, so they are not recycled.
+
 ## Accuracy numbers: read this before quoting any
 
 Both evaluators report 100%. Neither figure means what it appears to.

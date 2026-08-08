@@ -302,6 +302,15 @@ From [`todo.md`](todo.md) §7.
    over plain HTTP served to another machine. Phase 2 left
    `SESSION_COOKIE_SECURE` at `false` for exactly that reason; HTTPS flips it
    to `true`. Both are Phase 5 items now — see `todo.md` §5.
+   ⚠️ **TLS approach decided 2026-08-08: self-signed in development, a real
+   certificate on deployment.** The trap is the certificate, not the plumbing.
+   A certificate with **no Subject Alternative Name is rejected outright** by
+   current browsers and no click-through overrides it — and on a LAN the SAN
+   must cover the *IP address*, which a quick `openssl req` will not include.
+   `mkcert` gets both right and leaves no warning screen to explain in front
+   of an examiner. `*.pem`, `*.key`, `*.crt` and `certs/` were added to
+   `.gitignore` today: a private key is a credential, and git history is
+   permanent.
    ⚠️ **Keep the vision logic on the server.** The browser supplies a camera
    and a screen; the face-geometry, blur, brightness and pose checks stay
    server-side. Reimplementing them in JavaScript recreates MA-4, which

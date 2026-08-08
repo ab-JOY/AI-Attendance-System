@@ -51,6 +51,21 @@ logs/
 *.log
 
 # =====================================================
+# TLS CERTIFICATES AND KEYS
+# =====================================================
+# Development uses a self-signed certificate (see docs/limitations.md §2.6).
+# A private key is a credential: committing one is the same class of mistake
+# as the hardcoded SECRET_KEY that Phase 1 removed, and git history is
+# permanent. The deployment certificate must never be in here either.
+*.pem
+*.key
+*.crt
+*.cer
+*.pfx
+*.p12
+certs/
+
+# =====================================================
 # EDITOR / OS
 # =====================================================
 .idea/

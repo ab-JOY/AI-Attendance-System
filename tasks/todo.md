@@ -409,8 +409,14 @@ database. Both restored; see [`lessons.md` L6](lessons.md).
 - [ ] **Serve the application over HTTPS.** *New, and a prerequisite for the
       item below rather than a polish task.* `getUserMedia` is only available
       in a secure context, so browser enrolment cannot work over plain HTTP to
-      another machine. Flip `SESSION_COOKIE_SECURE` to `true` in the same
-      change (SE-11) and update `.env.example`.
+      another machine. **Self-signed in development, a real certificate on
+      deployment** (user, 2026-08-08). Flip `SESSION_COOKIE_SECURE` to `true`
+      in the same change (SE-11) and update `.env.example`.
+      ⚠️ The certificate **must carry a Subject Alternative Name** covering the
+      hostname *or IP* used to reach it — a common-name-only certificate is
+      rejected outright and no exception can override that. Prefer `mkcert`
+      over `openssl req`: correct SANs, and no warning screen to explain
+      during a defense. Keys are gitignored; never commit one.
 - [ ] ~~Refactor `capture_dataset.py` into functions with a `main()` guard
       (MA-2)~~ → **superseded: replace it.** Browser-side capture
       (`getUserMedia`) uploading frames to an admin-only, CSRF-protected,
@@ -492,7 +498,13 @@ answered, so Phase 3 can start; Q2 and Q3 block Phases 5 and 6.*
    **What it obliges, and this is the part that matters for the defense.** At `neighbors=8` the model costs ~18.3 MB per enrolled student, and `cv::FileStorage` cannot read a model back somewhere between 0.57 GB and 1.84 GB (measured, §3a). That puts the hard ceiling at roughly **31–100 students, with the lower bound being the safe planning figure** — below a single large class. This is not hypothetical: exceeding it reproduces exactly the outage Phase 0 recovered from, where OpenCV writes a model it then refuses to read. An examiner asking "does this scale to a real classroom?" must get a measured number and an honest "no, and here is why" — not a hand-wave. Producing that figure is Phase 6 evidence work and is cheap, since the measurement already exists.
 2. ~~**Deployment topology.**~~ ✅ **Decided 2026-08-08 by the user: move enrolment into the browser.** `getUserMedia` + upload; the `subprocess` + server-side OpenCV window design goes. This resolves **CO-3**, and **CO-1, CO-2 and PO-6 fall out with it** — `cv2.CAP_DSHOW` and `ctypes.windll` are the Windows-only pieces, and both live in the capture path that is being deleted.
 
-   **⚠️ This has a hard prerequisite, and it is not negotiable: TLS.** Browsers expose `getUserMedia` only in a *secure context* — HTTPS, or `localhost`. On a plain-HTTP origin served to another machine the camera call does not prompt and does not fail gracefully; it rejects. **So "enrolment in the browser" and "no TLS" cannot both be true.** Serving the app over HTTPS is therefore a Phase 5 deliverable rather than a nice-to-have, and it flips `SESSION_COOKIE_SECURE` to `true` at the same time (SE-11, currently `false` precisely because there is no TLS). Budget for it; discovering it half-way through the rewrite is expensive.
+   **⚠️ This has a hard prerequisite, and it is not negotiable: TLS.** Browsers expose `getUserMedia` only in a *secure context* — HTTPS, or `localhost`. On a plain-HTTP origin served to another machine the camera call does not prompt and does not fail gracefully; it rejects. **So "enrolment in the browser" and "no TLS" cannot both be true.** Serving the app over HTTPS is therefore a Phase 5 deliverable rather than a nice-to-have, and it flips `SESSION_COOKIE_SECURE` to `true` at the same time (SE-11, currently `false` precisely because there is no TLS).
+
+   **TLS approach — decided 2026-08-08 by the user: self-signed certificate in development, a proper certificate on deployment.** Three things about that which are cheaper to know now than to discover mid-sprint:
+   - **A certificate with no Subject Alternative Name is rejected outright**, and no click-through can override it — modern browsers stopped honouring the common name years ago. On a LAN the app will be reached by IP, so the SAN must contain that address as an `IP:` entry. A generated-in-thirty-seconds `openssl req` certificate typically has no SAN at all.
+   - **A self-signed certificate does give a secure context once the exception is accepted**, so `getUserMedia` works. The cost is an interstitial warning on first visit per browser profile.
+   - **Prefer a locally-trusted dev CA (`mkcert`) over a bare self-signed certificate.** It generates correct SANs and installs a CA into the OS and browser trust stores, so there is no warning at all. The reason is not comfort: a browser security warning on a projector during the defense invites "so is it secure?", and answering that costs more time than the setup would have.
+   - **Certificates and keys are gitignored** (`*.pem`, `*.key`, `*.crt`, `certs/`, added 2026-08-08). A private key is a credential; committing one is the same class of mistake as the hardcoded `SECRET_KEY` Phase 1 removed, and git history is permanent.
 
    **Recommended split, stated so it can be argued with before anyone builds it:** the *browser* supplies a camera and a screen; **all vision logic stays on the server.** The page captures frames and uploads them, the server runs the existing face-geometry, blur, brightness and pose checks and returns the verdict the UI displays. The alternative — reimplementing the quality gates in JavaScript with MediaPipe Web — means two implementations of the same thresholds, which is **MA-4 all over again**, and MA-4 is a Phase 3 task to *delete* a duplicate, not create one.
 
