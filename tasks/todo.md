@@ -377,10 +377,29 @@ database. Both restored; see [`lessons.md` L6](lessons.md).
 
 ### Phase 3 — Recognition engine *(≈3 days)*
 - [x] ~~**Decide the recognition backend**~~ ✅ **Decided 2026-08-08 (user): keep LBPH, no second backend** — see §7 Q1. `neighbors=8` is already in place from Phase 0 (**measured** 1.835 GB → 0.220 GB, load 183 s → 18 s, dims 262,144 → 16,384), so **no code change is needed for this item**. PE-0 is fixed; PE-1 and PE-2 are now documented limitations rather than open defects. The rest of Phase 3 is unblocked and proceeds as written.
-- [ ] Extract `vision/validation.py` as the **single** face-geometry gate used by both enrolment and recognition; delete the duplicates (MA-4)
-- [ ] Extract the per-track state machine from `generate_frames()` into a testable `TrackState` class; target <60 lines and ≤3 nesting levels in the loop (MA-12)
+- [x] Extract `vision/validation.py` as the **single** face-geometry gate used by both enrolment and recognition; delete the duplicates (MA-4) ✅ **2026-08-08.** One implementation, two declared profiles. **Deviation from the literal wording, decided with the user:** `RECOGNITION_PROFILE` and `ENROLMENT_PROFILE` sit side by side in one file rather than collapsing into a single threshold set, because `capture_dataset.py` collects 50 of its 100 images per student at LEFT/RIGHT/UP/DOWN poses and recognition's frontal-only nose rule (0.28 × width) would make those stages uncollectable. The duplicate *code* is deleted; the divergence is now declared, documented and tested (`test_turned_head_separates_the_profiles`). The image-quality gate was duplicated the same way and went with it. **Verified behaviour-preserving by differential test** against the pre-MA-4 functions pulled from the `phase-2-security` blob with `ast`: 40,000 randomised synthetic meshes, recognition **0 mismatches**, enrolment **105 (0.263%)** — all of them the original's integer truncation, proven by re-running the original logic with the `int()` calls removed (**0 mismatches**). Worst case 0.865 px from a band edge.
+- [x] Extract the per-track state machine from `generate_frames()` into a testable `TrackState` class; target <60 lines and ≤3 nesting levels in the loop (MA-12) ✅ **2026-08-08.** `vision/tracking.py`: `TrackConfig`, `TrackState`, `FaceTracker`. **Measured: `generate_frames()` 405 lines / nesting depth 10 → 115 lines / depth 3**; `recognize_face.py` 1817 → 1261 lines. Depth target met; the per-face loop body is ~60 lines, the whole generator is 115 (the rest is frame acquisition and the MJPEG yield). 28 new tests, none of which needs a camera. Also driven headless end-to-end with a fake camera over real dataset crops — 60 frames, correct identity confirmed, `save_attendance` stubbed per [`lessons.md` L6](lessons.md).
 - [ ] Encapsulate all camera/recognition globals in a `RecognitionSession` object with an `RLock`; **one session at a time**, enforced (RE-2)
+      ⚠️ MA-12 moved `tracks`, `track_verification` and `next_track_id` into a
+      `FaceTracker` instance, so three of the globals are already gone — but
+      **the instance is still module-level and still unlocked**, so RE-2 is
+      not partly done, only staged. `cap`, `camera_reader`,
+      `attendance_running`, `current_subject`, `recognized`, `recognizer` and
+      `label_map` are all still module globals.
+      ⚠️ **RE-10 is still live and was re-confirmed by the smoke run:**
+      `generate_frames()` calls `cap.release()` when it exits, so one browser
+      tab closing ends the session for everyone. Fix it in this commit.
 - [ ] Load the model **once** at session start, not at import and not per call; cache by file mtime (PE-4)
+      ⚠️ **The 11.6 s is two costs, not one.** Measured 2026-08-08:
+      `cv2` 0.90 s, **mediapipe 4.29 s**, FaceMesh construction 0.04 s,
+      **LBPH read 4.83 s**. Deferring only the model load leaves ~5.5 s,
+      which is still too expensive for `tests/conftest.py` to drop its
+      exception. **Defer the mediapipe import too** and `import
+      recognize_face` falls to ~1 s.
+      Baseline for `docs/benchmarks.md`, median of 3 cold subprocess runs:
+      `import recognize_face` **9.93 s / 168 MB** peak working set,
+      `import app` **12.16 s / 204 MB**. (PE-4's "multi-GB RSS" was measured
+      against the 1.83 GB model and no longer holds at 55 MB.)
 - [ ] Throttle `CameraReader` with a condition variable / frame-ready event (PE-6)
 - [ ] Move training to a **background job** with a status endpoint; UI polls and shows progress (PE-5, US-2)
 - [ ] Add MySQL connection pooling; drop per-event connects (PE-7)
