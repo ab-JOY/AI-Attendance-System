@@ -80,10 +80,10 @@ Every number below was measured today, not carried forward.
 | `ruff check .` | **clean** |
 | `pytest tests/` | **43 passed in 33 s** (33 in 1.8 s with `-m "not slow"`) |
 | `eval_heldout_accuracy.py` | **60/60, avg distance 34.95** — identical to the Phase 0 baseline |
-| `import app` + real requests | boots in ~12 s; `POST /login` → 302 `/dashboard`, `GET /students` → 200, `GET /settings` → 200 |
+| `import app` + real requests | boots in ~12 s; `POST /login` → 302 `/dashboard`, `GET /students` → 200, `GET /settings` → 200. **Measured while MySQL was running.** It was stopped later the same day, at which point DB-backed routes return 500 and `GET /` still returns 200 — if you see that, start MySQL before diagnosing anything else. |
 | `py_compile` (11 modules) | clean |
 | `git check-ignore dataset trainer` | 2 matches — SAFE |
-| Tracked files | 175 → **41** |
+| Tracked files | 175 → **48** |
 | Python | 3.11.5 |
 | Model | `trainer/trainer.yml`, 55 MB, 3 identities, load ~9 s |
 
