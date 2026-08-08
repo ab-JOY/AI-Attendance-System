@@ -51,10 +51,13 @@ biometric templates derived from them.
 from __future__ import annotations
 
 import glob
+import itertools
 import os
 from pathlib import Path
 
 import pytest
+
+from vision.session import RecognitionSession, SessionBusy, SessionHooks
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATASET_DIR = PROJECT_ROOT / "dataset"
@@ -115,17 +118,20 @@ class ScriptedCameraReader:
     part way through.
     """
 
-    def __init__(self, frames, on_exhausted):
+    def __init__(self, frames):
         self._frames = list(frames)
         self._index = 0
-        self._on_exhausted = on_exhausted
         self.reads = 0
+
+        # Set after construction: what it has to call is the session, and the
+        # session needs this reader to exist first.
+        self.on_exhausted = lambda: None
 
     def read(self):
         self.reads += 1
 
         if self._index >= len(self._frames):
-            self._on_exhausted()
+            self.on_exhausted()
             return False, None
 
         frame = self._frames[self._index]
@@ -302,40 +308,63 @@ def driven_session(
 
         patch.setattr(module.mysql.connector, "connect", refuse_to_connect)
 
-        if module.recognizer is None or not module.label_map:
-            pytest.skip("no LBPH model loaded - run train_model.py first")
-
         # One challenge, not a random one: this test is about the loop, not
         # about the draw. SE-12 replaces this list with a randomised sequence,
         # and that sequence's randomness gets its own tests in vision/.
         patch.setattr(module, "LIVENESS_CHALLENGES", ["TURN_LEFT"])
 
+        # A real session with the real model, the real MediaPipe detector and
+        # the real tracker - only the camera is faked. This is what
+        # `SessionHooks` is for, and it is why the session lives in `vision/`
+        # rather than being tangled into the module: the two things a test
+        # cannot supply are exactly the two things injected here.
         capture = FakeCapture()
+        reader = ScriptedCameraReader(scripted_frames)
 
-        def stop():
-            module.attendance_running = False
+        session = RecognitionSession(
+            hooks=SessionHooks(
+                open_camera=lambda: capture,
+                load_model=module.load_model_and_labels,
+                model_signature=module.model_signature,
+                make_detector=module.make_detector,
+                make_reader=lambda _capture: reader,
+                configure_camera=None,
+            ),
+            config=module.TRACK_CONFIG,
+        )
 
-        reader = ScriptedCameraReader(scripted_frames, on_exhausted=stop)
+        patch.setattr(module, "session", session)
 
-        patch.setattr(module, "cap", capture)
-        patch.setattr(module, "camera_reader", reader)
-        patch.setattr(module, "current_subject", "SMOKE-TEST-SUBJECT")
-        patch.setattr(module, "recognized", set())
-        patch.setattr(module, "attendance_running", True)
+        # Started through the real `start()`, so the model load, the tracker
+        # reset and the lifecycle guards are exercised rather than bypassed.
+        if not session.start("SMOKE-TEST-SUBJECT"):
+            pytest.skip("no LBPH model loaded - run train_model.py first")
 
-        module.tracker.reset()
+        token = session.acquire_viewer()
+        stream = module.generate_frames(token)
 
-        parts = list(module.generate_frames())
+        # Consume exactly the script, then close the stream - which is what a
+        # browser tab closing does to the generator. Deliberately *not*
+        # stop()ping the session to end the loop: stop() resets the tracker,
+        # and the tracker is what most of the assertions below read. Closing
+        # the stream instead is also the RE-10 case, so the camera state after
+        # this line is evidence rather than incidental.
+        parts = list(itertools.islice(stream, len(scripted_frames)))
+        stream.close()
 
         yield {
             "module": module,
+            "session": session,
             "student_id": student_id,
             "parts": parts,
             "recorder": recorder,
             "capture": capture,
             "reader": reader,
-            "tracker": module.tracker,
+            "token": token,
+            "tracker": session.tracker,
         }
+
+        session.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -373,11 +402,10 @@ def test_every_frame_is_a_well_formed_mjpeg_part(driven_session):
 
 
 def test_the_loop_consumed_every_scripted_frame(driven_session):
-    """No frame silently dropped, and the loop stopped when the script did."""
+    """One read per frame, no frame silently dropped or re-read."""
     reader = driven_session["reader"]
 
-    # 60 frames plus the one read that returns exhausted and stops the loop.
-    assert reader.reads == 61
+    assert reader.reads == 60
 
 
 # ---------------------------------------------------------------------------
@@ -453,10 +481,10 @@ def test_attendance_is_saved_exactly_once(driven_session):
 
 
 def test_the_student_is_added_to_the_recognised_set(driven_session):
-    """What `/end-attendance` reads to decide who was present."""
-    module = driven_session["module"]
+    """Who the session believes was present. Was a module global; now session state."""
+    session = driven_session["session"]
 
-    assert driven_session["student_id"] in module.recognized
+    assert driven_session["student_id"] in session.recognized_ids()
 
 
 def test_no_database_connection_was_opened(driven_session):
@@ -477,6 +505,70 @@ def test_no_database_connection_was_opened(driven_session):
 
     with pytest.raises(AssertionError, match="opened a database connection"):
         module.mysql.connector.connect()
+
+
+# ---------------------------------------------------------------------------
+# A viewer going away does not end the session (RE-10)
+# ---------------------------------------------------------------------------
+
+
+def test_closing_the_stream_does_not_release_the_camera(driven_session):
+    """
+    RE-10, at the layer it actually broke.
+
+    The old generator ended with `if cap is not None: cap.release()`. A
+    generator ends whenever its client goes away, so one operator closing one
+    browser tab released the shared camera and ended the session for the whole
+    room. The stream above was closed the same way a tab closing closes it -
+    and the camera is still open.
+    """
+    session = driven_session["session"]
+    capture = driven_session["capture"]
+
+    assert not capture.released, (
+        "closing the video stream released the camera - RE-10 is back"
+    )
+    assert session.is_running, (
+        "closing the video stream ended the attendance session - RE-10 is back"
+    )
+
+
+def test_closing_the_stream_frees_the_viewer_slot(driven_session):
+    """
+    The other half: the slot has to come back, or the session is unwatchable
+    until it is restarted. A `finally` in `generate_frames()` is what does it.
+    """
+    session = driven_session["session"]
+
+    assert not session.has_viewer
+
+    # And it can be claimed again.
+    token = session.acquire_viewer()
+    session.release_viewer(token)
+
+
+def test_a_second_viewer_is_refused_while_one_is_open(driven_session):
+    """
+    The single-viewer invariant that makes the unlocked per-frame path safe.
+
+    Two generators walking one tracker would double-count identity votes
+    toward an attendance decision. `/video_feed` turns this into a 409.
+    """
+    session = driven_session["session"]
+
+    first = session.acquire_viewer()
+
+    try:
+        with pytest.raises(SessionBusy):
+            session.acquire_viewer()
+    finally:
+        session.release_viewer(first)
+
+
+# The counterpart - that `stop()` *does* release the camera - is in
+# tests/test_recognition_session.py. It belongs there rather than here: a test
+# that tears down this module-scoped session would leave every assertion after
+# it depending on file order.
 
 
 # ---------------------------------------------------------------------------

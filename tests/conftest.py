@@ -1,33 +1,35 @@
 """
 Shared pytest configuration.
 
-IMPORTANT - do not import `recognize_face` or `app` from anything under
-tests/, with the two exceptions noted below. Both execute real work at
-import time: recognize_face.py loads the 55 MB LBPH model at module scope and
-constructs a MediaPipe FaceMesh, costing around 9 seconds and a large memory
-spike per import, and app.py imports recognize_face. That is PE-4, deferred
-to Phase 3.
+**The old rule here - "nothing under tests/ may import `recognize_face` or
+`app`" - is gone, because PE-4 removed the reason for it.**
 
-**Exception 1: tests/test_route_security.py.** Phase 2 made every route
-authenticated and role-checked, and the only honest way to test that is to
-drive real requests through `app.test_client()` - lessons.md L5 is exactly
-the story of a check one layer away from where the failure lived. It pays the
-9 s import once, in a session-scoped fixture, and is marked `slow` so
-`pytest -m "not slow"` stays fast.
+Importing `recognize_face` used to load the 55 MB LBPH model and construct a
+MediaPipe FaceMesh at module scope: 9.2 s and a large memory spike, paid by
+anything that imported it, `app` included. Phase 3 moved both behind
+`RecognitionSession`, so nothing happens at import any more. Measured, median
+of three cold subprocess runs:
 
-**Exception 2: tests/test_recognition_loop_smoke.py.** `generate_frames()` is
-the largest block in the codebase and had no test, because reaching it needs a
-camera, a trained model and a face. That file supplies the first two and fakes
-the third from real dataset crops, so the whole path - geometry gate, tracker,
-LBPH predict, confirmation, liveness, attendance write - runs headless. It
-imports `recognize_face` once in a module-scoped fixture, is marked `slow`,
-and skips entirely when `dataset/` or `trainer/` is absent (always, in CI).
+    import recognize_face   9.15 s -> 1.82 s
+    import app            12.16 s -> 3.27 s
 
-Nothing else under tests/ may import either module.
+What is left is library import cost - cv2 0.60 s, pandas 1.32 s, flask 0.51 s -
+and Python caches it per process, so it is paid once per session, not per test
+file.
 
-`train_model`, `face_preprocessing`, `camera_utils`, `config.*` and
-`security.*` are all safe to import - they define things without doing
-anything.
+So importing either module is now allowed. Two things are still worth knowing:
+
+* **Prefer testing `vision/` where you can.** That package has no camera, no
+  MediaPipe, no database and no model, and its tests run in milliseconds. The
+  session, tracker, geometry gate, quality gate and liveness logic all live
+  there precisely so they can be tested without any of that.
+* **`tests/test_recognition_loop_smoke.py` is `slow` and skips without
+  `dataset/`.** Not for the import - it drives 60 real frames through
+  MediaPipe and LBPH, and it needs the gitignored biometric data to do it.
+
+`train_model`, `face_preprocessing`, `camera_utils`, `config.*`, `vision.*` and
+`security.*` are all cheap and always have been - they define things without
+doing anything.
 """
 
 import sys

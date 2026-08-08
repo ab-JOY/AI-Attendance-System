@@ -9,9 +9,13 @@ leaving every database call broken at request time (lessons.md L5). An
 authorisation rule that is never exercised by a request is a claim, not a
 test.
 
-So this file imports `app` - the one place under tests/ allowed to - and
-sends real requests through `app.test_client()`. It costs the 9 s PE-4 model
-load once, in a session-scoped fixture, and is marked `slow`.
+So this file imports `app` and sends real requests through
+`app.test_client()`. That import used to cost 9 s, because `recognize_face`
+loaded the LBPH model and built a MediaPipe FaceMesh at module scope, and this
+file was marked `slow` to keep it out of `pytest -m "not slow"`. PE-4 took
+`import app` to 3.3 s - library imports only, no model, no MediaPipe - so the
+whole file now runs in 5.2 s and the mark has been removed. Access control is
+in the fast suite, which is where a default-deny rule belongs.
 
 **No database required.** Everything here asserts a *denial*, and denials are
 decided by the before_request hook before any route body runs. That keeps
@@ -32,8 +36,6 @@ import re
 import pytest
 
 from tests.conftest import PROJECT_ROOT
-
-pytestmark = pytest.mark.slow
 
 
 @pytest.fixture(scope="session")

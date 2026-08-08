@@ -31,6 +31,13 @@ from config.logging_config import configure_logging
 # which point `settings` was the view function and every database call
 # raised AttributeError. Do not rename this back without renaming the route.
 from config.settings import settings as app_config
+from recognize_face import (
+    SessionBusy,
+    SessionNotRunning,
+    open_video_stream,
+    start_camera,
+    stop_camera,
+)
 from security.access import (
     MUST_CHANGE_PASSWORD,
     authenticated,
@@ -52,18 +59,18 @@ from security.paths import (
     validate_student_name,
 )
 from security.rate_limit import LoginRateLimiter
+from train_model import train_model
 
 # app.py is the entry point, so it owns logging configuration for the process.
 #
-# This has to run BEFORE importing recognize_face, which loads the LBPH model
-# and constructs a MediaPipe FaceMesh at module scope (PE-4, deferred to
-# Phase 3) and logs the outcome of both. With no handlers attached yet those
-# startup messages - including "model failed to load" - would be discarded.
-# The noqa markers below come off when PE-4 is fixed and the import is cheap.
+# This used to have to run *before* importing recognize_face, which loaded the
+# LBPH model and constructed a MediaPipe FaceMesh at module scope and logged
+# the outcome of both - with no handlers attached yet, those startup messages
+# would have been discarded. The two imports carried an E402 suppression.
+#
+# PE-4 removed the reason: recognize_face no longer does anything at import
+# time, so the imports sit with the others and this call can follow them.
 configure_logging()
-
-from recognize_face import generate_frames, start_camera, stop_camera  # noqa: E402
-from train_model import train_model  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -1839,12 +1846,38 @@ def logout():
 # camera feed of a classroom, unauthenticated. It is loaded as an <img src>,
 # so the browser sends the session cookie with it and the hook can enforce
 # authentication exactly as it does for any other route.
+#
+# RE-2. Authentication does not *serialise* access, and this route needs both.
+# A second tab used to get a second generator walking the same tracker, so two
+# streams double-counted identity votes toward one attendance decision - and
+# whichever generator exited first released the camera under the other
+# (RE-10). The session now allows one viewer, and a second request is refused
+# here rather than served, because once the multipart response headers are on
+# the wire there is no way left to say no.
 @app.route('/video_feed')
 @authenticated
 def video_feed():
 
+    try:
+        stream = open_video_stream()
+
+    except SessionBusy:
+        logger.warning("Refused a second video stream: one is already open")
+        return error_page(
+            409,
+            "The camera is already being viewed in another window. Close it "
+            "and try again."
+        )
+
+    except SessionNotRunning:
+        logger.warning("Video stream requested with no attendance session")
+        return error_page(
+            409,
+            "No attendance session is running. Start one first."
+        )
+
     return Response(
-        generate_frames(),
+        stream,
         mimetype='multipart/x-mixed-replace; boundary=frame'
     )
 # ==============================

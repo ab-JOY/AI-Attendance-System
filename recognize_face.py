@@ -1,12 +1,10 @@
 import logging
 import random
-import sys
 import threading
 import time
 from datetime import datetime
 
 import cv2
-import mediapipe as mp
 import mysql.connector
 
 from camera_utils import open_best_camera
@@ -15,10 +13,28 @@ from face_preprocessing import align_face, preprocess_for_lbph
 from vision.geometry import get_face_box
 from vision.landmarks import LEFT_EYE_OUTER, NOSE_TIP, RIGHT_EYE_OUTER
 from vision.quality import RECOGNITION_QUALITY, quality_issue
-from vision.tracking import FaceTracker, TrackConfig
+from vision.session import (
+    RecognitionSession,
+    SessionBusy,
+    SessionHooks,
+    SessionNotRunning,
+)
+from vision.tracking import TrackConfig
 from vision.validation import RECOGNITION_PROFILE, is_valid_face_candidate
 
 logger = logging.getLogger(__name__)
+
+# Re-exported so app.py can catch them without importing vision.session
+# directly. `generate_frames` is the only thing that raises them.
+__all__ = [
+    "SessionBusy",
+    "SessionNotRunning",
+    "generate_frames",
+    "open_video_stream",
+    "session",
+    "start_camera",
+    "stop_camera",
+]
 
 
 # =====================================================
@@ -35,32 +51,62 @@ LABELS_FILE = str(settings.labels_file)
 
 
 # =====================================================
-# CHECK OPENCV CONTRIB
+# MODEL AND LABEL LOADING (PE-4)
+#
+# This used to run at *import* time, and again on every start_camera().
+# Importing this module therefore cost 9.2 s and read 55 MB of YAML before
+# Flask had served a single request, which is why tests/conftest.py forbade
+# importing it at all.
+#
+# Nothing here runs on import any more. RecognitionSession calls
+# model_signature() - two stat() calls - and only calls load_model_and_labels()
+# when the answer differs from the model it already holds, so a retrain is
+# picked up on the next session start and an unchanged model is not re-read.
+#
+# The OpenCV contrib check moved in here from module scope, where it was a
+# bare sys.exit(1). A library import must not be able to kill the interpreter;
+# `import recognize_face` in an environment missing opencv-contrib used to take
+# the whole process down, including the test runner collecting it.
 # =====================================================
 
-logger.info("OpenCV version: %s", cv2.__version__)
+def model_signature():
+    """
+    A cheap fingerprint of the model on disk, or None if it is not there.
 
-if not hasattr(cv2, "face"):
-    logger.error(
-        "OpenCV face module not found. Install with: "
-        "python -m pip install opencv-contrib-python==4.10.0.84"
+    Two stat() calls, against the 4.8 s an LBPH read costs. Size is included
+    alongside mtime because Phase 0's outage was a *partial* write: a truncated
+    trainer.yml can share an mtime with the write that produced it
+    (tasks/lessons.md L1).
+    """
+    try:
+        trainer_stat = settings.trainer_file.stat()
+        labels_stat = settings.labels_file.stat()
+    except OSError:
+        return None
+
+    return (
+        trainer_stat.st_mtime_ns,
+        trainer_stat.st_size,
+        labels_stat.st_mtime_ns,
+        labels_stat.st_size,
     )
-    sys.exit(1)
-
-
-# =====================================================
-# MODEL AND LABEL LOADING
-# The files are reloaded whenever a new attendance
-# session starts, so the latest retrained model is used.
-# =====================================================
-
-recognizer = None
-label_map = {}
 
 
 def load_model_and_labels():
-    global recognizer
-    global label_map
+    """
+    Read the LBPH model and its labels. Returns `(recognizer, label_map)`.
+
+    Raises rather than returning a sentinel: a missing or malformed model is
+    not a condition the caller can paper over, and RecognitionSession turns
+    the exception into a refused session start with a logged reason.
+    """
+    logger.info("OpenCV version: %s", cv2.__version__)
+
+    if not hasattr(cv2, "face"):
+        raise RuntimeError(
+            "OpenCV face module not found. Install with: "
+            "python -m pip install opencv-contrib-python==4.10.0.84"
+        )
 
     if not settings.trainer_file.exists():
         raise FileNotFoundError(
@@ -149,45 +195,50 @@ def load_model_and_labels():
             "labels.txt does not contain any students."
         )
 
-    recognizer = new_recognizer
-    label_map = new_label_map
-
     logger.info(
         "Trainer loaded successfully: %d student identities",
-        len(label_map)
+        len(new_label_map)
     )
 
-
-try:
-    load_model_and_labels()
-except Exception:
-    logger.warning(
-        "Model load failed. Recognition is unavailable until a model is "
-        "trained.",
-        exc_info=True
-    )
-    recognizer = None
-    label_map = {}
+    return new_recognizer, new_label_map
 
 
 # =====================================================
-# MEDIAPIPE FACE MESH
+# MEDIAPIPE FACE MESH (PE-4)
+#
+# `import mediapipe` is 4.29 s of the old 9.2 s import cost - measured, and
+# more than the 55 MB model read. Deferring only the model would have left
+# ~5.5 s, which was still too expensive for the test suite to import this
+# module. So the import is inside the function, and it happens when a session
+# starts rather than when anything imports this file.
+#
+# Constructing the FaceMesh itself is 0.04 s, so a session gets a fresh one.
+# That is deliberate: static_image_mode=False means the detector carries
+# tracking state between frames, and a new session must not inherit the last
+# session's idea of where the faces were.
 # =====================================================
 
-try:
-    mp_face_mesh = mp.solutions.face_mesh
-except AttributeError:
-    import mediapipe.python.solutions.face_mesh as mp_face_mesh
 
-face_mesh = mp_face_mesh.FaceMesh(
-    static_image_mode=False,
-    max_num_faces=10,
-    refine_landmarks=True,
-    min_detection_confidence=0.60,
-    min_tracking_confidence=0.55
-)
+def make_detector():
+    """A MediaPipe FaceMesh for one session."""
+    import mediapipe as mp
 
-logger.info("MediaPipe Face Mesh loaded successfully")
+    try:
+        mp_face_mesh = mp.solutions.face_mesh
+    except AttributeError:
+        import mediapipe.python.solutions.face_mesh as mp_face_mesh
+
+    detector = mp_face_mesh.FaceMesh(
+        static_image_mode=False,
+        max_num_faces=10,
+        refine_landmarks=True,
+        min_detection_confidence=0.60,
+        min_tracking_confidence=0.55
+    )
+
+    logger.info("MediaPipe Face Mesh loaded successfully")
+
+    return detector
 
 
 # =====================================================
@@ -326,15 +377,65 @@ POST_LIVENESS_MATCH_FRAMES = 8
 
 
 # =====================================================
-# GLOBAL STATE
+# THE SESSION (RE-2, RE-10, PE-4)
+#
+# `cap`, `camera_reader`, `attendance_running`, `current_subject`,
+# `recognized`, `recognizer`, `label_map` and the module-level `tracker` used
+# to live here, as eight globals mutated from the Flask worker thread and the
+# camera thread with no lock. They are now inside `session`, behind an RLock,
+# with one stream allowed at a time - see vision/session.py for what the lock
+# protects and what the single-viewer invariant protects instead.
+#
+# The heavy collaborators are passed in rather than imported by vision/, which
+# is what keeps that package free of MediaPipe, the camera and the model.
 # =====================================================
 
-cap = None
-camera_reader = None
-attendance_running = False
-current_subject = None
 
-recognized = set()
+def configure_camera(capture):
+    """Resolution and buffering for a freshly opened camera."""
+    capture.set(
+        cv2.CAP_PROP_FRAME_WIDTH,
+        1280
+    )
+    capture.set(
+        cv2.CAP_PROP_FRAME_HEIGHT,
+        720
+    )
+    capture.set(
+        cv2.CAP_PROP_BUFFERSIZE,
+        1
+    )
+
+    actual_width = int(
+        capture.get(cv2.CAP_PROP_FRAME_WIDTH)
+    )
+    actual_height = int(
+        capture.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    )
+
+    logger.info(
+        "Camera resolution: %sx%s",
+        actual_width,
+        actual_height
+    )
+
+    # Discard the first few frames: a camera that has just opened often hands
+    # back a stale or half-exposed buffer.
+    for _ in range(3):
+        capture.read()
+
+
+session = RecognitionSession(
+    hooks=SessionHooks(
+        open_camera=open_best_camera,
+        load_model=load_model_and_labels,
+        model_signature=model_signature,
+        make_detector=make_detector,
+        make_reader=lambda capture: CameraReader(capture),
+        configure_camera=configure_camera,
+    ),
+    config=TRACK_CONFIG,
+)
 
 
 # =====================================================
@@ -572,89 +673,19 @@ def save_attendance(student_id, subject, status):
 
 
 def start_camera(subject_code):
-    global cap
-    global camera_reader
-    global attendance_running
-    global current_subject
-    global recognized
+    """
+    Begin an attendance session. True if recognition can now run.
 
-    try:
-        load_model_and_labels()
-    except Exception:
-        logger.exception("Model reload failed, cannot start attendance")
-        return False
-
-    if recognizer is None or not label_map:
-        logger.error("No trained model available, cannot start attendance")
-        return False
-
-    current_subject = subject_code
-
-    recognized = set()
-    tracker.reset()
-
-    if cap is None:
-        cap = open_best_camera()
-
-        if cap is None or not cap.isOpened():
-            logger.error("Cannot open camera")
-            cap = None
-            return False
-
-        cap.set(
-            cv2.CAP_PROP_FRAME_WIDTH,
-            1280
-        )
-        cap.set(
-            cv2.CAP_PROP_FRAME_HEIGHT,
-            720
-        )
-        cap.set(
-            cv2.CAP_PROP_BUFFERSIZE,
-            1
-        )
-
-        actual_width = int(
-            cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-        )
-        actual_height = int(
-            cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-        )
-
-        logger.info(
-            "Camera resolution: %sx%s",
-            actual_width,
-            actual_height
-        )
-
-        for _ in range(3):
-            cap.read()
-
-        camera_reader = CameraReader(cap)
-
-    attendance_running = True
-    logger.info("Attendance started")
-
-    return True
+    Thin now: the model reload, the camera open, the tracker reset and the
+    "already running" decision all belong to the session, which holds the lock
+    that makes them one atomic transition (RE-2).
+    """
+    return session.start(subject_code)
 
 
 def stop_camera():
-    global cap
-    global camera_reader
-    global attendance_running
-
-    attendance_running = False
-    tracker.reset()
-
-    if camera_reader is not None:
-        camera_reader.stop()
-        camera_reader = None
-
-    if cap is not None:
-        cap.release()
-        cap = None
-
-    logger.info("Attendance ended")
+    """End the session and release the camera."""
+    session.stop()
 
 
 # =====================================================
@@ -666,10 +697,9 @@ def stop_camera():
 #
 # They are now vision/tracking.py - FaceTracker owns the table, TrackState
 # owns one face's progress - which makes the decision logic testable without
-# a camera. `tracker` below is the single instance; start_camera() resets it.
+# a camera. The single instance moved again in this commit: it belonged to this
+# module, unlocked; it now belongs to `session`, which resets it on start.
 # =====================================================
-
-tracker = FaceTracker(config=TRACK_CONFIG)
 
 
 # =====================================================
@@ -681,11 +711,12 @@ tracker = FaceTracker(config=TRACK_CONFIG)
 
 
 def process_confirmed_track(
+    context,
     state,
     candidate_id,
-    current_yaw,
-    subject
+    current_yaw
 ):
+    subject = context.subject
     locked_id = state.student_id
     locked_name = state.student_name
 
@@ -765,7 +796,7 @@ def process_confirmed_track(
         )
 
         if attendance_saved:
-            recognized.add(locked_id)
+            context.recognized.add(locked_id)
             state.attendance_saved = True
 
             return (
@@ -893,7 +924,7 @@ def draw_face_result(
 # =====================================================
 
 
-def detect_faces(frame):
+def detect_faces(context, frame):
     """
     Run MediaPipe FaceMesh on a downscaled copy of the frame.
 
@@ -920,7 +951,7 @@ def detect_faces(frame):
     rgb = cv2.cvtColor(process_frame, cv2.COLOR_BGR2RGB)
 
     rgb.flags.writeable = False
-    results = face_mesh.process(rgb)
+    results = context.detector.process(rgb)
     rgb.flags.writeable = True
 
     return results
@@ -948,7 +979,7 @@ def encode_frame(frame):
     )
 
 
-def predict_identity(frame, face_landmarks, state, track_id):
+def predict_identity(context, frame, face_landmarks, state, track_id):
     """
     Align, quality-check and run LBPH on one face.
 
@@ -970,7 +1001,7 @@ def predict_identity(frame, face_landmarks, state, track_id):
             return -1, 999.0, issue
 
         processed_face = preprocess_for_lbph(aligned_face)
-        label, confidence = recognizer.predict(processed_face)
+        label, confidence = context.recognizer.predict(processed_face)
 
         # DEBUG, not INFO: this fires once per tracked face per frame. At
         # ~15 fps with three faces in shot that is 45 lines a second, which
@@ -995,6 +1026,7 @@ def predict_identity(frame, face_landmarks, state, track_id):
 
 
 def resolve_track_identity(
+    context,
     *,
     state,
     label,
@@ -1011,6 +1043,8 @@ def resolve_track_identity(
     rather than only mutated because losing an identity replaces the object
     (`TrackState.reset_identity`), exactly as the original did.
     """
+    label_map = context.label_map
+
     strong_prediction = (
         issue is None
         and confidence <= RECOGNITION_THRESHOLD
@@ -1031,6 +1065,7 @@ def resolve_track_identity(
     # result fluctuates.
     if state.confirmed:
         return resolve_confirmed_track(
+            context,
             state,
             candidate_id,
             face_landmarks,
@@ -1043,7 +1078,7 @@ def resolve_track_identity(
 
     # Only an unconfirmed track may inherit an identity that already
     # completed attendance. A confirmed track above can never be overwritten.
-    if candidate_id is not None and candidate_id in recognized:
+    if candidate_id is not None and candidate_id in context.recognized:
         state.adopt_completed_identity(candidate_id, candidate_name)
         claimed_student_ids.add(candidate_id)
         return candidate_id, candidate_name, "Present", state
@@ -1066,6 +1101,7 @@ def resolve_track_identity(
 
 
 def resolve_confirmed_track(
+    context,
     state,
     candidate_id,
     face_landmarks,
@@ -1084,10 +1120,10 @@ def resolve_confirmed_track(
         return locked_id, locked_name, "Duplicate identity blocked", state
 
     student_id, student_name, status, state = process_confirmed_track(
+        context,
         state,
         candidate_id,
-        get_face_yaw(face_landmarks),
-        current_subject
+        get_face_yaw(face_landmarks)
     )
 
     if student_id != "Unknown":
@@ -1163,18 +1199,50 @@ def hint_for_weak_track(box):
 # =====================================================
 
 
-def generate_frames():
-    global cap
-    global attendance_running
+def open_video_stream():
+    """
+    Claim the single stream slot and return the frame generator.
 
-    while attendance_running:
-        if cap is None:
+    Split from `generate_frames()` on purpose. The slot has to be claimed
+    *before* Flask builds the `Response`, because once the response headers are
+    on the wire a refusal can no longer be expressed as a 409 - the browser is
+    already being handed a `multipart/x-mixed-replace` body. A generator's body
+    does not run until it is first iterated, which is after that point.
+
+    Raises `SessionNotRunning` or `SessionBusy`; `/video_feed` maps both onto
+    status codes.
+    """
+    token = session.acquire_viewer()
+
+    return generate_frames(token)
+
+
+def generate_frames(token):
+    """
+    The MJPEG stream: one part per frame, for as long as the session runs.
+
+    Ends when the session stops, when the camera goes away, or when the client
+    disconnects (which closes the generator). In every case the `finally`
+    gives up the viewer slot and **nothing here releases the camera** - that
+    was RE-10, where one browser tab closing ended the session for everyone.
+    """
+    try:
+        yield from _stream_frames()
+    finally:
+        session.release_viewer(token)
+
+
+def _stream_frames():
+    while True:
+        context = session.snapshot()
+
+        if not context.running:
             break
 
-        if camera_reader is None:
+        if context.reader is None or context.detector is None:
             break
 
-        ret, frame = camera_reader.read()
+        ret, frame = context.reader.read()
 
         if not ret:
             time.sleep(0.02)
@@ -1182,7 +1250,7 @@ def generate_frames():
 
         frame_height, frame_width = frame.shape[:2]
 
-        results = detect_faces(frame)
+        results = detect_faces(context, frame)
 
         used_track_ids = set()
         claimed_student_ids = set()
@@ -1205,10 +1273,10 @@ def generate_frames():
                 # completely and receive no visible box.
                 continue
 
-            track_id = tracker.assign(raw_box, used_track_ids)
+            track_id = context.tracker.assign(raw_box, used_track_ids)
             used_track_ids.add(track_id)
 
-            state = tracker.state_for(track_id)
+            state = context.tracker.state_for(track_id)
             state.note_valid_frame()
 
             # Do not draw or recognize a newly detected object
@@ -1220,6 +1288,7 @@ def generate_frames():
             displayed_face_count += 1
 
             label, confidence, issue = predict_identity(
+                context,
                 frame,
                 face_landmarks,
                 state,
@@ -1227,6 +1296,7 @@ def generate_frames():
             )
 
             student_id, student_name, status, state = resolve_track_identity(
+                context,
                 state=state,
                 label=label,
                 confidence=confidence,
@@ -1236,7 +1306,7 @@ def generate_frames():
                 claimed_student_ids=claimed_student_ids
             )
 
-            tracker.replace_state(track_id, state)
+            context.tracker.replace_state(track_id, state)
 
             draw_face_result(
                 frame,
@@ -1265,6 +1335,9 @@ def generate_frames():
 
         yield part
 
-    if cap is not None:
-        cap.release()
-        cap = None
+    # RE-10 was three lines here: `if cap is not None: cap.release()`. The
+    # camera is shared session state, and a generator ends whenever its client
+    # goes away - so closing one browser tab released the camera underneath
+    # every other viewer and ended the session for the whole room. Teardown
+    # belongs to stop_camera(), which is the only thing that knows the session
+    # is actually over.
