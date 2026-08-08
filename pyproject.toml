@@ -141,5 +141,5 @@ ignore = [
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 markers = [
-    "slow: builds a synthetic dataset and trains a real LBPH model",
+    "slow: pays for real work - trains an LBPH model, imports app, or drives the recognition loop over real frames",
 ]
