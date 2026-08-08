@@ -3,7 +3,6 @@ import random
 import sys
 import threading
 import time
-from collections import Counter, deque
 from datetime import datetime
 
 import cv2
@@ -13,9 +12,10 @@ import mysql.connector
 from camera_utils import open_best_camera
 from config.settings import settings
 from face_preprocessing import align_face, preprocess_for_lbph
-from vision.geometry import box_area, box_center, box_iou, get_face_box
+from vision.geometry import get_face_box
 from vision.landmarks import LEFT_EYE_OUTER, NOSE_TIP, RIGHT_EYE_OUTER
 from vision.quality import RECOGNITION_QUALITY, quality_issue
+from vision.tracking import FaceTracker, TrackConfig
 from vision.validation import RECOGNITION_PROFILE, is_valid_face_candidate
 
 logger = logging.getLogger(__name__)
@@ -206,24 +206,43 @@ logger.info("MediaPipe Face Mesh loaded successfully")
 MIN_FACE_WIDTH = RECOGNITION_PROFILE.min_face_width
 MIN_FACE_HEIGHT = RECOGNITION_PROFILE.min_face_height
 
-REAL_FACE_CONFIRM_FRAMES = 5
-
 
 # =====================================================
-# TRACKING SETTINGS
+# TRACKING AND VERIFICATION SETTINGS
+#
+# These were eleven loose module constants read directly by seven functions.
+# They are one TrackConfig now, passed to the tracker that uses them, so a
+# threshold cannot be read by something that was never meant to see it and
+# the whole set can be varied in a test (MA-12, and MA-6's "60 magic numbers
+# with no configuration layer").
+#
+# The values are unchanged. Like the geometry profiles, they are the "safe
+# starting values" the original comment described and have never been
+# calibrated; Phase 6 is where that happens.
 # =====================================================
 
-TRACK_TIMEOUT_SECONDS = 1.5
-TRACK_MAX_DISTANCE = 180.0
-TRACK_MIN_IOU = 0.08
-TRACK_MIN_SIZE_SIMILARITY = 0.40
+TRACK_CONFIG = TrackConfig(
+    timeout_seconds=1.5,
+    max_distance=180.0,
+    min_iou=0.08,
+    min_size_similarity=0.40,
+    real_face_confirm_frames=5,
+    prediction_history_size=20,
+    min_label_agreement=0.85,
+    min_consecutive_identity_frames=8,
+    confirmation_confidence=52.0,
+    max_weak_frames_before_clear=3,
+    max_confirmed_mismatch_frames=5,
+    liveness_reset_mismatch_frames=2,
+)
+
+REAL_FACE_CONFIRM_FRAMES = TRACK_CONFIG.real_face_confirm_frames
+PREDICTION_HISTORY_SIZE = TRACK_CONFIG.prediction_history_size
 
 
 # =====================================================
 # RECOGNITION SETTINGS
 # Lower LBPH distance is better.
-# These are safe starting values and should later be
-# calibrated using held-out test images.
 #
 # RECOGNITION_THRESHOLD now comes from config/settings.py so production and
 # the eval_*.py harnesses read one value and cannot drift apart. It is still
@@ -234,15 +253,6 @@ TRACK_MIN_SIZE_SIMILARITY = 0.40
 # =====================================================
 
 RECOGNITION_THRESHOLD = settings.recognition_threshold
-CONFIRMATION_CONFIDENCE = 52.0
-
-PREDICTION_HISTORY_SIZE = 20
-MIN_LABEL_AGREEMENT = 0.85
-MIN_CONSECUTIVE_IDENTITY_FRAMES = 8
-
-MAX_WEAK_FRAMES_BEFORE_CLEAR = 3
-MAX_CONFIRMED_MISMATCH_FRAMES = 5
-LIVENESS_RESET_MISMATCH_FRAMES = 2
 
 
 # =====================================================
@@ -325,10 +335,6 @@ attendance_running = False
 current_subject = None
 
 recognized = set()
-
-tracks = {}
-track_verification = {}
-next_track_id = 0
 
 
 # =====================================================
@@ -571,9 +577,6 @@ def start_camera(subject_code):
     global attendance_running
     global current_subject
     global recognized
-    global tracks
-    global track_verification
-    global next_track_id
 
     try:
         load_model_and_labels()
@@ -588,9 +591,7 @@ def start_camera(subject_code):
     current_subject = subject_code
 
     recognized = set()
-    tracks = {}
-    track_verification = {}
-    next_track_id = 0
+    tracker.reset()
 
     if cap is None:
         cap = open_best_camera()
@@ -641,12 +642,9 @@ def stop_camera():
     global cap
     global camera_reader
     global attendance_running
-    global tracks
-    global track_verification
 
     attendance_running = False
-    tracks = {}
-    track_verification = {}
+    tracker.reset()
 
     if camera_reader is not None:
         camera_reader.stop()
@@ -660,218 +658,18 @@ def stop_camera():
 
 
 # =====================================================
-# TRACKING
-# Uses face overlap, center distance, and size similarity
-# to reduce identity transfer when faces cross.
+# TRACKING AND VERIFICATION STATE (MA-12, RE-2)
+#
+# `expire_old_tracks`, `assign_track_id` and the five functions that mutated
+# a track's verification dict used to live here, over 200 lines, operating on
+# the module globals `tracks`, `track_verification` and `next_track_id`.
+#
+# They are now vision/tracking.py - FaceTracker owns the table, TrackState
+# owns one face's progress - which makes the decision logic testable without
+# a camera. `tracker` below is the single instance; start_camera() resets it.
 # =====================================================
 
-
-def expire_old_tracks():
-    current_time = time.time()
-
-    expired_track_ids = [
-        track_id
-        for track_id, track_data in tracks.items()
-        if (
-            current_time
-            - track_data["last_seen"]
-            > TRACK_TIMEOUT_SECONDS
-        )
-    ]
-
-    for track_id in expired_track_ids:
-        tracks.pop(track_id, None)
-        track_verification.pop(track_id, None)
-
-
-def assign_track_id(box, used_track_ids):
-    global next_track_id
-
-    expire_old_tracks()
-
-    center_x, center_y = box_center(box)
-    new_area = max(box_area(box), 1)
-
-    best_track_id = None
-    best_score = float("-inf")
-
-    for track_id, track_data in tracks.items():
-        if track_id in used_track_ids:
-            continue
-
-        old_box = track_data["box"]
-        old_center_x, old_center_y = box_center(old_box)
-        old_area = max(box_area(old_box), 1)
-
-        center_distance = (
-            (center_x - old_center_x) ** 2
-            + (center_y - old_center_y) ** 2
-        ) ** 0.5
-
-        overlap = box_iou(box, old_box)
-
-        size_similarity = (
-            min(new_area, old_area)
-            / max(new_area, old_area)
-        )
-
-        dynamic_distance_limit = max(
-            TRACK_MAX_DISTANCE,
-            max(
-                box[2] - box[0],
-                box[3] - box[1]
-            ) * 0.85
-        )
-
-        if size_similarity < TRACK_MIN_SIZE_SIMILARITY:
-            continue
-
-        if (
-            overlap < TRACK_MIN_IOU
-            and center_distance > dynamic_distance_limit
-        ):
-            continue
-
-        normalized_distance = (
-            center_distance
-            / max(dynamic_distance_limit, 1.0)
-        )
-
-        score = (
-            overlap * 2.0
-            + size_similarity
-            - normalized_distance
-        )
-
-        if score > best_score:
-            best_score = score
-            best_track_id = track_id
-
-    if best_track_id is None:
-        best_track_id = next_track_id
-        next_track_id += 1
-
-    tracks[best_track_id] = {
-        "box": box,
-        "center": (center_x, center_y),
-        "last_seen": time.time()
-    }
-
-    return best_track_id
-
-
-# =====================================================
-# VERIFICATION STATE
-# =====================================================
-
-
-def create_track_state(valid_face_frames=0):
-    return {
-        "valid_face_frames": valid_face_frames,
-        "history": deque(
-            maxlen=PREDICTION_HISTORY_SIZE
-        ),
-        "consecutive_id": None,
-        "consecutive_count": 0,
-        "weak_frames": 0,
-        "mismatch_frames": 0,
-        "student_id": None,
-        "student_name": None,
-        "confirmed": False,
-        "attendance_saved": False,
-        "liveness": None
-    }
-
-
-def reset_identity_state(state):
-    return create_track_state(
-        valid_face_frames=state.get(
-            "valid_face_frames",
-            REAL_FACE_CONFIRM_FRAMES
-        )
-    )
-
-
-def handle_weak_unconfirmed_prediction(state):
-    state["weak_frames"] += 1
-    state["consecutive_id"] = None
-    state["consecutive_count"] = 0
-
-    if (
-        state["weak_frames"]
-        >= MAX_WEAK_FRAMES_BEFORE_CLEAR
-    ):
-        state["history"].clear()
-        state["weak_frames"] = 0
-
-    return state
-
-
-def add_prediction_to_history(
-    state,
-    student_id,
-    student_name,
-    confidence
-):
-    state["weak_frames"] = 0
-
-    if state["consecutive_id"] == student_id:
-        state["consecutive_count"] += 1
-    else:
-        state["consecutive_id"] = student_id
-        state["consecutive_count"] = 1
-
-    state["history"].append(
-        {
-            "student_id": student_id,
-            "student_name": student_name,
-            "confidence": float(confidence)
-        }
-    )
-
-
-def evaluate_history(state):
-    history_items = list(state["history"])
-
-    if not history_items:
-        return None
-
-    label_counts = Counter(
-        item["student_id"]
-        for item in history_items
-    )
-
-    dominant_id, dominant_count = (
-        label_counts.most_common(1)[0]
-    )
-
-    dominant_items = [
-        item
-        for item in history_items
-        if item["student_id"] == dominant_id
-    ]
-
-    agreement_ratio = (
-        dominant_count / len(history_items)
-    )
-
-    average_confidence = sum(
-        item["confidence"]
-        for item in dominant_items
-    ) / len(dominant_items)
-
-    dominant_name = dominant_items[-1][
-        "student_name"
-    ]
-
-    return {
-        "dominant_id": dominant_id,
-        "dominant_name": dominant_name,
-        "agreement_ratio": agreement_ratio,
-        "average_confidence": average_confidence,
-        "history_count": len(history_items),
-        "dominant_count": dominant_count
-    }
+tracker = FaceTracker(config=TRACK_CONFIG)
 
 
 # =====================================================
@@ -888,8 +686,8 @@ def process_confirmed_track(
     current_yaw,
     subject
 ):
-    locked_id = state["student_id"]
-    locked_name = state["student_name"]
+    locked_id = state.student_id
+    locked_name = state.student_name
 
     candidate_agrees = (
         candidate_id is not None
@@ -897,22 +695,22 @@ def process_confirmed_track(
     )
 
     if not candidate_agrees:
-        state["mismatch_frames"] += 1
+        state.mismatch_frames += 1
 
-        if state.get("liveness") is not None:
-            state["liveness"]["post_match_count"] = 0
-
-        if (
-            state["mismatch_frames"]
-            >= LIVENESS_RESET_MISMATCH_FRAMES
-        ):
-            state["liveness"] = create_liveness_state()
+        if state.liveness is not None:
+            state.liveness["post_match_count"] = 0
 
         if (
-            state["mismatch_frames"]
-            >= MAX_CONFIRMED_MISMATCH_FRAMES
+            state.mismatch_frames
+            >= TRACK_CONFIG.liveness_reset_mismatch_frames
         ):
-            state = reset_identity_state(state)
+            state.liveness = create_liveness_state()
+
+        if (
+            state.mismatch_frames
+            >= TRACK_CONFIG.max_confirmed_mismatch_frames
+        ):
+            state = state.reset_identity()
 
         return (
             "Unknown",
@@ -921,9 +719,9 @@ def process_confirmed_track(
             state
         )
 
-    state["mismatch_frames"] = 0
+    state.mismatch_frames = 0
 
-    if state.get("attendance_saved", False):
+    if state.attendance_saved:
         return (
             locked_id,
             locked_name,
@@ -931,25 +729,25 @@ def process_confirmed_track(
             state
         )
 
-    state["liveness"] = update_liveness(
-        state.get("liveness"),
+    state.liveness = update_liveness(
+        state.liveness,
         current_yaw
     )
 
-    if state["liveness"].get("passed", False):
-        state["liveness"]["post_match_count"] = (
-            state["liveness"].get(
+    if state.liveness.get("passed", False):
+        state.liveness["post_match_count"] = (
+            state.liveness.get(
                 "post_match_count",
                 0
             ) + 1
         )
 
-    liveness_passed = state["liveness"].get(
+    liveness_passed = state.liveness.get(
         "passed",
         False
     )
 
-    post_match_count = state["liveness"].get(
+    post_match_count = state.liveness.get(
         "post_match_count",
         0
     )
@@ -968,7 +766,7 @@ def process_confirmed_track(
 
         if attendance_saved:
             recognized.add(locked_id)
-            state["attendance_saved"] = True
+            state.attendance_saved = True
 
             return (
                 locked_id,
@@ -988,7 +786,7 @@ def process_confirmed_track(
         locked_id,
         locked_name,
         get_liveness_message(
-            state.get("liveness")
+            state.liveness
         ),
         state
     )
@@ -1081,6 +879,286 @@ def draw_face_result(
 
 
 # =====================================================
+# PER-FACE DECISION (MA-12)
+#
+# These two functions are the body that used to sit inline in
+# generate_frames(), seven levels deep. Pulling them out is the whole point
+# of MA-12: the loop below now reads as detect -> track -> predict -> decide
+# -> draw, and each step can be read on its own.
+#
+# The order of the branches in resolve_track_identity() is load-bearing and
+# is unchanged from the original. A confirmed track is checked *first* and is
+# immutable, which is what stops a fluctuating LBPH result from renaming a
+# face mid-session.
+# =====================================================
+
+
+def detect_faces(frame):
+    """
+    Run MediaPipe FaceMesh on a downscaled copy of the frame.
+
+    Landmarks come back normalised, so they map onto the full-resolution
+    frame unchanged - which is why face alignment and LBPH still get the
+    original pixels while detection pays for a smaller image.
+    """
+    frame_height, frame_width = frame.shape[:2]
+
+    if frame_width > MEDIAPIPE_PROCESS_WIDTH:
+        process_scale = MEDIAPIPE_PROCESS_WIDTH / float(frame_width)
+
+        process_frame = cv2.resize(
+            frame,
+            (
+                MEDIAPIPE_PROCESS_WIDTH,
+                max(int(frame_height * process_scale), 1)
+            ),
+            interpolation=cv2.INTER_AREA
+        )
+    else:
+        process_frame = frame
+
+    rgb = cv2.cvtColor(process_frame, cv2.COLOR_BGR2RGB)
+
+    rgb.flags.writeable = False
+    results = face_mesh.process(rgb)
+    rgb.flags.writeable = True
+
+    return results
+
+
+def encode_frame(frame):
+    """The MJPEG part boundary for one frame, or None if encoding failed."""
+    success, buffer = cv2.imencode(
+        ".jpg",
+        frame,
+        [
+            int(cv2.IMWRITE_JPEG_QUALITY),
+            STREAM_JPEG_QUALITY
+        ]
+    )
+
+    if not success:
+        return None
+
+    return (
+        b"--frame\r\n"
+        b"Content-Type: image/jpeg\r\n\r\n"
+        + buffer.tobytes()
+        + b"\r\n"
+    )
+
+
+def predict_identity(frame, face_landmarks, state, track_id):
+    """
+    Align, quality-check and run LBPH on one face.
+
+    Returns `(label, confidence, issue)`. `issue` is a human-readable
+    quality problem or None; a confidence of 999.0 means no prediction was
+    attempted, which draw_face_result() renders as "--".
+    """
+    # A track that has already recorded attendance does not need recognising
+    # again - the identity is locked and the row is written. Skipping the
+    # predict here is what keeps a full classroom from paying for 314M float
+    # operations per already-marked face per frame (PE-3).
+    skip_recognition = state.confirmed and state.attendance_saved
+
+    try:
+        aligned_face = align_face(frame, face_landmarks)
+        issue = get_face_quality_issue(aligned_face)
+
+        if issue is not None or skip_recognition:
+            return -1, 999.0, issue
+
+        processed_face = preprocess_for_lbph(aligned_face)
+        label, confidence = recognizer.predict(processed_face)
+
+        # DEBUG, not INFO: this fires once per tracked face per frame. At
+        # ~15 fps with three faces in shot that is 45 lines a second, which
+        # makes the log useless for anything else. Set LOG_LEVEL=DEBUG in
+        # .env when you are actually diagnosing recognition.
+        logger.debug(
+            "Track: %s | Label: %s | Distance: %.1f",
+            track_id,
+            label,
+            confidence
+        )
+
+        return label, confidence, None
+
+    except Exception:
+        logger.debug(
+            "Recognition failed for track %s",
+            track_id,
+            exc_info=True
+        )
+        return -1, 999.0, "Face alignment failed"
+
+
+def resolve_track_identity(
+    *,
+    state,
+    label,
+    confidence,
+    issue,
+    face_landmarks,
+    box,
+    claimed_student_ids
+):
+    """
+    Turn one frame's prediction into what the operator sees for this track.
+
+    Returns `(student_id, student_name, status, state)`. `state` is returned
+    rather than only mutated because losing an identity replaces the object
+    (`TrackState.reset_identity`), exactly as the original did.
+    """
+    strong_prediction = (
+        issue is None
+        and confidence <= RECOGNITION_THRESHOLD
+        and label in label_map
+    )
+
+    candidate_id = None
+    candidate_name = None
+
+    if strong_prediction:
+        candidate = label_map[label]
+        candidate_id = candidate["student_id"]
+        candidate_name = candidate["name"]
+
+    # A confirmed track is immutable. Never let a later LBPH prediction
+    # overwrite the identity already locked to this physical track - this is
+    # what prevents one face from changing from Jeff to Julio when the LBPH
+    # result fluctuates.
+    if state.confirmed:
+        return resolve_confirmed_track(
+            state,
+            candidate_id,
+            face_landmarks,
+            claimed_student_ids
+        )
+
+    if issue is not None:
+        state.note_weak_prediction()
+        return "Unknown", "Face detected", issue, state
+
+    # Only an unconfirmed track may inherit an identity that already
+    # completed attendance. A confirmed track above can never be overwritten.
+    if candidate_id is not None and candidate_id in recognized:
+        state.adopt_completed_identity(candidate_id, candidate_name)
+        claimed_student_ids.add(candidate_id)
+        return candidate_id, candidate_name, "Present", state
+
+    if not strong_prediction:
+        state.note_weak_prediction()
+        return "Unknown", *hint_for_weak_track(box), state
+
+    if candidate_id in claimed_student_ids:
+        state.note_weak_prediction()
+        return "Unknown", "Unknown", "Duplicate identity blocked", state
+
+    return accumulate_towards_confirmation(
+        state,
+        candidate_id,
+        candidate_name,
+        confidence,
+        claimed_student_ids
+    )
+
+
+def resolve_confirmed_track(
+    state,
+    candidate_id,
+    face_landmarks,
+    claimed_student_ids
+):
+    """A track whose identity is already locked: hold it, or lose it."""
+    locked_id = state.student_id
+    locked_name = state.student_name
+
+    if state.attendance_saved:
+        if locked_id:
+            claimed_student_ids.add(locked_id)
+        return locked_id, locked_name, "Present", state
+
+    if locked_id in claimed_student_ids:
+        return locked_id, locked_name, "Duplicate identity blocked", state
+
+    student_id, student_name, status, state = process_confirmed_track(
+        state,
+        candidate_id,
+        get_face_yaw(face_landmarks),
+        current_subject
+    )
+
+    if student_id != "Unknown":
+        claimed_student_ids.add(student_id)
+
+    return student_id, student_name, status, state
+
+
+def accumulate_towards_confirmation(
+    state,
+    candidate_id,
+    candidate_name,
+    confidence,
+    claimed_student_ids
+):
+    """
+    A good prediction on an unconfirmed track: add a vote, then check.
+
+    Confirmation needs a full window of votes that overwhelmingly agree, a
+    good average distance, and a consecutive run on the same identity. See
+    TrackState.can_confirm().
+    """
+    state.add_prediction(candidate_id, candidate_name, confidence)
+    verdict = state.evaluate_history()
+
+    if verdict is None:
+        return (
+            "Unknown",
+            "Verifying...",
+            f"Verifying 0/{PREDICTION_HISTORY_SIZE}",
+            state
+        )
+
+    if not state.can_confirm(verdict, claimed_student_ids):
+        return (
+            "Unknown",
+            "Verifying...",
+            (
+                f"Verifying {verdict.history_count}/{PREDICTION_HISTORY_SIZE} "
+                f"{verdict.agreement_ratio * 100:.0f}%"
+            ),
+            state
+        )
+
+    state.confirm(
+        verdict.dominant_id,
+        verdict.dominant_name,
+        create_liveness_state()
+    )
+    claimed_student_ids.add(verdict.dominant_id)
+
+    return (
+        verdict.dominant_id,
+        verdict.dominant_name,
+        get_liveness_message(state.liveness),
+        state
+    )
+
+
+def hint_for_weak_track(box):
+    """`(name, status)` for a face we cannot match - a nudge, not a verdict."""
+    if (
+        box.width < MIN_FACE_WIDTH * 1.25
+        or box.height < MIN_FACE_HEIGHT * 1.25
+    ):
+        return "Face detected", "Move closer"
+
+    return "Unknown", "Unknown"
+
+
+# =====================================================
 # VIDEO GENERATOR
 # =====================================================
 
@@ -1088,7 +1166,6 @@ def draw_face_result(
 def generate_frames():
     global cap
     global attendance_running
-    global track_verification
 
     while attendance_running:
         if cap is None:
@@ -1105,355 +1182,70 @@ def generate_frames():
 
         frame_height, frame_width = frame.shape[:2]
 
-        # Run MediaPipe on a smaller copy to reduce lag.
-        # Landmarks are normalized, so they can still be
-        # mapped correctly to the original full frame.
-        if frame_width > MEDIAPIPE_PROCESS_WIDTH:
-            process_scale = (
-                MEDIAPIPE_PROCESS_WIDTH
-                / float(frame_width)
-            )
-
-            process_height = max(
-                int(frame_height * process_scale),
-                1
-            )
-
-            process_frame = cv2.resize(
-                frame,
-                (
-                    MEDIAPIPE_PROCESS_WIDTH,
-                    process_height
-                ),
-                interpolation=cv2.INTER_AREA
-            )
-        else:
-            process_frame = frame
-
-        rgb = cv2.cvtColor(
-            process_frame,
-            cv2.COLOR_BGR2RGB
-        )
-
-        rgb.flags.writeable = False
-        results = face_mesh.process(rgb)
-        rgb.flags.writeable = True
+        results = detect_faces(frame)
 
         used_track_ids = set()
         claimed_student_ids = set()
         displayed_face_count = 0
 
-        if results.multi_face_landmarks:
-            for face_landmarks in results.multi_face_landmarks:
-                raw_box = get_face_box(
-                    face_landmarks,
-                    frame_width,
-                    frame_height
-                )
+        for face_landmarks in results.multi_face_landmarks or []:
+            raw_box = get_face_box(
+                face_landmarks,
+                frame_width,
+                frame_height
+            )
 
-                if not face_passes_geometry_gate(
-                    face_landmarks,
-                    frame_width,
-                    frame_height,
-                    raw_box
-                ):
-                    # Invalid object-like detections are ignored
-                    # completely and receive no visible box.
-                    continue
+            if not face_passes_geometry_gate(
+                face_landmarks,
+                frame_width,
+                frame_height,
+                raw_box
+            ):
+                # Invalid object-like detections are ignored
+                # completely and receive no visible box.
+                continue
 
-                track_id = assign_track_id(
-                    raw_box,
-                    used_track_ids
-                )
-                used_track_ids.add(track_id)
+            track_id = tracker.assign(raw_box, used_track_ids)
+            used_track_ids.add(track_id)
 
-                state = track_verification.get(
-                    track_id,
-                    create_track_state()
-                )
+            state = tracker.state_for(track_id)
+            state.note_valid_frame()
 
-                state["valid_face_frames"] += 1
-                track_verification[track_id] = state
+            # Do not draw or recognize a newly detected object
+            # until it has remained a geometrically valid face
+            # for several consecutive frames.
+            if state.is_provisional:
+                continue
 
-                # Do not draw or recognize a newly detected object
-                # until it has remained a geometrically valid face
-                # for several consecutive frames.
-                if (
-                    state["valid_face_frames"]
-                    < REAL_FACE_CONFIRM_FRAMES
-                ):
-                    continue
+            displayed_face_count += 1
 
-                displayed_face_count += 1
+            label, confidence, issue = predict_identity(
+                frame,
+                face_landmarks,
+                state,
+                track_id
+            )
 
-                x1, y1, x2, y2 = raw_box
-                face_width = x2 - x1
-                face_height = y2 - y1
+            student_id, student_name, status, state = resolve_track_identity(
+                state=state,
+                label=label,
+                confidence=confidence,
+                issue=issue,
+                face_landmarks=face_landmarks,
+                box=raw_box,
+                claimed_student_ids=claimed_student_ids
+            )
 
-                confidence = 999.0
-                label = -1
-                quality_issue = None
+            tracker.replace_state(track_id, state)
 
-                skip_recognition = (
-                    state.get("confirmed", False)
-                    and state.get(
-                        "attendance_saved", False
-                    )
-                )
-
-                try:
-                    aligned_face = align_face(
-                        frame,
-                        face_landmarks
-                    )
-
-                    quality_issue = get_face_quality_issue(
-                        aligned_face
-                    )
-
-                    if (
-                        quality_issue is None
-                        and not skip_recognition
-                    ):
-                        processed_face = preprocess_for_lbph(
-                            aligned_face
-                        )
-
-                        label, confidence = recognizer.predict(
-                            processed_face
-                        )
-
-                        # DEBUG, not INFO: this fires once per tracked face
-                        # per frame. At ~15 fps with three faces in shot that
-                        # is 45 lines a second, which makes the log useless
-                        # for anything else. Set LOG_LEVEL=DEBUG in .env when
-                        # you are actually diagnosing recognition.
-                        logger.debug(
-                            "Track: %s | Label: %s | Distance: %.1f",
-                            track_id,
-                            label,
-                            confidence
-                        )
-
-                except Exception:
-                    logger.debug(
-                        "Recognition failed for track %s",
-                        track_id,
-                        exc_info=True
-                    )
-                    quality_issue = "Face alignment failed"
-
-                student_id = "Unknown"
-                student_name = "Unknown"
-                status = "Unknown"
-
-                strong_prediction = (
-                    quality_issue is None
-                    and confidence <= RECOGNITION_THRESHOLD
-                    and label in label_map
-                )
-
-                candidate_id = None
-                candidate_name = None
-
-                if strong_prediction:
-                    candidate = label_map[label]
-                    candidate_id = candidate["student_id"]
-                    candidate_name = candidate["name"]
-
-                # IMPORTANT: a confirmed track is immutable.
-                # Never let a later LBPH prediction overwrite the
-                # identity already locked to this physical track.
-                # This prevents one face from changing from Jeff to
-                # Julio when the LBPH result fluctuates.
-                if state.get("confirmed", False):
-                    locked_id = state.get("student_id")
-                    locked_name = state.get("student_name")
-
-                    if state.get("attendance_saved", False):
-                        student_id = locked_id
-                        student_name = locked_name
-                        status = "Present"
-
-                        if locked_id:
-                            claimed_student_ids.add(locked_id)
-
-                    elif locked_id in claimed_student_ids:
-                        student_id = locked_id
-                        student_name = locked_name
-                        status = "Duplicate identity blocked"
-
-                    else:
-                        (
-                            student_id,
-                            student_name,
-                            status,
-                            state
-                        ) = process_confirmed_track(
-                            state,
-                            candidate_id,
-                            get_face_yaw(face_landmarks),
-                            current_subject
-                        )
-
-                        if student_id != "Unknown":
-                            claimed_student_ids.add(student_id)
-
-                elif quality_issue is not None:
-                    state = handle_weak_unconfirmed_prediction(
-                        state
-                    )
-                    student_name = "Face detected"
-                    status = quality_issue
-
-                else:
-                    # Only an unconfirmed/new track may inherit an
-                    # identity that already completed attendance.
-                    # A confirmed track above can never be overwritten.
-                    already_completed = (
-                        candidate_id is not None
-                        and candidate_id in recognized
-                    )
-
-                    if already_completed:
-                        state["student_id"] = candidate_id
-                        state["student_name"] = candidate_name
-                        state["confirmed"] = True
-                        state["attendance_saved"] = True
-                        state["mismatch_frames"] = 0
-                        state["history"].clear()
-
-                        student_id = candidate_id
-                        student_name = candidate_name
-                        status = "Present"
-
-                        claimed_student_ids.add(candidate_id)
-
-                    elif strong_prediction:
-                        if candidate_id in claimed_student_ids:
-                            state = handle_weak_unconfirmed_prediction(
-                                state
-                            )
-                            student_name = "Unknown"
-                            status = "Duplicate identity blocked"
-
-                        else:
-                            add_prediction_to_history(
-                                state,
-                                candidate_id,
-                                candidate_name,
-                                confidence
-                            )
-
-                            history_result = evaluate_history(
-                                state
-                            )
-
-                            student_name = "Verifying..."
-
-                            if history_result is None:
-                                status = "Verifying 0/30"
-
-                            else:
-                                history_count = history_result[
-                                    "history_count"
-                                ]
-                                agreement_ratio = history_result[
-                                    "agreement_ratio"
-                                ]
-                                average_confidence = history_result[
-                                    "average_confidence"
-                                ]
-                                dominant_id = history_result[
-                                    "dominant_id"
-                                ]
-                                dominant_name = history_result[
-                                    "dominant_name"
-                                ]
-
-                                enough_history = (
-                                    history_count
-                                    >= PREDICTION_HISTORY_SIZE
-                                )
-
-                                strong_agreement = (
-                                    agreement_ratio
-                                    >= MIN_LABEL_AGREEMENT
-                                )
-
-                                strong_average = (
-                                    average_confidence
-                                    <= CONFIRMATION_CONFIDENCE
-                                )
-
-                                consecutive_match = (
-                                    state["consecutive_id"]
-                                    == dominant_id
-                                    and state["consecutive_count"]
-                                    >= MIN_CONSECUTIVE_IDENTITY_FRAMES
-                                )
-
-                                can_confirm = (
-                                    enough_history
-                                    and strong_agreement
-                                    and strong_average
-                                    and consecutive_match
-                                    and dominant_id
-                                    not in claimed_student_ids
-                                )
-
-                                if can_confirm:
-                                    state["student_id"] = dominant_id
-                                    state["student_name"] = dominant_name
-                                    state["confirmed"] = True
-                                    state["attendance_saved"] = False
-                                    state["mismatch_frames"] = 0
-                                    state["liveness"] = (
-                                        create_liveness_state()
-                                    )
-
-                                    student_id = dominant_id
-                                    student_name = dominant_name
-                                    status = get_liveness_message(
-                                        state["liveness"]
-                                    )
-
-                                    claimed_student_ids.add(
-                                        dominant_id
-                                    )
-
-                                else:
-                                    status = (
-                                        f"Verifying {history_count}/"
-                                        f"{PREDICTION_HISTORY_SIZE} "
-                                        f"{agreement_ratio * 100:.0f}%"
-                                    )
-
-                    else:
-                        state = handle_weak_unconfirmed_prediction(
-                            state
-                        )
-
-                        if (
-                            face_width < MIN_FACE_WIDTH * 1.25
-                            or face_height < MIN_FACE_HEIGHT * 1.25
-                        ):
-                            student_name = "Face detected"
-                            status = "Move closer"
-                        else:
-                            student_name = "Unknown"
-                            status = "Unknown"
-
-                track_verification[track_id] = state
-
-                draw_face_result(
-                    frame,
-                    raw_box,
-                    student_name,
-                    status,
-                    confidence,
-                    track_id
-                )
+            draw_face_result(
+                frame,
+                raw_box,
+                student_name,
+                status,
+                confidence,
+                track_id
+            )
 
         if displayed_face_count == 0:
             cv2.putText(
@@ -1466,26 +1258,12 @@ def generate_frames():
                 2
             )
 
-        success, buffer = cv2.imencode(
-            ".jpg",
-            frame,
-            [
-                int(cv2.IMWRITE_JPEG_QUALITY),
-                STREAM_JPEG_QUALITY
-            ]
-        )
+        part = encode_frame(frame)
 
-        if not success:
+        if part is None:
             continue
 
-        frame_bytes = buffer.tobytes()
-
-        yield (
-            b"--frame\r\n"
-            b"Content-Type: image/jpeg\r\n\r\n"
-            + frame_bytes
-            + b"\r\n"
-        )
+        yield part
 
     if cap is not None:
         cap.release()
