@@ -74,7 +74,7 @@ py-modules = [
     "face_preprocessing",
     "setup_db",
 ]
-packages = ["config", "security"]
+packages = ["config", "security", "vision"]
 
 
 # ===========================================================================

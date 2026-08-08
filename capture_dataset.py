@@ -18,6 +18,20 @@ from camera_utils import (
 from config.exit_codes import EXIT_CANCELLED, EXIT_FAILURE, EXIT_SUCCESS
 from config.logging_config import configure_logging
 from security.paths import UnsafeStudentPathError, student_dataset_path
+from vision.geometry import box_to_xywh, get_face_box
+from vision.landmarks import (
+    LEFT_EYE_OUTER,
+    LEFT_MOUTH,
+    LEFT_UPPER_CHEEK,
+    LOWER_LIP,
+    NOSE_TIP,
+    RIGHT_EYE_OUTER,
+    RIGHT_MOUTH,
+    RIGHT_UPPER_CHEEK,
+    UPPER_LIP,
+)
+from vision.quality import ENROLMENT_QUALITY, quality_issue
+from vision.validation import ENROLMENT_PROFILE, is_valid_face_candidate
 
 # This module runs as a subprocess launched by app.py, so it is an entry point
 # and owns logging configuration for its own process. app.py branches on the
@@ -296,14 +310,12 @@ MEDIUM_MAX_RATIO = 0.17
 FAR_MIN_RATIO = 0.012
 FAR_MAX_RATIO = 0.075
 
-MIN_FACE_WIDTH = 45
-MIN_FACE_HEIGHT = 45
-
-BLUR_THRESHOLD = 55
-
-MIN_BRIGHTNESS = 45
-MAX_BRIGHTNESS = 220
-MIN_CONTRAST = 18
+# The face-geometry and image-quality thresholds that used to sit here are
+# now ENROLMENT_PROFILE and ENROLMENT_QUALITY in vision/ (MA-4). The values
+# are unchanged; what changed is that recognition's differing values are now
+# visible beside them instead of 1,400 lines away in another file.
+MIN_FACE_WIDTH = ENROLMENT_PROFILE.min_face_width
+MIN_FACE_HEIGHT = ENROLMENT_PROFILE.min_face_height
 
 CENTER_TOLERANCE = 180
 
@@ -313,21 +325,14 @@ DISTANCE_HOLD_FRAMES = 3
 
 # =====================================================
 # MEDIAPIPE LANDMARK INDICES
+#
+# From vision/landmarks.py, which is now the only place a mesh index is
+# written down. The two aliases keep the pose and expression code below
+# reading the way it did; LEFT_EYE here has always meant the outer corner.
 # =====================================================
 
-NOSE_TIP = 1
-
-LEFT_EYE = 33
-RIGHT_EYE = 263
-
-LEFT_MOUTH = 61
-RIGHT_MOUTH = 291
-
-UPPER_LIP = 13
-LOWER_LIP = 14
-
-LEFT_UPPER_CHEEK = 205
-RIGHT_UPPER_CHEEK = 425
+LEFT_EYE = LEFT_EYE_OUTER
+RIGHT_EYE = RIGHT_EYE_OUTER
 
 
 # =====================================================
@@ -342,246 +347,32 @@ pose_frame_count = 0
 
 
 # =====================================================
-# FACE BOX
+# FACE BOX AND VALIDATION (MA-4)
+#
+# Both functions used to be defined here in full, and again - with different
+# thresholds - in recognize_face.py. They now come from vision/, which both
+# modules import. The wrappers bind the enrolment profile once and keep the
+# (x, y, width, height) shape the capture loop below expects.
+#
+# ENROLMENT_PROFILE is deliberately more pose-tolerant than the recognition
+# profile: 50 of the MAX_IMAGES captured here are LEFT/RIGHT/UP/DOWN by
+# design, and recognition's frontal-only nose rule would reject all of them.
+# See vision/validation.py.
 # =====================================================
 
-def get_face_box(
-    face_landmarks,
-    frame_width,
-    frame_height
-):
-
-    landmark_x = []
-    landmark_y = []
-
-    for landmark in (
-        face_landmarks.landmark
-    ):
-
-        pixel_x = int(
-            landmark.x
-            * frame_width
-        )
-
-        pixel_y = int(
-            landmark.y
-            * frame_height
-        )
-
-        landmark_x.append(
-            pixel_x
-        )
-
-        landmark_y.append(
-            pixel_y
-        )
-
-    x1 = max(
-        min(landmark_x),
-        0
-    )
-
-    y1 = max(
-        min(landmark_y),
-        0
-    )
-
-    x2 = min(
-        max(landmark_x),
-        frame_width - 1
-    )
-
-    y2 = min(
-        max(landmark_y),
-        frame_height - 1
-    )
-
-    x = x1
-    y = y1
-    width = x2 - x1
-    height = y2 - y1
-
-    return (
-        x,
-        y,
-        width,
-        height
-    )
-
-
-# =====================================================
-# REJECT NON-FACE OBJECTS
-# =====================================================
-
-def is_valid_face_candidate(
+def face_passes_geometry_gate(
     face_landmarks,
     frame_width,
     frame_height,
-    x,
-    y,
-    width,
-    height
+    box
 ):
-
-    if (
-        width < MIN_FACE_WIDTH
-        or height < MIN_FACE_HEIGHT
-    ):
-        return False
-
-    aspect_ratio = (
-        width / float(height)
+    return is_valid_face_candidate(
+        face_landmarks,
+        frame_width,
+        frame_height,
+        box,
+        ENROLMENT_PROFILE
     )
-
-    if not (
-        0.55
-        <= aspect_ratio
-        <= 1.15
-    ):
-        return False
-
-    left_eye = (
-        face_landmarks.landmark[
-            LEFT_EYE
-        ]
-    )
-
-    right_eye = (
-        face_landmarks.landmark[
-            RIGHT_EYE
-        ]
-    )
-
-    nose = (
-        face_landmarks.landmark[
-            NOSE_TIP
-        ]
-    )
-
-    upper_lip = (
-        face_landmarks.landmark[
-            UPPER_LIP
-        ]
-    )
-
-    lower_lip = (
-        face_landmarks.landmark[
-            LOWER_LIP
-        ]
-    )
-
-    left_eye_x = int(
-        left_eye.x * frame_width
-    )
-
-    left_eye_y = int(
-        left_eye.y * frame_height
-    )
-
-    right_eye_x = int(
-        right_eye.x * frame_width
-    )
-
-    right_eye_y = int(
-        right_eye.y * frame_height
-    )
-
-    nose_x = int(
-        nose.x * frame_width
-    )
-
-    nose_y = int(
-        nose.y * frame_height
-    )
-
-    mouth_y = int(
-        (
-            upper_lip.y
-            + lower_lip.y
-        )
-        / 2
-        * frame_height
-    )
-
-    eye_center_y = (
-        left_eye_y
-        + right_eye_y
-    ) / 2
-
-    eye_distance = (
-        (
-            right_eye_x
-            - left_eye_x
-        ) ** 2
-        +
-        (
-            right_eye_y
-            - left_eye_y
-        ) ** 2
-    ) ** 0.5
-
-    minimum_eye_distance = max(
-        8,
-        width * 0.18
-    )
-
-    maximum_eye_distance = (
-        width * 0.70
-    )
-
-    if not (
-        minimum_eye_distance
-        <= eye_distance
-        <= maximum_eye_distance
-    ):
-        return False
-
-    if (
-        abs(
-            left_eye_y
-            - right_eye_y
-        )
-        > height * 0.25
-    ):
-        return False
-
-    if not (
-        x + int(width * 0.18)
-        <= nose_x
-        <= x + int(width * 0.82)
-    ):
-        return False
-
-    if not (
-        y + int(height * 0.15)
-        <= nose_y
-        <= y + int(height * 0.88)
-    ):
-        return False
-
-    # A normal face should have the mouth below
-    # the approximate eye level.
-    if mouth_y <= (
-        eye_center_y
-        + height * 0.08
-    ):
-        return False
-
-    # The nose should normally be between the
-    # eyes and mouth.
-    if nose_y < (
-        eye_center_y
-        - height * 0.08
-    ):
-        return False
-
-    if nose_y > (
-        mouth_y
-        + height * 0.08
-    ):
-        return False
-
-    return True
 
 
 # =====================================================
@@ -643,33 +434,13 @@ def prepare_dataset_face(
 # =====================================================
 
 def get_image_quality_issue(face):
-
-    blur_value = cv2.Laplacian(
+    # Was a full second copy of the recognition quality gate, four thresholds
+    # adrift from it (MA-4). ENROLMENT_QUALITY carries this stage's numbers
+    # and its exact on-screen wording, so the overlay reads as it always did.
+    return quality_issue(
         face,
-        cv2.CV_64F
-    ).var()
-
-    if blur_value < BLUR_THRESHOLD:
-        return "Image is blurry."
-
-    brightness = float(
-        np.mean(face)
+        ENROLMENT_QUALITY
     )
-
-    if brightness < MIN_BRIGHTNESS:
-        return "The face is too dark."
-
-    if brightness > MAX_BRIGHTNESS:
-        return "The face is too bright."
-
-    contrast = float(
-        np.std(face)
-    )
-
-    if contrast < MIN_CONTRAST:
-        return "Improve the lighting or contrast."
-
-    return None
 
 
 # =====================================================
@@ -1146,25 +917,24 @@ try:
                 results.multi_face_landmarks
             ):
 
-                (
-                    x,
-                    y,
-                    width,
-                    height
-                ) = get_face_box(
+                face_box = get_face_box(
                     face_landmarks,
                     frame_width,
                     frame_height
                 )
 
-                if is_valid_face_candidate(
-                    face_landmarks,
-                    frame_width,
-                    frame_height,
+                (
                     x,
                     y,
                     width,
                     height
+                ) = box_to_xywh(face_box)
+
+                if face_passes_geometry_gate(
+                    face_landmarks,
+                    frame_width,
+                    frame_height,
+                    face_box
                 ):
 
                     faces.append(

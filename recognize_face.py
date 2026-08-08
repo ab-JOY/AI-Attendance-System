@@ -13,6 +13,10 @@ import mysql.connector
 from camera_utils import open_best_camera
 from config.settings import settings
 from face_preprocessing import align_face, preprocess_for_lbph
+from vision.geometry import box_area, box_center, box_iou, get_face_box
+from vision.landmarks import LEFT_EYE_OUTER, NOSE_TIP, RIGHT_EYE_OUTER
+from vision.quality import RECOGNITION_QUALITY, quality_issue
+from vision.validation import RECOGNITION_PROFILE, is_valid_face_candidate
 
 logger = logging.getLogger(__name__)
 
@@ -187,46 +191,22 @@ logger.info("MediaPipe Face Mesh loaded successfully")
 
 
 # =====================================================
-# LANDMARK INDICES
-# =====================================================
-
-NOSE_TIP = 1
-
-LEFT_EYE_OUTER = 33
-LEFT_EYE_INNER = 133
-LEFT_EYE_UPPER = 159
-LEFT_EYE_LOWER = 145
-
-RIGHT_EYE_INNER = 362
-RIGHT_EYE_OUTER = 263
-RIGHT_EYE_UPPER = 386
-RIGHT_EYE_LOWER = 374
-
-LEFT_MOUTH = 61
-RIGHT_MOUTH = 291
-UPPER_LIP = 13
-LOWER_LIP = 14
-
-
-# =====================================================
 # FACE VALIDATION AND QUALITY SETTINGS
+#
+# The geometry thresholds and the mesh landmark indices used to live here,
+# duplicated in capture_dataset.py with different values (MA-4). They now live
+# in vision/validation.py as RECOGNITION_PROFILE, beside the enrolment profile
+# that differs from it, so the divergence is visible in one place.
+#
+# MIN_FACE_WIDTH / MIN_FACE_HEIGHT are still referenced below for the "Move
+# closer" hint, which is a UI nudge rather than a gate, so they are read from
+# the profile rather than restated.
 # =====================================================
 
-MIN_FACE_WIDTH = 70
-MIN_FACE_HEIGHT = 70
-
-MIN_FACE_AREA_RATIO = 0.010
-MAX_FACE_AREA_RATIO = 0.50
-
-MIN_FACE_ASPECT_RATIO = 0.55
-MAX_FACE_ASPECT_RATIO = 1.20
+MIN_FACE_WIDTH = RECOGNITION_PROFILE.min_face_width
+MIN_FACE_HEIGHT = RECOGNITION_PROFILE.min_face_height
 
 REAL_FACE_CONFIRM_FRAMES = 5
-
-BLUR_THRESHOLD = 50.0
-MIN_BRIGHTNESS = 40.0
-MAX_BRIGHTNESS = 222.0
-MIN_CONTRAST = 17.0
 
 
 # =====================================================
@@ -352,343 +332,38 @@ next_track_id = 0
 
 
 # =====================================================
-# BASIC GEOMETRY HELPERS
+# FACE GEOMETRY AND QUALITY (MA-4)
+#
+# get_face_box, box_iou, box_center, box_area, is_valid_face_candidate and
+# the quality gate all used to be defined here, and again - differently - in
+# capture_dataset.py. They now come from vision/, which both modules import.
+#
+# The two wrappers below exist so the call sites in this file stay readable:
+# they bind the recognition profile once instead of repeating it at every
+# call. Recognition never uses any other profile.
 # =====================================================
 
 
-def landmark_pixel(
-    face_landmarks,
-    index,
-    frame_width,
-    frame_height
-):
-    landmark = face_landmarks.landmark[index]
-
-    return (
-        float(landmark.x * frame_width),
-        float(landmark.y * frame_height)
-    )
-
-
-def average_landmark_pixel(
-    face_landmarks,
-    indices,
-    frame_width,
-    frame_height
-):
-    points = [
-        landmark_pixel(
-            face_landmarks,
-            index,
-            frame_width,
-            frame_height
-        )
-        for index in indices
-    ]
-
-    average_x = sum(point[0] for point in points) / len(points)
-    average_y = sum(point[1] for point in points) / len(points)
-
-    return average_x, average_y
-
-
-def get_face_box(
-    face_landmarks,
-    frame_width,
-    frame_height
-):
-    landmark_x = []
-    landmark_y = []
-
-    for landmark in face_landmarks.landmark:
-        landmark_x.append(
-            int(landmark.x * frame_width)
-        )
-        landmark_y.append(
-            int(landmark.y * frame_height)
-        )
-
-    x1 = max(min(landmark_x), 0)
-    y1 = max(min(landmark_y), 0)
-    x2 = min(max(landmark_x), frame_width - 1)
-    y2 = min(max(landmark_y), frame_height - 1)
-
-    return x1, y1, x2, y2
-
-
-def box_iou(first_box, second_box):
-    first_x1, first_y1, first_x2, first_y2 = first_box
-    second_x1, second_y1, second_x2, second_y2 = second_box
-
-    intersection_x1 = max(first_x1, second_x1)
-    intersection_y1 = max(first_y1, second_y1)
-    intersection_x2 = min(first_x2, second_x2)
-    intersection_y2 = min(first_y2, second_y2)
-
-    intersection_width = max(
-        intersection_x2 - intersection_x1,
-        0
-    )
-    intersection_height = max(
-        intersection_y2 - intersection_y1,
-        0
-    )
-
-    intersection_area = (
-        intersection_width * intersection_height
-    )
-
-    first_area = max(
-        (first_x2 - first_x1)
-        * (first_y2 - first_y1),
-        1
-    )
-
-    second_area = max(
-        (second_x2 - second_x1)
-        * (second_y2 - second_y1),
-        1
-    )
-
-    union_area = (
-        first_area
-        + second_area
-        - intersection_area
-    )
-
-    return intersection_area / max(union_area, 1)
-
-
-def box_center(box):
-    x1, y1, x2, y2 = box
-
-    return (
-        (x1 + x2) / 2.0,
-        (y1 + y2) / 2.0
-    )
-
-
-def box_area(box):
-    x1, y1, x2, y2 = box
-
-    return max(x2 - x1, 0) * max(y2 - y1, 0)
-
-
-# =====================================================
-# FALSE-FACE / OBJECT REJECTION
-# =====================================================
-
-
-def is_valid_face_candidate(
+def face_passes_geometry_gate(
     face_landmarks,
     frame_width,
     frame_height,
     box
 ):
-    x1, y1, x2, y2 = box
-
-    face_width = x2 - x1
-    face_height = y2 - y1
-
-    if (
-        face_width < MIN_FACE_WIDTH
-        or face_height < MIN_FACE_HEIGHT
-    ):
-        return False
-
-    frame_area = max(
-        frame_width * frame_height,
-        1
-    )
-
-    face_area_ratio = (
-        face_width * face_height
-    ) / frame_area
-
-    if not (
-        MIN_FACE_AREA_RATIO
-        <= face_area_ratio
-        <= MAX_FACE_AREA_RATIO
-    ):
-        return False
-
-    aspect_ratio = face_width / float(face_height)
-
-    if not (
-        MIN_FACE_ASPECT_RATIO
-        <= aspect_ratio
-        <= MAX_FACE_ASPECT_RATIO
-    ):
-        return False
-
-    left_eye = average_landmark_pixel(
+    return is_valid_face_candidate(
         face_landmarks,
-        [
-            LEFT_EYE_OUTER,
-            LEFT_EYE_INNER,
-            LEFT_EYE_UPPER,
-            LEFT_EYE_LOWER
-        ],
         frame_width,
-        frame_height
+        frame_height,
+        box,
+        RECOGNITION_PROFILE
     )
-
-    right_eye = average_landmark_pixel(
-        face_landmarks,
-        [
-            RIGHT_EYE_INNER,
-            RIGHT_EYE_OUTER,
-            RIGHT_EYE_UPPER,
-            RIGHT_EYE_LOWER
-        ],
-        frame_width,
-        frame_height
-    )
-
-    if left_eye[0] > right_eye[0]:
-        left_eye, right_eye = right_eye, left_eye
-
-    nose = landmark_pixel(
-        face_landmarks,
-        NOSE_TIP,
-        frame_width,
-        frame_height
-    )
-
-    left_mouth = landmark_pixel(
-        face_landmarks,
-        LEFT_MOUTH,
-        frame_width,
-        frame_height
-    )
-
-    right_mouth = landmark_pixel(
-        face_landmarks,
-        RIGHT_MOUTH,
-        frame_width,
-        frame_height
-    )
-
-    upper_lip = landmark_pixel(
-        face_landmarks,
-        UPPER_LIP,
-        frame_width,
-        frame_height
-    )
-
-    lower_lip = landmark_pixel(
-        face_landmarks,
-        LOWER_LIP,
-        frame_width,
-        frame_height
-    )
-
-    eye_difference_x = right_eye[0] - left_eye[0]
-    eye_difference_y = right_eye[1] - left_eye[1]
-
-    eye_distance = (
-        eye_difference_x ** 2
-        + eye_difference_y ** 2
-    ) ** 0.5
-
-    if not (
-        face_width * 0.17
-        <= eye_distance
-        <= face_width * 0.68
-    ):
-        return False
-
-    if abs(eye_difference_y) > eye_distance * 0.55:
-        return False
-
-    eye_center_x = (
-        left_eye[0] + right_eye[0]
-    ) / 2.0
-
-    eye_center_y = (
-        left_eye[1] + right_eye[1]
-    ) / 2.0
-
-    mouth_center_x = (
-        left_mouth[0] + right_mouth[0]
-    ) / 2.0
-
-    mouth_center_y = (
-        upper_lip[1] + lower_lip[1]
-    ) / 2.0
-
-    mouth_width = abs(
-        right_mouth[0] - left_mouth[0]
-    )
-
-    if not (
-        eye_distance * 0.35
-        <= mouth_width
-        <= eye_distance * 1.80
-    ):
-        return False
-
-    if not (
-        y1 + face_height * 0.15
-        <= eye_center_y
-        <= y1 + face_height * 0.60
-    ):
-        return False
-
-    if mouth_center_y <= eye_center_y + face_height * 0.10:
-        return False
-
-    if not (
-        eye_center_y - face_height * 0.05
-        <= nose[1]
-        <= mouth_center_y + face_height * 0.08
-    ):
-        return False
-
-    if abs(nose[0] - eye_center_x) > face_width * 0.28:
-        return False
-
-    if abs(mouth_center_x - eye_center_x) > face_width * 0.28:
-        return False
-
-    return True
-
-
-# =====================================================
-# IMAGE QUALITY
-# =====================================================
 
 
 def get_face_quality_issue(aligned_face):
-    if aligned_face is None or aligned_face.size == 0:
-        return "Face alignment failed"
-
-    blur_value = cv2.Laplacian(
+    return quality_issue(
         aligned_face,
-        cv2.CV_64F
-    ).var()
-
-    if blur_value < BLUR_THRESHOLD:
-        return "Face is blurry"
-
-    brightness = float(
-        aligned_face.mean()
+        RECOGNITION_QUALITY
     )
-
-    if brightness < MIN_BRIGHTNESS:
-        return "Face is too dark"
-
-    if brightness > MAX_BRIGHTNESS:
-        return "Face is too bright"
-
-    contrast = float(
-        aligned_face.std()
-    )
-
-    if contrast < MIN_CONTRAST:
-        return "Low face contrast"
-
-    return None
 
 
 # =====================================================
@@ -1476,7 +1151,7 @@ def generate_frames():
                     frame_height
                 )
 
-                if not is_valid_face_candidate(
+                if not face_passes_geometry_gate(
                     face_landmarks,
                     frame_width,
                     frame_height,
