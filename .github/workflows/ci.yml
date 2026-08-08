@@ -1,0 +1,59 @@
+# Lint and unit tests on every push and pull request.
+#
+# Deferred from Phase 1 because there was no git remote; one exists now, so
+# this landed in Phase 2.
+#
+# WHAT THIS CANNOT COVER, and why that is not fixable here:
+#
+#   eval_accuracy.py and eval_heldout_accuracy.py measure recognition
+#   accuracy against dataset/ and trainer/. Both are gitignored - they hold
+#   face images of identifiable students and the biometric templates derived
+#   from them, which are sensitive personal information under RA 10173 (see
+#   docs/data_privacy.md). They must never reach a remote, so CI cannot run
+#   the evaluators. Accuracy stays a local check, recorded in the handover.
+#
+#   There is no test database either, so nothing here exercises a SQL query.
+#   The route tests assert denials, which are decided before any route body
+#   runs and therefore need no MySQL.
+#
+# What it does cover: ruff, and the 205-test suite - password hashing, path
+# validation, rate limiting, model persistence, import hygiene, enrolment
+# exit codes, and every access-control rule in the route table.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+
+    env:
+      # Required by config/settings.py, which refuses to start without one.
+      # A throwaway value: it signs nothing outside this job.
+      SECRET_KEY: ci-only-not-a-real-secret-key-000000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Pinned to 3.11 to match pyproject.toml's requires-python. The
+          # upper bound is load-bearing: mediapipe 0.10.14 publishes no
+          # wheels for 3.12 or later.
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        run: pytest tests/ -q
