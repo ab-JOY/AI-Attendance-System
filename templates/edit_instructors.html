@@ -40,9 +40,24 @@
 
     <div class="form-container">
 
+        <!--
+            Two things were broken here alongside FS-6 (app.py rendered
+            "edit_instructor.html", which does not exist):
+
+            - url_for passed `id`, but the route is
+              /update_instructor/<instructor_id>, so building this URL
+              raised BuildError; and
+            - the form asked for `instructor.username`, a column that has
+              never existed in the schema.
+
+            Both fixed, because a route with authentication bolted onto it
+            that still fails for the legitimate user is not secured.
+        -->
         <form action="{{ url_for('update_instructor',
-                                 id=instructor.id) }}"
+                                 instructor_id=instructor.instructor_id) }}"
               method="POST">
+
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
             <label for="instructor_id">Instructor ID</label>
             <input
@@ -50,7 +65,7 @@
                 id="instructor_id"
                 name="instructor_id"
                 value="{{ instructor.instructor_id }}"
-                required>
+                readonly>
 
             <label for="fullname">Full Name</label>
             <input
@@ -58,14 +73,6 @@
                 id="fullname"
                 name="fullname"
                 value="{{ instructor.fullname }}"
-                required>
-
-            <label for="username">Username</label>
-            <input
-                type="text"
-                id="username"
-                name="username"
-                value="{{ instructor.username }}"
                 required>
 
             <label for="password">New Password (Optional)</label>

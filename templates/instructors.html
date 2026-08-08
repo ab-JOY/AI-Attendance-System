@@ -41,6 +41,8 @@
 
         <form action="{{ url_for('add_instructor') }}"
               method="POST">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
 
             <input type="number"
                    name="instructor_id"
@@ -69,10 +71,17 @@
 
     <table class="subject-table">
 
+        <!--
+            SE-17. This table printed the password column. While passwords
+            were plaintext that put every instructor credential on screen
+            for anyone looking over a shoulder or reading a screenshot;
+            now that they are bcrypt hashes it would still hand out
+            material to crack offline. A password is never displayed.
+        -->
         <tr>
             <th>Instructor ID</th>
             <th>Full Name</th>
-            <th>Password</th>
+            <th>Password Status</th>
         </tr>
 
         {% if instructors %}
@@ -80,7 +89,13 @@
             <tr>
                 <td>{{ instructor.instructor_id }}</td>
                 <td>{{ instructor.fullname }}</td>
-                <td>{{ instructor.password }}</td>
+                <td>
+                    {% if instructor.must_change_password %}
+                        Must be changed at next login
+                    {% else %}
+                        Set
+                    {% endif %}
+                </td>
             </tr>
             {% endfor %}
         {% else %}

@@ -32,6 +32,8 @@
             method="POST"
             action="{{ url_for('search_student') }}"
         >
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
 
             <input
                 type="text"
@@ -128,6 +130,8 @@
                             'Are you sure you want to permanently delete {{ student.name }}?'
                         );"
                     >
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
 
                         <button
                             type="submit"
@@ -149,6 +153,8 @@
                             'Recapture face for {{ student.name }}?'
                         );"
                     >
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
 
                         <input
                             type="hidden"

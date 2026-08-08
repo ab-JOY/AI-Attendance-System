@@ -17,7 +17,7 @@ from camera_utils import (
 )
 from config.exit_codes import EXIT_CANCELLED, EXIT_FAILURE, EXIT_SUCCESS
 from config.logging_config import configure_logging
-from config.settings import settings
+from security.paths import UnsafeStudentPathError, student_dataset_path
 
 # This module runs as a subprocess launched by app.py, so it is an entry point
 # and owns logging configuration for its own process. app.py branches on the
@@ -77,15 +77,23 @@ if not student_id or not student_name:
 # =====================================================
 # DATASET DIRECTORY
 # =====================================================
+#
+# SE-3. This used to be a bare f-string joined onto the dataset directory,
+# with the two values coming - through app.py and a subprocess call - from an
+# unvalidated web form. The same helper that app.py uses builds the path here,
+# so enrolment and management cannot disagree about where a student's folder
+# is, and neither can be talked into a path outside dataset/.
+#
+# The check runs before os.makedirs, which matters beyond the traversal: an
+# empty dataset/{id}_{name} left behind by a failed run is what produces the
+# dangling folders behind FS-2 and FS-9. See tests/test_capture_exit_codes.py.
 
-folder_name = (
-    f"{student_id}_{student_name}"
-)
+try:
+    dataset_path = str(student_dataset_path(student_id, student_name))
 
-dataset_path = os.path.join(
-    str(settings.dataset_dir),
-    folder_name
-)
+except UnsafeStudentPathError as error:
+    logger.error("Refusing to capture into an unsafe dataset path: %s", error)
+    sys.exit(EXIT_FAILURE)
 
 os.makedirs(
     dataset_path,

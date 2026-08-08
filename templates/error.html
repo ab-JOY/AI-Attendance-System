@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ status_code }} — AI Attendance System</title>
+
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+
+<body>
+
+{% if session['user'] %}
+    {% include 'sidebar.html' %}
+{% endif %}
+
+<div class="main-content">
+
+    <!--
+        SE-10 / US-1. Every failure used to render the driver's exception
+        text on a blank page with no navigation - a schema disclosure and a
+        dead end at once. The detail is in logs/app.log; what belongs here
+        is a status, a plain description and a way out.
+    -->
+
+    <h1>{{ status_code }}</h1>
+
+    <p role="alert">{{ message }}</p>
+
+    <p>
+        {% if session['user'] %}
+            <a href="{{ url_for('dashboard') }}">Back to the dashboard</a>
+        {% else %}
+            <a href="{{ url_for('home') }}">Back to the login page</a>
+        {% endif %}
+    </p>
+
+</div>
+
+</body>
+</html>

@@ -4,6 +4,7 @@ import shutil
 import stat
 import subprocess
 import sys
+from datetime import timedelta
 
 import mysql.connector
 import pandas as pd
@@ -18,6 +19,7 @@ from flask import (
     session,
     url_for,
 )
+from flask_wtf.csrf import CSRFError, CSRFProtect
 
 from config.exit_codes import EXIT_CANCELLED, EXIT_SUCCESS
 from config.logging_config import configure_logging
@@ -29,6 +31,27 @@ from config.logging_config import configure_logging
 # which point `settings` was the view function and every database call
 # raised AttributeError. Do not rename this back without renaming the route.
 from config.settings import settings as app_config
+from security.access import (
+    MUST_CHANGE_PASSWORD,
+    authenticated,
+    install_access_control,
+    json_api,
+    public,
+    role_required,
+)
+from security.passwords import (
+    PasswordTooLongError,
+    hash_password,
+    is_known_default,
+    verify_password,
+)
+from security.paths import (
+    UnsafeStudentPathError,
+    student_dataset_path,
+    validate_student_id,
+    validate_student_name,
+)
+from security.rate_limit import LoginRateLimiter
 
 # app.py is the entry point, so it owns logging configuration for the process.
 #
@@ -51,6 +74,57 @@ app = Flask(__name__)
 # Now required from the environment - see .env.example.
 app.secret_key = app_config.secret_key
 
+# ==============================
+# SESSION HARDENING (SE-11)
+# ==============================
+#
+# HTTPONLY keeps the cookie out of reach of any injected script. SAMESITE=Lax
+# stops a cross-site GET carrying it, which is the second half of the CSRF
+# defence below. The lifetime turns an unattended browser on a shared
+# classroom machine from a permanent session into a 30-minute one.
+#
+# SESSION_COOKIE_SECURE comes from configuration and defaults to False - see
+# config/settings.py for why hardcoding True would lock everyone out of the
+# HTTP-on-localhost deployment this system actually has.
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=app_config.session_cookie_secure,
+    PERMANENT_SESSION_LIFETIME=timedelta(minutes=app_config.session_lifetime_minutes),
+)
+
+# ==============================
+# CSRF (SE-7)
+# ==============================
+#
+# Applied to the whole application rather than form by form. None of the ~15
+# state-changing routes had any CSRF protection, and protecting them
+# individually would mean the next route added is unprotected by default.
+# CSRFProtect rejects any POST without a valid token, so the failure mode for
+# a forgotten token is a visible 400 rather than a silent hole.
+#
+# The token reaches templates as `csrf_token()`; the two fetch() calls in
+# attendance.html send it in an X-CSRFToken header.
+csrf = CSRFProtect(app)
+
+# ==============================
+# ACCESS CONTROL (SE-2, SE-4, SE-5)
+# ==============================
+#
+# Default deny. Every view below is explicitly marked @public, @authenticated
+# or @role_required, and anything unmarked is refused. See security/access.py
+# and tests/test_route_security.py.
+install_access_control(app)
+
+# ==============================
+# LOGIN THROTTLING (SE-13)
+# ==============================
+login_rate_limiter = LoginRateLimiter(
+    max_attempts=app_config.login_max_attempts,
+    lockout_seconds=app_config.login_lockout_seconds,
+    window_seconds=app_config.login_attempt_window_seconds,
+)
+
 
 # ==============================
 # DATABASE CONNECTION
@@ -72,10 +146,95 @@ def remove_readonly_and_retry(function, path, exc_info):
     except Exception:
         raise
 
+
+# ==============================
+# ERROR PAGES (SE-10, US-1, RE-8)
+# ==============================
+#
+# Around fifteen routes used to do `return f"Database error: {error}", 500`.
+# That put the driver's message - table names, column names, MySQL version -
+# on a blank page with no navigation: a schema disclosure and a dead end at
+# the same time. The details go to the log, where they are useful; the client
+# gets a code and a way back.
+
+ERROR_MESSAGES = {
+    400: "That request could not be processed. Please go back and try again.",
+    403: "You do not have permission to view this page.",
+    404: "That page could not be found.",
+    405: "That action is not available from this page.",
+    409: "That change conflicts with existing data.",
+    500: "Something went wrong on the server. The details have been logged.",
+}
+
+
+def error_page(status_code, message=None):
+    """Render the generic error page. Never include exception text here."""
+    return (
+        render_template(
+            "error.html",
+            status_code=status_code,
+            message=message or ERROR_MESSAGES.get(status_code, ERROR_MESSAGES[500]),
+        ),
+        status_code,
+    )
+
+
+CSRF_ERROR_MESSAGE = (
+    "This form has expired or was not submitted from this site. "
+    "Reload the page and try again."
+)
+
+
+@app.errorhandler(CSRFError)
+def handle_csrf_error(error):
+    """
+    Distinct from the generic 400 on purpose.
+
+    For the operator, "reload the page" is actionable where "that request
+    could not be processed" is not - a rejected token is usually just an
+    expired session, not an attack. For the test suite, it is the difference
+    between proving CSRF was enforced and proving *something* returned 400:
+    a POST with a missing form field also produces 400, so a test that only
+    checked the status code would pass on code with no CSRF protection at
+    all.
+    """
+    logger.warning(
+        "CSRF validation failed for %s: %s", request.path, error.description
+    )
+    return error_page(400, CSRF_ERROR_MESSAGE)
+
+
+@app.errorhandler(400)
+@app.errorhandler(403)
+@app.errorhandler(404)
+@app.errorhandler(405)
+@app.errorhandler(409)
+def handle_http_error(error):
+    return error_page(error.code)
+
+
+@app.errorhandler(500)
+def handle_internal_error(error):
+    logger.exception("Unhandled server error", exc_info=error)
+    return error_page(500)
+
+
+@app.errorhandler(Exception)
+def handle_unexpected_exception(error):
+    """
+    Catch-all so an exception raised anywhere cannot reach the browser as a
+    traceback. Flask re-raises HTTPExceptions to their own handlers, so this
+    only sees genuine faults.
+    """
+    logger.exception("Unhandled exception while serving %s", request.path)
+    return error_page(500)
+
+
 # ==============================
 # LOGIN PAGE
 # ==============================
 @app.route('/')
+@public
 def home():
     return render_template('login.html')
 
@@ -83,74 +242,129 @@ def home():
 # ==============================
 # LOGIN PROCESS
 # ==============================
+#
+# Rewritten for SE-1, SE-13 and SE-15. Three things changed and each matters
+# on its own:
+#
+# 1. The password is no longer part of the query. It used to be
+#    `WHERE username=%s AND password=%s`, which let MySQL decide the match -
+#    and the column collation is utf8mb4_general_ci, case-insensitive and
+#    PAD SPACE, so `ADMIN` and `admin   ` both authenticated as `admin`
+#    (measured, SE-15). The row is fetched by identifier and the password is
+#    verified in Python against a bcrypt hash.
+# 2. The *identifier* is re-checked in Python for the same reason. bcrypt
+#    fixes the password half of SE-15 and does nothing for the username half.
+# 3. Consecutive failures are counted and the account is locked (SE-13).
 @app.route('/login', methods=['POST'])
+@public
 def login():
 
-    role = request.form['role']
-    user_id = request.form['user_id']
-    password = request.form['password']
+    role = request.form.get('role', '')
+    user_id = request.form.get('user_id', '')
+    password = request.form.get('password', '')
 
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    rate_limit_key = LoginRateLimiter.key(user_id, request.remote_addr)
+    locked_for = login_rate_limiter.seconds_until_unlocked(rate_limit_key)
 
-    # ADMIN LOGIN
+    if locked_for > 0:
+        logger.warning(
+            "Login refused: %r is locked out for another %d second(s)",
+            user_id,
+            int(locked_for),
+        )
+        return render_template(
+            'login.html',
+            error=(
+                "Too many failed attempts. Try again in "
+                f"{max(1, int(locked_for // 60))} minute(s)."
+            ),
+        ), 429
+
+    account = None
+    conn = None
+    cursor = None
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+
+        if role == "admin":
+            cursor.execute(
+                "SELECT * FROM admin WHERE username=%s",
+                (user_id,)
+            )
+            row = cursor.fetchone()
+
+            # The collation makes the lookup above case-insensitive too, so
+            # the identifier is confirmed here rather than trusted.
+            if row is not None and row['username'] == user_id:
+                account = row
+
+        elif role == "instructor":
+            cursor.execute(
+                "SELECT * FROM instructors WHERE instructor_id=%s",
+                (user_id,)
+            )
+            row = cursor.fetchone()
+
+            if row is not None and row['instructor_id'] == user_id:
+                account = row
+
+    finally:
+        if cursor is not None:
+            cursor.close()
+
+        if conn is not None and conn.is_connected():
+            conn.close()
+
+    if account is None or not verify_password(password, account.get('password')):
+        login_rate_limiter.record_failure(rate_limit_key)
+
+        # Deliberately identical whether the account exists or not, so the
+        # response cannot be used to enumerate usernames.
+        logger.info("Failed login for %r as %r", user_id, role)
+
+        return render_template(
+            'login.html',
+            error='Invalid Login Credentials'
+        ), 401
+
+    login_rate_limiter.record_success(rate_limit_key)
+
+    session.clear()
+    session.permanent = True
+
     if role == "admin":
+        session['user'] = account['username']
+        session['role'] = 'admin'
+    else:
+        session['user'] = account['fullname']
+        session['role'] = 'instructor'
+        session['instructor_id'] = account['instructor_id']
 
-        cursor.execute("""
-            SELECT *
-            FROM admin
-            WHERE username=%s
-            AND password=%s
-        """, (user_id, password))
-
-        admin = cursor.fetchone()
-
-        if admin:
-            session['user'] = admin['username']
-            session['role'] = 'admin'
-
-            cursor.close()
-            conn.close()
-
-            return redirect(url_for('dashboard'))
-
-    # INSTRUCTOR LOGIN
-    elif role == "instructor":
-
-        cursor.execute("""
-            SELECT *
-            FROM instructors
-            WHERE instructor_id=%s
-            AND password=%s
-        """, (user_id, password))
-
-        instructor = cursor.fetchone()
-
-        if instructor:
-            session['user'] = instructor['fullname']
-            session['role'] = 'instructor'
-            session['instructor_id'] = instructor['instructor_id']
-
-            cursor.close()
-            conn.close()
-
-            return redirect(url_for('dashboard'))
-
-    cursor.close()
-    conn.close()
-
-    return render_template(
-        'login.html',
-        error='Invalid Login Credentials'
+    # Flagged in the database, or still using a credential this system ships
+    # with. Either way the account can reach nothing but the change-password
+    # page until it is dealt with (see security/access.py).
+    must_change = bool(account.get('must_change_password')) or is_known_default(
+        account.get('password')
     )
+
+    if must_change:
+        session[MUST_CHANGE_PASSWORD] = True
+        logger.warning(
+            "%r signed in with a credential that must be changed", user_id
+        )
+        return redirect(url_for('change_password'))
+
+    logger.info("Successful login for %r as %r", user_id, role)
+
+    return redirect(url_for('dashboard'))
 # ==============================
 # DASHBOARD
 # ==============================
 @app.route('/dashboard')
+@authenticated
 def dashboard():
-    if 'user' not in session:
-        return redirect(url_for('home'))
-
     return render_template('dashboard.html')
 
 
@@ -158,10 +372,8 @@ def dashboard():
 # STUDENTS PAGE
 # ==============================
 @app.route('/students')
+@role_required('admin')
 def students():
-    if 'user' not in session:
-        return redirect(url_for('home'))
-
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
@@ -178,18 +390,27 @@ def students():
 # CAPTURE FACE + SAVE STUDENT
 # ==============================
 @app.route('/capture_face', methods=['POST'])
+@role_required('admin')
 def capture_face():
 
-    if 'user' not in session:
-        return redirect(url_for('home'))
-
     # Get form data
-    student_id = request.form['student_id']
-    name = request.form['name']
-    college_department = request.form['college_department']
-    program = request.form['program']
-    year_level = request.form['year_level']
-    section = request.form['section']
+    student_id = request.form.get('student_id', '')
+    name = request.form.get('name', '')
+    college_department = request.form.get('college_department', '')
+    program = request.form.get('program', '')
+    year_level = request.form.get('year_level', '')
+    section = request.form.get('section', '')
+
+    # SE-3. Validate before the row is inserted and before capture_dataset.py
+    # is handed these values, so nothing hostile is ever stored, let alone
+    # turned into a path. security/paths.py is the single authority on what
+    # an acceptable ID and name are; capture_dataset.py uses it too.
+    try:
+        student_id = validate_student_id(student_id)
+        name = validate_student_name(name)
+    except UnsafeStudentPathError as error:
+        logger.warning("Rejected student enrolment: %s", error)
+        return error_page(400, str(error))
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
@@ -250,9 +471,10 @@ def capture_face():
             logger.info("Face capture cancelled by user")
             return redirect(url_for('students'))
         logger.exception("Capture dataset script failed")
-        return f"Face capture failed with exit code {error.returncode}.", 500
-    except Exception as e:
-        return f"Camera Error: {e}", 500
+        return error_page(500, "Face capture did not complete. See the log for details.")
+    except Exception:
+        logger.exception("Camera error during face capture")
+        return error_page(500, "The camera could not be started.")
 
     return redirect(url_for('students'))
 
@@ -260,10 +482,8 @@ def capture_face():
 # MANAGE STUDENTS
 # ==============================
 @app.route('/manage_students')
+@role_required('admin')
 def manage_students():
-
-    if 'user' not in session:
-        return redirect(url_for('home'))
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
@@ -283,12 +503,10 @@ def manage_students():
 # SEARCH STUDENT
 # ==============================
 @app.route('/search_student', methods=['POST'])
+@role_required('admin')
 def search_student():
 
-    if 'user' not in session:
-        return redirect(url_for('home'))
-
-    query = request.form['query']
+    query = request.form.get('query', '')
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
@@ -314,10 +532,8 @@ def search_student():
     '/delete_student/<string:student_id>',
     methods=['POST']
 )
+@role_required('admin')
 def delete_student(student_id):
-
-    if 'user' not in session:
-        return redirect(url_for('home'))
 
     conn = None
     cursor = None
@@ -340,12 +556,19 @@ def delete_student(student_id):
         if student is None:
             return redirect(url_for('manage_students'))
 
-        # Build the student's dataset folder path.
-        folder_name = f"{student['student_id']}_{student['name']}"
-        dataset_path = os.path.join("dataset", folder_name)
+        # SE-3. This was the worst of the four sites: an unvalidated name
+        # concatenated into a path and handed to shutil.rmtree(). A student
+        # named `..\..\Windows\Temp` deleted that directory instead.
+        # student_dataset_path() refuses anything that is not a direct child
+        # of dataset/, so a bad record now fails loudly rather than deleting
+        # the wrong tree.
+        dataset_path = student_dataset_path(
+            student['student_id'],
+            student['name']
+        )
 
         # Delete the dataset folder first.
-        if os.path.isdir(dataset_path):
+        if dataset_path.is_dir():
             shutil.rmtree(
                 dataset_path,
                 onerror=remove_readonly_and_retry
@@ -367,42 +590,57 @@ def delete_student(student_id):
 
         return redirect(url_for('manage_students'))
 
+    except UnsafeStudentPathError as error:
+        if conn is not None:
+            conn.rollback()
+
+        logger.error("Refused to delete a student with an unsafe folder: %s", error)
+
+        return error_page(
+            400,
+            "This student's record cannot be turned into a safe dataset "
+            "folder name, so nothing was deleted. Correct the student's "
+            "details first."
+        )
+
     except PermissionError:
         if conn is not None:
             conn.rollback()
 
         logger.exception("Delete student failed: dataset folder is in use")
 
-        return (
-            "The student's dataset folder is currently being used. "
-            "Close the attendance camera, recognition program, "
-            "File Explorer, and image preview, then try again.",
-            500
+        # Actionable and leaks nothing: it names what the operator has to do,
+        # not what the filesystem said.
+        return error_page(
+            500,
+            "The student's dataset folder is currently in use. Close the "
+            "attendance camera, the recognition program, File Explorer and "
+            "any image preview, then try again."
         )
 
-    except mysql.connector.Error as error:
+    except mysql.connector.Error:
         if conn is not None:
             conn.rollback()
 
         logger.exception("Delete student failed: database error")
 
-        return f"Database deletion error: {error}", 500
+        return error_page(500)
 
-    except OSError as error:
+    except OSError:
         if conn is not None:
             conn.rollback()
 
         logger.exception("Delete student failed: could not remove dataset folder")
 
-        return f"Could not delete dataset folder: {error}", 500
+        return error_page(500, "The student's dataset folder could not be removed.")
 
-    except Exception as error:
+    except Exception:
         if conn is not None:
             conn.rollback()
 
         logger.exception("Delete student failed")
 
-        return f"Student deletion error: {error}", 500
+        return error_page(500)
 
     finally:
         if cursor is not None:
@@ -415,10 +653,8 @@ def delete_student(student_id):
 # EDIT STUDENT
 # ==============================
 @app.route('/edit_student/<string:student_id>')
+@role_required('admin')
 def edit_student(student_id):
-
-    if 'user' not in session:
-        return redirect(url_for('home'))
 
     conn = None
     cursor = None
@@ -449,9 +685,9 @@ def edit_student(student_id):
             student=student
         )
 
-    except mysql.connector.Error as error:
+    except mysql.connector.Error:
         logger.exception("Edit student failed: database error")
-        return f"Database error: {error}", 500
+        return error_page(500)
 
     finally:
         if cursor is not None:
@@ -468,10 +704,8 @@ def edit_student(student_id):
     '/update_student/<string:student_id>',
     methods=['POST']
 )
+@role_required('admin')
 def update_student(student_id):
-
-    if 'user' not in session:
-        return redirect(url_for('home'))
 
     # Read the submitted form values.
     name = request.form.get('name', '').strip()
@@ -483,21 +717,28 @@ def update_student(student_id):
     year_level = request.form.get('year_level', '').strip()
     section = request.form.get('section', '').strip()
 
-    # Validate required values.
-    if not name:
-        return "Student name is required.", 400
+    # SE-3. The new name goes on to build a folder path for os.rename(), so
+    # it is validated before anything else happens - and so is the ID from
+    # the URL, which was previously trusted outright.
+    try:
+        student_id = validate_student_id(student_id)
+        name = validate_student_name(name)
+    except UnsafeStudentPathError as error:
+        logger.warning("Rejected student update: %s", error)
+        return error_page(400, str(error))
 
+    # Validate required values.
     if not program:
-        return "Program is required.", 400
+        return error_page(400, "Program is required.")
 
     if not section:
-        return "Section is required.", 400
+        return error_page(400, "Section is required.")
 
     try:
         year_level = int(year_level)
 
     except (TypeError, ValueError):
-        return "Year level must be a valid number.", 400
+        return error_page(400, "Year level must be a valid number.")
 
     conn = None
     cursor = None
@@ -522,34 +763,26 @@ def update_student(student_id):
         existing_student = cursor.fetchone()
 
         if existing_student is None:
-            return "Student record was not found.", 404
+            return error_page(404, "That student record was not found.")
 
         old_name = existing_student['name']
 
-        # Build the old and new dataset folder paths.
-        old_folder_name = f"{student_id}_{old_name}"
-        new_folder_name = f"{student_id}_{name}"
-
-        old_dataset_path = os.path.join(
-            "dataset",
-            old_folder_name
-        )
-
-        new_dataset_path = os.path.join(
-            "dataset",
-            new_folder_name
-        )
+        # SE-3. Both sides of the rename go through the same validator, so
+        # neither the stored name nor the submitted one can send os.rename()
+        # outside dataset/.
+        old_dataset_path = student_dataset_path(student_id, old_name)
+        new_dataset_path = student_dataset_path(student_id, name)
 
         # Rename the dataset folder if the student's name changed.
         if (
             old_name != name
-            and os.path.isdir(old_dataset_path)
+            and old_dataset_path.is_dir()
         ):
-            if os.path.exists(new_dataset_path):
-                return (
+            if new_dataset_path.exists():
+                return error_page(
+                    409,
                     "A dataset folder with the updated student name "
-                    "already exists.",
-                    409
+                    "already exists."
                 )
 
             try:
@@ -565,12 +798,11 @@ def update_student(student_id):
                     "Dataset folder rename denied by the operating system"
                 )
 
-                return (
+                return error_page(
+                    500,
                     "The student's dataset folder is currently in use. "
-                    "Close the attendance camera, face-recognition "
-                    "program, image preview, and File Explorer folder, "
-                    "then try again.",
-                    500
+                    "Close the attendance camera, the recognition program, "
+                    "File Explorer and any image preview, then try again."
                 )
 
         # Update all editable student fields.
@@ -596,7 +828,7 @@ def update_student(student_id):
 
         return redirect(url_for('manage_students'))
 
-    except mysql.connector.Error as error:
+    except mysql.connector.Error:
         if conn is not None:
             conn.rollback()
 
@@ -605,8 +837,8 @@ def update_student(student_id):
             folder_was_renamed
             and new_dataset_path
             and old_dataset_path
-            and os.path.isdir(new_dataset_path)
-            and not os.path.exists(old_dataset_path)
+            and new_dataset_path.is_dir()
+            and not old_dataset_path.exists()
         ):
             try:
                 os.rename(
@@ -620,14 +852,21 @@ def update_student(student_id):
                 )
 
         logger.exception("Update student failed: database error")
-        return f"Database update error: {error}", 500
+        return error_page(500)
 
-    except Exception as error:
+    except UnsafeStudentPathError as error:
+        if conn is not None:
+            conn.rollback()
+
+        logger.error("Refused to update a student with an unsafe folder: %s", error)
+        return error_page(400, str(error))
+
+    except Exception:
         if conn is not None:
             conn.rollback()
 
         logger.exception("Update student failed")
-        return f"Student update error: {error}", 500
+        return error_page(500)
 
     finally:
         if cursor is not None:
@@ -641,18 +880,21 @@ def update_student(student_id):
 # RECAPTURE STUDENT FACE
 # ==============================
 @app.route('/recapture_face', methods=['POST'])
+@role_required('admin')
 def recapture_face():
-
-    if 'user' not in session:
-        return redirect(url_for('home'))
 
     student_id = request.form.get(
         'student_id',
         ''
     ).strip()
 
-    if not student_id:
-        return "Student ID is required.", 400
+    # SE-3. This route calls shutil.rmtree() on a path built from the record,
+    # so the ID is validated before it is even looked up.
+    try:
+        student_id = validate_student_id(student_id)
+    except UnsafeStudentPathError as error:
+        logger.warning("Rejected recapture request: %s", error)
+        return error_page(400, str(error))
 
     conn = None
     cursor = None
@@ -671,9 +913,9 @@ def recapture_face():
 
         student = cursor.fetchone()
 
-    except mysql.connector.Error as error:
+    except mysql.connector.Error:
         logger.exception("Recapture failed: database error")
-        return f"Database error: {error}", 500
+        return error_page(500)
 
     finally:
         if cursor is not None:
@@ -683,20 +925,25 @@ def recapture_face():
             conn.close()
 
     if student is None:
-        return "Student ID was not found.", 404
+        return error_page(404, "That student ID was not found.")
 
-    folder_name = (
-        f"{student['student_id']}_{student['name']}"
-    )
+    try:
+        dataset_path = student_dataset_path(
+            student['student_id'],
+            student['name']
+        )
 
-    dataset_path = os.path.join(
-        "dataset",
-        folder_name
-    )
+    except UnsafeStudentPathError as error:
+        logger.error("Refused to recapture with an unsafe folder: %s", error)
+        return error_page(
+            400,
+            "This student's record cannot be turned into a safe dataset "
+            "folder name, so nothing was removed."
+        )
 
     # Remove the student's old face dataset.
     try:
-        if os.path.isdir(dataset_path):
+        if dataset_path.is_dir():
             shutil.rmtree(
                 dataset_path,
                 onerror=remove_readonly_and_retry
@@ -707,20 +954,17 @@ def recapture_face():
             "Recapture failed: dataset folder is in use"
         )
 
-        return (
-            "The student's dataset folder is currently being used. "
-            "Close the attendance camera, recognition program, "
-            "image preview, and File Explorer folder, then try again.",
-            500
+        return error_page(
+            500,
+            "The student's dataset folder is currently in use. Close the "
+            "attendance camera, the recognition program, File Explorer and "
+            "any image preview, then try again."
         )
 
-    except OSError as error:
+    except OSError:
         logger.exception("Recapture failed: could not remove old dataset folder")
 
-        return (
-            f"Could not remove the old dataset folder: {error}",
-            500
-        )
+        return error_page(500, "The old dataset folder could not be removed.")
 
     # Start the face-capture script.
     try:
@@ -751,24 +995,22 @@ def recapture_face():
 
         logger.exception("Capture dataset script failed")
 
-        return (
-            f"Face capture failed with exit code "
-            f"{error.returncode}.",
-            500
+        return error_page(
+            500,
+            "Face capture did not complete. See the log for details."
         )
 
     except PermissionError:
         logger.exception("Permission denied starting the face-capture process")
 
-        return (
-            "Permission was denied while starting the face-capture "
-            "program.",
-            500
+        return error_page(
+            500,
+            "Permission was denied while starting the face-capture program."
         )
 
-    except Exception as error:
+    except Exception:
         logger.exception("Camera error during face recapture")
-        return f"Camera error: {error}", 500
+        return error_page(500, "The camera could not be started.")
 
     return redirect(url_for('manage_students'))
 
@@ -777,10 +1019,9 @@ def recapture_face():
 # MANUAL MODEL RETRAINING ROUTE
 # ==========================================================
 @app.route('/train_model', methods=['POST'])
+@role_required('admin')
+@json_api
 def train_model_route():
-    if 'user' not in session:
-        return jsonify({"success": False, "message": "Unauthorized"}), 401
-
     success, message = train_model()
     return jsonify({
         "success": success,
@@ -793,10 +1034,8 @@ def train_model_route():
 # ==========================================================
 
 @app.route('/subjects')
+@role_required('admin')
 def subjects():
-
-    if 'user' not in session:
-        return redirect(url_for('home'))
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
@@ -811,10 +1050,8 @@ def subjects():
 
 
 @app.route('/add_subject', methods=['POST'])
+@role_required('admin')
 def add_subject():
-
-    if 'user' not in session:
-        return redirect(url_for('home'))
 
     subject_code = request.form['subject_code']
     subject_name = request.form['subject_name']
@@ -842,10 +1079,8 @@ def add_subject():
 
 
 @app.route('/edit_subject/<int:id>')
+@role_required('admin')
 def edit_subject(id):
-
-    if 'user' not in session:
-        return redirect(url_for('home'))
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
@@ -860,10 +1095,8 @@ def edit_subject(id):
 
 
 @app.route('/update_subject/<int:id>', methods=['POST'])
+@role_required('admin')
 def update_subject(id):
-
-    if 'user' not in session:
-        return redirect(url_for('home'))
 
     subject_code = request.form['subject_code']
     subject_name = request.form['subject_name']
@@ -897,11 +1130,12 @@ def update_subject(id):
     return redirect(url_for('subjects'))
 
 
-@app.route('/delete_subject/<int:id>')
+# POST, not GET (SE-6). A destructive action behind a GET is triggerable by
+# an <img src>, a link prefetch or a crawler - no form submission required.
+# The template link became an inline POST form with a CSRF token.
+@app.route('/delete_subject/<int:id>', methods=['POST'])
+@role_required('admin')
 def delete_subject(id):
-
-    if 'user' not in session:
-        return redirect(url_for('home'))
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -917,10 +1151,8 @@ def delete_subject(id):
 # INSTRUCTORS PAGE
 # ==============================
 @app.route('/instructors')
+@role_required('admin')
 def instructors():
-
-    if 'user' not in session:
-        return redirect(url_for('home'))
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
@@ -946,14 +1178,23 @@ def instructors():
 # ADD INSTRUCTOR
 # ==============================
 @app.route('/add_instructor', methods=['POST'])
+@role_required('admin')
 def add_instructor():
 
-    if 'user' not in session:
-        return redirect(url_for('home'))
+    instructor_id = request.form.get('instructor_id', '').strip()
+    fullname = request.form.get('fullname', '').strip()
+    password = request.form.get('password', '')
 
-    instructor_id = request.form['instructor_id']
-    fullname = request.form['fullname']
-    password = request.form['password']
+    if not instructor_id or not fullname or not password:
+        return error_page(400, "Instructor ID, full name and password are required.")
+
+    # SE-1. The password an admin types here is stored as a bcrypt hash, and
+    # the account is flagged so the instructor must replace the
+    # administrator-chosen password with one only they know at first login.
+    try:
+        hashed_password = hash_password(password)
+    except PasswordTooLongError as error:
+        return error_page(400, str(error))
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -963,19 +1204,22 @@ def add_instructor():
         (
             instructor_id,
             fullname,
-            password
+            password,
+            must_change_password
         )
-        VALUES (%s,%s,%s)
+        VALUES (%s,%s,%s,1)
     """, (
         instructor_id,
         fullname,
-        password
+        hashed_password
     ))
 
     conn.commit()
 
     cursor.close()
     conn.close()
+
+    logger.info("Instructor %r created by %r", instructor_id, session.get('user'))
 
     return redirect(url_for('manage_instructors'))
 
@@ -984,10 +1228,8 @@ def add_instructor():
 # MANAGE INSTRUCTORS
 # ==============================
 @app.route('/manage_instructors')
+@role_required('admin')
 def manage_instructors():
-
-    if 'user' not in session:
-        return redirect(url_for('home'))
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
@@ -1013,12 +1255,10 @@ def manage_instructors():
 # SEARCH INSTRUCTOR
 # ==============================
 @app.route('/search_instructor', methods=['POST'])
+@role_required('admin')
 def search_instructor():
 
-    if 'user' not in session:
-        return redirect(url_for('home'))
-
-    query = request.form['query']
+    query = request.form.get('query', '')
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
@@ -1049,6 +1289,7 @@ def search_instructor():
 # EDIT INSTRUCTOR
 # ==============================
 @app.route('/edit_instructor/<instructor_id>')
+@role_required('admin')
 def edit_instructor(instructor_id):
 
     conn = get_db_connection()
@@ -1064,33 +1305,66 @@ def edit_instructor(instructor_id):
     cursor.close()
     conn.close()
 
+    if instructor is None:
+        return error_page(404, "That instructor was not found.")
+
+    # FS-6: this said "edit_instructor.html", which does not exist - the file
+    # is edit_instructors.html - so the route returned 500 for every request.
+    # Fixed in passing because a route that 500s for the legitimate user is
+    # not meaningfully "secured".
     return render_template(
-        "edit_instructor.html",
+        "edit_instructors.html",
         instructor=instructor
     )
 # ==============================
 # UPDATE INSTRUCTOR
 # ==============================
 @app.route('/update_instructor/<instructor_id>', methods=['POST'])
+@role_required('admin')
 def update_instructor(instructor_id):
 
-    fullname = request.form['fullname']
-    password = request.form['password']
+    fullname = request.form.get('fullname', '').strip()
+    password = request.form.get('password', '')
+
+    if not fullname:
+        return error_page(400, "Full name is required.")
 
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("""
-        UPDATE instructors
-        SET
-            fullname=%s,
-            password=%s
-        WHERE instructor_id=%s
-    """, (
-        fullname,
-        password,
-        instructor_id
-    ))
+    if password:
+        # SE-1. An administrator setting someone else's password knows it,
+        # so the instructor is required to replace it at next login.
+        try:
+            hashed_password = hash_password(password)
+        except PasswordTooLongError as error:
+            cursor.close()
+            conn.close()
+            return error_page(400, str(error))
+
+        cursor.execute("""
+            UPDATE instructors
+            SET
+                fullname=%s,
+                password=%s,
+                must_change_password=1
+            WHERE instructor_id=%s
+        """, (
+            fullname,
+            hashed_password,
+            instructor_id
+        ))
+    else:
+        # The form marks the password field optional. Leaving it blank must
+        # not overwrite the stored hash with an empty string.
+        cursor.execute("""
+            UPDATE instructors
+            SET fullname=%s
+            WHERE instructor_id=%s
+        """, (
+            fullname,
+            instructor_id
+        ))
 
     conn.commit()
 
@@ -1101,7 +1375,9 @@ def update_instructor(instructor_id):
 # ==============================
 # DELETE INSTRUCTOR
 # ==============================
-@app.route('/delete_instructor/<instructor_id>')
+# POST, not GET (SE-6). See the note on delete_subject.
+@app.route('/delete_instructor/<instructor_id>', methods=['POST'])
+@role_required('admin')
 def delete_instructor(instructor_id):
 
     conn = get_db_connection()
@@ -1122,10 +1398,8 @@ def delete_instructor(instructor_id):
 # 🔥 ATTENDANCE (IMPORTANT FIX ADDED)
 # ==============================
 @app.route('/attendance')
+@authenticated
 def attendance():
-    if 'user' not in session:
-        return redirect(url_for('home'))
-
     return render_template('attendance.html')
 
 
@@ -1133,6 +1407,8 @@ def attendance():
 # START FACE RECOGNITION CAMERA
 # ==============================
 @app.route('/start-attendance', methods=['POST'])
+@authenticated
+@json_api
 def start_attendance():
 
     subject_code = request.form.get("subject_code")
@@ -1159,15 +1435,18 @@ def start_attendance():
         })
 
 
-    except Exception as e:
+    except Exception:
 
         logger.exception("Camera error while starting attendance")
 
+        # SE-10: the exception text used to go straight to the browser.
         return jsonify({
             "success": False,
-            "message": str(e)
+            "message": "The camera could not be started."
         })
 @app.route('/stop_camera', methods=['POST'])
+@authenticated
+@json_api
 def stop_camera_route():
 
     stop_camera()
@@ -1176,10 +1455,8 @@ def stop_camera_route():
         "success": True
     })
 @app.route('/end-attendance', methods=['POST'])
+@authenticated
 def end_attendance():
-
-    if 'user' not in session:
-        return redirect(url_for('home'))
 
     stop_camera()
 
@@ -1189,7 +1466,7 @@ def end_attendance():
     ).strip()
 
     if not subject_code:
-        return "Subject code is required.", 400
+        return error_page(400, "Subject code is required.")
 
     conn = None
     cursor = None
@@ -1267,9 +1544,9 @@ def end_attendance():
             selected_subject=subject_code
         )
 
-    except mysql.connector.Error as error:
+    except mysql.connector.Error:
         logger.exception("End attendance failed: database error")
-        return f"Database error: {error}", 500
+        return error_page(500)
 
     finally:
         if cursor is not None:
@@ -1281,10 +1558,8 @@ def end_attendance():
 # REPORTS
 # ==============================
 @app.route('/reports')
+@authenticated
 def reports():
-
-    if 'user' not in session:
-        return redirect(url_for('home'))
 
     selected_date = request.args.get('date')
     selected_subject = request.args.get('subject')
@@ -1349,6 +1624,7 @@ def reports():
     )
 
 @app.route('/export_excel')
+@authenticated
 def export_excel():
 
     conn = get_db_connection()
@@ -1381,10 +1657,8 @@ def export_excel():
 # SETTINGS
 # ==============================
 @app.route('/settings')
+@role_required('admin')
 def settings():
-
-    if 'user' not in session:
-        return redirect(url_for('home'))
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
@@ -1401,12 +1675,13 @@ def settings():
     )
 
 @app.route('/update_admin', methods=['POST'])
+@role_required('admin')
 def update_admin():
 
-    if 'user' not in session:
-        return redirect(url_for('home'))
+    username = request.form.get('username', '').strip()
 
-    username = request.form['username']
+    if not username:
+        return error_page(400, "Username is required.")
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -1426,53 +1701,146 @@ def update_admin():
 
     return redirect(url_for('settings'))
 
-@app.route('/change_password', methods=['POST'])
+
+# ==============================
+# CHANGE PASSWORD
+# ==============================
+#
+# SE-16, found during this phase. This route used to update
+# `admin WHERE id=1` no matter who was signed in, so an instructor had no way
+# to change their own password and the one form pointed at somebody else's
+# account. That blocks the forced-change flow, which has to work for both
+# roles, so it is fixed here rather than deferred.
+#
+# GET renders the form. That is new: the access-control hook redirects an
+# account flagged `must_change_password` here, and a POST-only route would
+# have answered that redirect with a 405.
+
+def _credential_table_for_session():
+    """
+    (table, primary-key column, primary-key value) for the signed-in account.
+
+    Returns None for a session with no recognised role, which the caller
+    turns into a 403 rather than guessing.
+    """
+    if session.get('role') == 'admin':
+        return "admin", "id", 1
+
+    if session.get('role') == 'instructor':
+        return "instructors", "instructor_id", session.get('instructor_id')
+
+    return None
+
+
+@app.route('/change_password', methods=['GET', 'POST'])
+@authenticated
 def change_password():
 
-    if 'user' not in session:
-        return redirect(url_for('home'))
+    target = _credential_table_for_session()
 
-    current_password = request.form['current_password']
-    new_password = request.form['new_password']
-    confirm_password = request.form['confirm_password']
+    if target is None or target[2] is None:
+        logger.error(
+            "change_password reached with an unusable session: role=%r",
+            session.get('role'),
+        )
+        return error_page(403)
+
+    # `table` and `key_column` are interpolated into the statements below.
+    # They come from the fixed pair of literals in
+    # _credential_table_for_session(), never from the request; the key value
+    # is always a bound parameter.
+    table, key_column, key_value = target
+    must_change = bool(session.get(MUST_CHANGE_PASSWORD))
+
+    if request.method == 'GET':
+        return render_template(
+            'change_password.html',
+            must_change=must_change
+        )
+
+    current_password = request.form.get('current_password', '')
+    new_password = request.form.get('new_password', '')
+    confirm_password = request.form.get('confirm_password', '')
+
+    def form_error(message):
+        return render_template(
+            'change_password.html',
+            must_change=must_change,
+            error=message
+        ), 400
 
     if new_password != confirm_password:
-        return "New passwords do not match."
+        return form_error("The new passwords do not match.")
+
+    if len(new_password) < 8:
+        return form_error("The new password must be at least 8 characters.")
+
+    if is_known_default(new_password):
+        return form_error(
+            "That password ships with the system and is public knowledge. "
+            "Choose a different one."
+        )
+
+    try:
+        new_hash = hash_password(new_password)
+    except PasswordTooLongError as error:
+        return form_error(str(error))
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
-    cursor.execute("SELECT * FROM admin WHERE id=1")
-    admin = cursor.fetchone()
+    try:
+        cursor.execute(
+            f"SELECT password FROM `{table}` WHERE `{key_column}` = %s",
+            (key_value,)
+        )
+        account = cursor.fetchone()
 
-    if admin['password'] != current_password:
+        if account is None or not verify_password(
+            current_password, account['password']
+        ):
+            logger.warning(
+                "Rejected password change for %r: current password incorrect",
+                session.get('user'),
+            )
+            return form_error("The current password is incorrect.")
+
+        cursor.execute(
+            f"UPDATE `{table}` SET password = %s, must_change_password = 0 "
+            f"WHERE `{key_column}` = %s",
+            (new_hash, key_value)
+        )
+        conn.commit()
+
+    finally:
         cursor.close()
         conn.close()
-        return "Current password is incorrect."
 
-    cursor.execute("""
-        UPDATE admin
-        SET password=%s
-        WHERE id=1
-    """, (new_password,))
+    session.pop(MUST_CHANGE_PASSWORD, None)
 
-    conn.commit()
+    logger.info("Password changed for %r", session.get('user'))
 
-    cursor.close()
-    conn.close()
+    if session.get('role') == 'admin':
+        return redirect(url_for('settings'))
 
-    return redirect(url_for('settings'))
+    return redirect(url_for('dashboard'))
 
 # ==============================
 # LOGOUT
 # ==============================
 @app.route('/logout')
+@public
 def logout():
     session.clear()
     return redirect(url_for('home'))
 
 
+# SE-2. This was reachable by anyone who could reach the host: the live
+# camera feed of a classroom, unauthenticated. It is loaded as an <img src>,
+# so the browser sends the session cookie with it and the hook can enforce
+# authentication exactly as it does for any other route.
 @app.route('/video_feed')
+@authenticated
 def video_feed():
 
     return Response(

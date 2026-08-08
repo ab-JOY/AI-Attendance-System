@@ -5,6 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Attendance Monitoring</title>
 
+    <!--
+        CSRFProtect rejects any POST without a token, including the two
+        fetch() calls at the bottom of this page. They read the token from
+        here and send it as an X-CSRFToken header.
+    -->
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+
     <link rel="stylesheet"
           href="{{ url_for('static', filename='css/style.css') }}">
 </head>
@@ -69,6 +76,8 @@
                     id="endForm"
                     action="{{ url_for('end_attendance') }}"
                     method="POST">
+
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
                     <input
                         type="text"
@@ -290,11 +299,16 @@
 
 <script>
 
+// Read once. CSRFProtect checks this header on any POST that carries no
+// csrf_token form field.
+const CSRF_TOKEN = document
+    .querySelector('meta[name="csrf-token"]')
+    .getAttribute("content");
+
 
 // START CAMERA
 document.getElementById("startForm")
 .addEventListener("submit", async function(e){
-console.log("START BUTTON CLICKED");
 
     e.preventDefault();
 
@@ -309,13 +323,23 @@ console.log("START BUTTON CLICKED");
 
         headers:{
             "Content-Type":
-            "application/x-www-form-urlencoded"
+            "application/x-www-form-urlencoded",
+            "X-CSRFToken": CSRF_TOKEN
         },
 
         body:
         "subject_code=" + encodeURIComponent(subject)
 
     });
+
+
+    // The session can expire while this page is open. A 401 means the
+    // access-control hook refused the call, and the only useful thing to do
+    // is send the operator back to the login page.
+    if(response.status === 401){
+        window.location.href = "/";
+        return;
+    }
 
 
     const data = await response.json();
@@ -361,7 +385,11 @@ document.getElementById("endForm")
 
     await fetch("/stop_camera",{
 
-        method:"POST"
+        method:"POST",
+
+        headers:{
+            "X-CSRFToken": CSRF_TOKEN
+        }
 
     });
 

@@ -43,6 +43,8 @@
 
         <form action="{{ url_for('search_instructor') }}"
               method="POST">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
 
             <input type="text"
                    name="query"
@@ -63,7 +65,8 @@
         <tr>
             <th>Instructor ID</th>
             <th>Full Name</th>
-            <th>Password</th>
+            <!-- SE-17: never render a password or its hash. -->
+            <th>Password Status</th>
             <th>Actions</th>
         </tr>
 
@@ -75,7 +78,13 @@
 
                 <td>{{ instructor.instructor_id }}</td>
                 <td>{{ instructor.fullname }}</td>
-                <td>{{ instructor.password }}</td>
+                <td>
+                    {% if instructor.must_change_password %}
+                        Must be changed at next login
+                    {% else %}
+                        Set
+                    {% endif %}
+                </td>
 
                 <td>
 
@@ -86,11 +95,27 @@
 
                     |
 
-                    <a href="{{ url_for('delete_instructor',
-                                        instructor_id=instructor.instructor_id) }}"
-                       onclick="return confirm('Delete this instructor?')">
-                        Delete
-                    </a>
+                    <!--
+                        SE-6. This was a GET link, so an <img src> or a link
+                        prefetch could delete an instructor. POST plus a CSRF
+                        token now.
+                    -->
+                    <form
+                        action="{{ url_for(
+                            'delete_instructor',
+                            instructor_id=instructor.instructor_id
+                        ) }}"
+                        method="POST"
+                        style="display:inline;"
+                        onsubmit="return confirm('Delete this instructor?');"
+                    >
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+                        <button type="submit">
+                            Delete
+                        </button>
+
+                    </form>
 
                 </td>
 

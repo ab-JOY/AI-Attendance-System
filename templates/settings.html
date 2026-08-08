@@ -25,6 +25,8 @@
         <h2>Admin Account</h2>
 
         <form action="/update_admin" method="POST">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
 
             <label for="username">Username</label>
 
@@ -51,6 +53,8 @@
         <h2>Change Password</h2>
 
         <form action="/change_password" method="POST">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
 
             <label for="current_password">Current Password</label>
             <input

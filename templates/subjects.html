@@ -21,6 +21,8 @@
     <div class="form-container">
 
         <form action="{{ url_for('add_subject') }}" method="POST">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
 
             <label for="subject_code">Subject Code</label>
             <input
@@ -127,10 +129,25 @@
 
             <td>
                 <a href="{{ url_for('edit_subject', id=subject.id) }}">Edit</a> |
-                <a href="{{ url_for('delete_subject', id=subject.id) }}"
-                   onclick="return confirm('Delete this subject?')">
-                   Delete
-                </a>
+
+                <!--
+                    SE-6. This was a GET link, so an <img src> or a link
+                    prefetch could delete a subject. POST plus a CSRF token
+                    now.
+                -->
+                <form
+                    action="{{ url_for('delete_subject', id=subject.id) }}"
+                    method="POST"
+                    style="display:inline;"
+                    onsubmit="return confirm('Delete this subject?');"
+                >
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+                    <button type="submit">
+                        Delete
+                    </button>
+
+                </form>
             </td>
 
         </tr>

@@ -21,6 +21,8 @@
 
         <form action="{{ url_for('update_student', student_id=student.student_id) }}"
               method="POST">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
 
             <!-- Student ID -->
             <label for="student_id"><strong>Student ID</strong></label>

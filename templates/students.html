@@ -21,6 +21,8 @@
     <div class="form-container">
 
         <form action="{{ url_for('capture_face') }}" method="POST">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
 
             <label for="student_id">Student ID</label>
             <input
@@ -131,12 +133,28 @@
 
                 |
 
-                <a href="{{ url_for('delete_student', student_id=student.student_id) }}"
-                   onclick="return confirm('Delete this student?')">
+                <!--
+                    FS-13. This was an <a href> pointing at a POST-only
+                    route, so the Delete button on this page answered 405
+                    and did nothing. It is now a real POST form with a
+                    CSRF token, matching manage_students.html.
+                -->
+                <form
+                    action="{{ url_for(
+                        'delete_student',
+                        student_id=student.student_id
+                    ) }}"
+                    method="POST"
+                    style="display:inline;"
+                    onsubmit="return confirm('Delete this student?');"
+                >
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
-                    Delete
+                    <button type="submit">
+                        Delete
+                    </button>
 
-                </a>
+                </form>
 
             </td>
 

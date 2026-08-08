@@ -23,6 +23,8 @@
 
         <form action="{{ url_for('login') }}" method="POST">
 
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
             <!-- USER TYPE -->
             <label for="roleSelect">User Type</label>
             <select
