@@ -60,6 +60,23 @@ The consent record must state, in language the student understands:
 
 For students under 18, consent comes from a parent or guardian.
 
+### Impostors are data subjects too
+
+Phase 6 will build an **impostor set** — faces of people who are deliberately
+*not* enrolled — so that the false-acceptance rate can be measured. It is easy
+to assume consent does not apply to them because nothing is stored long-term
+and they are never recognised. It does apply. Their faces are captured and
+processed, which is processing of sensitive personal information under
+RA 10173 whatever happens next, and the fact that the purpose is unusual makes
+it more important to state, not less.
+
+So: the same written consent, collected **before** the session, and worded for
+what is actually happening — *"your face will be shown to the system to check
+whether it wrongly identifies you as an enrolled student"* — not borrowed from
+the enrolment form. State how long the impostor images are kept and delete
+them when the evaluation is finished; unlike enrolment data, they have no
+ongoing purpose at all.
+
 > **Current status: not implemented in software.** There is no consent field
 > in the `students` table and no consent screen in the enrolment flow. Until
 > there is, consent must be collected and filed **on paper** before any
@@ -177,6 +194,11 @@ Stated plainly, because an evaluation that omits these is not credible.
    cross the network in the clear. `SESSION_COOKIE_SECURE` exists in
    configuration for that day and defaults to off because enabling it over
    HTTP would prevent anyone logging in.
+   **This has a deadline now.** The decision to move enrolment into the
+   browser (`todo.md` §7 Q2) makes HTTPS mandatory rather than advisable:
+   browsers grant `getUserMedia` only in a secure context, so face capture
+   from a remote machine simply will not run without it. Enabling TLS closes
+   this gap and flips `SESSION_COOKIE_SECURE` at the same time.
 6. **Liveness detection is defeatable** (SE-12). The challenge is one of two
    fixed head poses with no depth, texture or blink check, so a phone playing
    a recording of an enrolled student passes it. This is a limitation of the

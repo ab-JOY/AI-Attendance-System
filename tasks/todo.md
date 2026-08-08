@@ -67,7 +67,7 @@ Severity: **P0** blocker · **P1** critical · **P2** major · **P3** minor
 |---|---|---|---|
 | **PE-0** | **P0** | **The model OpenCV writes at `neighbors=12` cannot be read back by OpenCV.** `recognizer.write()` succeeds (1.835 GB), `recognizer.read()` then dies on `persistence.cpp:1613 (-215) ofs == fs_data_blksz[blockIdx]` in `cv::FileStorage`. Measured ceiling is between 0.57 GB and 1.84 GB. **This is a correctness blocker, not a performance one: the configured pipeline cannot produce a usable model at 3 students.** See §2.9. | Phase 0 diagnostic |
 | PE-1 | P0 | **`neighbors=12` produces 4096-bin cell histograms (262,144 dims/image).** Verified in the model header. With 24×24 effective cells, **at most 576 of 4096 bins per cell can ever be non-zero — ≥86% of the model is structurally zero.** The parameter choice is not merely slow, it is statistically degenerate: chi-square distance is computed over overwhelmingly empty bins. | `trainer.yml` header: `cols: 262144` |
-| PE-2 | P0 | **Model size scales linearly with students: 1.83 GB for 3.** ~611 MB/student → 30 students ≈ **18 GB**, 100 students ≈ **61 GB**. The system cannot scale past a handful of enrolees, and a single class already exceeds practical limits. | measured (Phase 0 retrain) |
+| PE-2 | P0 | **Model size scales linearly with students: 1.83 GB for 3.** ~611 MB/student → 30 students ≈ **18 GB**, 100 students ≈ **61 GB**. The system cannot scale past a handful of enrolees, and a single class already exceeds practical limits. ⚠️ **Mitigated, and now permanently so.** At `neighbors=8` the cost is **~18.3 MB/student** (55 MB for 3, measured), which is 33× better but still linear. **The user decided on 2026-08-08 to keep LBPH** (§7 Q1), so this will not be eliminated. It becomes a **stated limitation of the system**: the `cv::FileStorage` read ceiling sits between 0.57 GB and 1.84 GB (§3a), putting the hard limit at roughly **31–100 students — use 31 as the planning figure**. Exceeding it reproduces the Phase 0 outage exactly: OpenCV writes a model it then cannot read. **Do not "fix" this in Phase 3; measure it and write it up in Phase 6.** | measured (Phase 0 retrain) |
 | PE-3 | P1 | `recognizer.predict()` compares the query against **all 1200 stored histograms × 262,144 dims ≈ 314M float ops, per face, per frame.** This runs inside the MJPEG generator loop. | [recognize_face.py:1555](../recognize_face.py#L1555) |
 | PE-4 | P1 | `load_model_and_labels()` runs **at import time** (so Flask startup parses 1.83 GB of YAML) **and again on every `start_camera()`**. Multi-minute startup, multi-GB RSS. | [recognize_face.py:166](../recognize_face.py#L166), [recognize_face.py:911](../recognize_face.py#L911) |
 | PE-5 | P1 | `train_model()` runs **synchronously inside the HTTP request** after every capture. The request blocks for minutes with no progress feedback and will hit any proxy/browser timeout. | [app.py:219](../app.py#L219) |
@@ -80,9 +80,9 @@ Severity: **P0** blocker · **P1** critical · **P2** major · **P3** minor
 
 | ID | Sev | Finding | Evidence |
 |---|---|---|---|
-| CO-1 | P1 | **`cv2.CAP_DSHOW` is Windows-only.** Camera acquisition fails outright on Linux/macOS. | [camera_utils.py:30,41](../camera_utils.py#L30) |
-| CO-2 | P1 | `ctypes.windll` for window placement — Windows-only (guarded, but the whole capture UX assumes Windows). | [capture_dataset.py:82](../capture_dataset.py#L82) |
-| CO-3 | P1 | **The architecture is single-machine only.** `/capture_face` spawns an OpenCV GUI window *on the server*. If the browser is not on the server desktop, the operator sees nothing and the request hangs until someone at the server presses ESC. | [app.py:209](../app.py#L209) |
+| CO-1 | P1 | **`cv2.CAP_DSHOW` is Windows-only.** Camera acquisition fails outright on Linux/macOS. ⚠️ **Resolved by the §7 Q2 decision (2026-08-08): enrolment moves into the browser.** The capture path that contains this is being replaced in Phase 5, not refactored. | [camera_utils.py:30,41](../camera_utils.py#L30) |
+| CO-2 | P1 | `ctypes.windll` for window placement — Windows-only (guarded, but the whole capture UX assumes Windows). ⚠️ **Resolved by the §7 Q2 decision (2026-08-08): enrolment moves into the browser.** The capture path that contains this is being replaced in Phase 5, not refactored. | [capture_dataset.py:82](../capture_dataset.py#L82) |
+| CO-3 | P1 | **The architecture is single-machine only.** ⚠️ **Resolved by the §7 Q2 decision (2026-08-08): enrolment moves into the browser.** The capture path that contains this is being replaced in Phase 5, not refactored. `/capture_face` spawns an OpenCV GUI window *on the server*. If the browser is not on the server desktop, the operator sees nothing and the request hangs until someone at the server presses ESC. | [app.py:209](../app.py#L209) |
 | CO-4 | P2 | `mediapipe==0.10.14` pins the project to Python ≤3.11 (venv is 3.11). No documented interpreter constraint. | [requirements.txt:5](../requirements.txt#L5) |
 | CO-5 | P2 | MySQL-specific SQL (`CURDATE()`) while the test harness uses SQLite with a *different* schema — tests never exercise production queries. | [app.py:1188](../app.py#L1188), [test_accuracy.py:26-48](../test_accuracy.py#L26-L48) |
 | CO-6 | P3 | `hello_flutter/` is the unmodified Flutter counter demo — no integration point, pure dead weight. | [main.dart:14](../hello_flutter/lib/main.dart#L14) |
@@ -238,7 +238,22 @@ ai_attendance/
 └── docs/
 ```
 
-**Key decisions to confirm before Phase 3 (see §7).**
+**Note on `vision/recognizer.py` above.** That box says "embedding backend
+behind an interface". **It is out of date:** the backend question was settled
+on 2026-08-08 in favour of keeping LBPH, with no second backend (§7 Q1). Read
+it as "the recognition backend, behind an interface" — the interface is still
+worth having for testability; the second implementation is not happening.
+
+**All three §7 decisions were answered on 2026-08-08.** Two of them change the
+target architecture above:
+
+- **Enrolment moves into the browser** (Q2), so `capture_dataset.py` and its
+  server-side OpenCV window are being replaced, not refactored. `vision/` keeps
+  the quality gates — the browser supplies pixels, the server judges them.
+  **This requires HTTPS**; `getUserMedia` does not work on a plain-HTTP origin
+  served to another machine.
+- **The dataset will be recaptured** across multiple sessions with an impostor
+  set (Q3), so Phase 6 produces a real FAR/FRR/EER.
 
 ---
 
@@ -361,7 +376,7 @@ for real — deleting a student row and the `CS401` subject from the live
 database. Both restored; see [`lessons.md` L6](lessons.md).
 
 ### Phase 3 — Recognition engine *(≈3 days)*
-- [ ] **Decide the recognition backend** (see §7 Q1). If LBPH is retained: `neighbors=8` — **measured** 1.835 GB → **0.220 GB**, load 183 s → 18 s, dims 262,144 → 16,384 (PE-0, PE-1, PE-2, PE-3)
+- [x] ~~**Decide the recognition backend**~~ ✅ **Decided 2026-08-08 (user): keep LBPH, no second backend** — see §7 Q1. `neighbors=8` is already in place from Phase 0 (**measured** 1.835 GB → 0.220 GB, load 183 s → 18 s, dims 262,144 → 16,384), so **no code change is needed for this item**. PE-0 is fixed; PE-1 and PE-2 are now documented limitations rather than open defects. The rest of Phase 3 is unblocked and proceeds as written.
 - [ ] Extract `vision/validation.py` as the **single** face-geometry gate used by both enrolment and recognition; delete the duplicates (MA-4)
 - [ ] Extract the per-track state machine from `generate_frames()` into a testable `TrackState` class; target <60 lines and ≤3 nesting levels in the loop (MA-12)
 - [ ] Encapsulate all camera/recognition globals in a `RecognitionSession` object with an `RLock`; **one session at a time**, enforced (RE-2)
@@ -386,9 +401,27 @@ database. Both restored; see [`lessons.md` L6](lessons.md).
 - [ ] Add an attendance override/correction screen with an audit trail (FS-10)
 - [ ] **Verify:** integration tests for the full session lifecycle against a real MySQL test database
 
-### Phase 5 — Web layer & UX *(≈2 days)*
+### Phase 5 — Web layer & UX *(≈2 days → re-estimate; see the first two items)*
+
+> **Reshaped by §7 Q2 (decided 2026-08-08): enrolment moves into the browser.**
+> Two items below changed meaning, and the ≈2-day estimate predates both.
+
+- [ ] **Serve the application over HTTPS.** *New, and a prerequisite for the
+      item below rather than a polish task.* `getUserMedia` is only available
+      in a secure context, so browser enrolment cannot work over plain HTTP to
+      another machine. Flip `SESSION_COOKIE_SECURE` to `true` in the same
+      change (SE-11) and update `.env.example`.
+- [ ] ~~Refactor `capture_dataset.py` into functions with a `main()` guard
+      (MA-2)~~ → **superseded: replace it.** Browser-side capture
+      (`getUserMedia`) uploading frames to an admin-only, CSRF-protected,
+      size-and-type-validated endpoint that writes through
+      `security/paths.py`. The ~2,000-line module and its `subprocess` +
+      OpenCV-window design go with it, taking **CO-1, CO-2, CO-3, PO-6 and
+      MA-2** along. **Keep the quality gates on the server** — reimplementing
+      them in JavaScript recreates MA-4, which Phase 3 exists to delete.
+      Fold **FS-9** in here: with images arriving before the row is written,
+      "insert only on success" is the easy path.
 - [ ] Split `app.py` into blueprints + service layer + repositories (MA-1)
-- [ ] Refactor `capture_dataset.py` into functions with a `main()` guard (MA-2)
 - [ ] Replace free-text subject entry with a `<select>` bound to `subjects`, chosen once per session (FS-7, US-4)
 - [ ] Flash messages, loading states, error pages with navigation (US-1, US-2)
 - [ ] Live recognised-students feed via polling or SSE (US-3)
@@ -398,8 +431,30 @@ database. Both restored; see [`lessons.md` L6](lessons.md).
 - [ ] Report filters honoured by `/export_excel`; streamed download (FS-11)
 
 ### Phase 6 — Evidence for the ISO 25010 evaluation *(≈2 days)*
+
+> **Unblocked by §7 Q3 (decided 2026-08-08): recapture is feasible.** This
+> phase now produces a real evaluation rather than a caveated one. **Run it
+> after Phase 5**, so the recapture uses the new enrolment flow and doubles as
+> that flow's acceptance test instead of being done twice.
+
+- [ ] **Collect written consent first** — from the three students for the
+      recapture, and from every impostor. An impostor is never enrolled but
+      their face is still captured and processed, which is sensitive personal
+      information under RA 10173 exactly as a student's is, and the consent
+      must name the real purpose. Nothing in the schema records consent yet
+      ([`docs/data_privacy.md`](../docs/data_privacy.md) §2), so this is paper,
+      and it happens **before** the capture session.
 - [ ] Recapture the dataset across **≥2 separate sessions** per student, different days/lighting (fixes the leakage in §3)
 - [ ] Build an **impostor set** (non-enrolled faces) for open-set evaluation
+- [ ] **Re-derive `RECOGNITION_THRESHOLD` from the DET curve.** 58.0 is a
+      measured-working value, not a calibrated one, and `tests/test_settings.py`
+      asserts it so it cannot drift on a hunch ([`lessons.md` L2](lessons.md)).
+      This is the one legitimate reason to change it — update that test in the
+      same commit and cite the curve.
+- [ ] **Measure and write up the LBPH scaling ceiling.** §7 Q1 keeps LBPH, so
+      ~18.3 MB/student and the `cv::FileStorage` read failure between 0.57 GB
+      and 1.84 GB become stated limitations: a hard ceiling near **31 students**,
+      below one large class. Cheap to produce — the measurement exists in §3a.
 - [ ] Rewrite the evaluation harness to report **FAR / FRR / EER**, a DET curve, and a *justified* operating threshold (§3)
 - [ ] Benchmark suite: model size, cold start, FPS, recognition latency, memory — before vs after
 - [ ] Usability instrument: SUS questionnaire + task-completion timings with real instructors
@@ -425,11 +480,33 @@ database. Both restored; see [`lessons.md` L6](lessons.md).
 
 ---
 
-## 7. Decisions needed before Phase 3
+## 7. Open decisions
 
-1. **Recognition backend.** Keep LBPH (thesis continuity; fix `neighbors=12`→`8`, measured 1.835 GB→0.220 GB) **or** move to a modern embedding model (`face_recognition`/dlib or ArcFace via ONNX: ~4 MB model, constant size regardless of enrolment, far higher open-set accuracy). This decision determines whether PE-1/PE-2 are *mitigated* or *eliminated*, and it is the biggest single lever on the empirical chapter. **Recommendation: fix LBPH in Phase 3 for continuity, and add an embedding backend behind the same interface as a documented comparison** — that turns a weakness into a contribution.
-2. **Deployment topology.** Does the system need to run browser-on-another-machine (CO-3)? If yes, enrolment capture must move into the browser (`getUserMedia` + upload) and the `subprocess` + OpenCV-window design must go. If single-kiosk is acceptable, document that constraint explicitly instead.
-3. **Dataset recapture.** Phase 6 is only meaningful with multi-session data. Is recapturing the 3 students (plus impostors) feasible in the remaining timeline?
+*Originally "decisions needed before Phase 3". Q1 blocked Phase 3 and is now
+answered, so Phase 3 can start; Q2 and Q3 block Phases 5 and 6.*
+
+1. ~~**Recognition backend.**~~ ✅ **Decided 2026-08-08 by the user: keep LBPH, and do not add a second backend.** The manuscript is written and the thesis is pending prefinal defense; changing the recognition model would mean rewriting it. The standing recommendation had been to add an embedding backend alongside LBPH as a documented comparison — **that is now out of scope too**, since it would add a chapter rather than change one, and the constraint is manuscript time, not implementation time.
+
+   **What this settles:** LBPH stays at `neighbors=8`, which is already in place from Phase 0 and already measured (1.835 GB → 0.220 GB at the old dataset size; the live model is **55 MB** for 3 identities). PE-0 is fixed. **PE-1 and PE-2 are now permanently *mitigated*, not eliminated** — they become documented limitations of the system rather than defects to fix.
+
+   **What it obliges, and this is the part that matters for the defense.** At `neighbors=8` the model costs ~18.3 MB per enrolled student, and `cv::FileStorage` cannot read a model back somewhere between 0.57 GB and 1.84 GB (measured, §3a). That puts the hard ceiling at roughly **31–100 students, with the lower bound being the safe planning figure** — below a single large class. This is not hypothetical: exceeding it reproduces exactly the outage Phase 0 recovered from, where OpenCV writes a model it then refuses to read. An examiner asking "does this scale to a real classroom?" must get a measured number and an honest "no, and here is why" — not a hand-wave. Producing that figure is Phase 6 evidence work and is cheap, since the measurement already exists.
+2. ~~**Deployment topology.**~~ ✅ **Decided 2026-08-08 by the user: move enrolment into the browser.** `getUserMedia` + upload; the `subprocess` + server-side OpenCV window design goes. This resolves **CO-3**, and **CO-1, CO-2 and PO-6 fall out with it** — `cv2.CAP_DSHOW` and `ctypes.windll` are the Windows-only pieces, and both live in the capture path that is being deleted.
+
+   **⚠️ This has a hard prerequisite, and it is not negotiable: TLS.** Browsers expose `getUserMedia` only in a *secure context* — HTTPS, or `localhost`. On a plain-HTTP origin served to another machine the camera call does not prompt and does not fail gracefully; it rejects. **So "enrolment in the browser" and "no TLS" cannot both be true.** Serving the app over HTTPS is therefore a Phase 5 deliverable rather than a nice-to-have, and it flips `SESSION_COOKIE_SECURE` to `true` at the same time (SE-11, currently `false` precisely because there is no TLS). Budget for it; discovering it half-way through the rewrite is expensive.
+
+   **Recommended split, stated so it can be argued with before anyone builds it:** the *browser* supplies a camera and a screen; **all vision logic stays on the server.** The page captures frames and uploads them, the server runs the existing face-geometry, blur, brightness and pose checks and returns the verdict the UI displays. The alternative — reimplementing the quality gates in JavaScript with MediaPipe Web — means two implementations of the same thresholds, which is **MA-4 all over again**, and MA-4 is a Phase 3 task to *delete* a duplicate, not create one.
+
+   **Note what does *not* move.** Attendance recognition keeps the server-side camera: the classroom camera is physically at the kiosk, and `/video_feed` already streams it to a remote browser perfectly well. Only *enrolment* becomes browser-side. If that reading is wrong — if the attendance camera also needs to be the operator's webcam — say so before Phase 5, because it is a much larger change.
+
+   **New attack surface, and Phase 2's rules apply to it.** An endpoint that accepts uploaded images needs: `@role_required('admin')`, CSRF, a strict content-type and magic-byte check, a per-file and per-request size cap, a bounded image count, and a decode step that cannot be talked into an enormous allocation. It must write through `security/paths.py` like everything else. It is also the natural moment to fix **FS-9** — with the images arriving before the row is written, "insert only on success" becomes the easy path rather than the hard one.
+
+3. ~~**Dataset recapture.**~~ ✅ **Decided 2026-08-08 by the user: recapture is feasible.** Phase 6 becomes a real evaluation — ≥2 sessions per student on different days and lighting, plus an impostor set, and therefore an actual FAR/FRR/EER with a justified operating point instead of the same-session 60/60 that cannot be quoted without four caveats (§3).
+
+   **⚠️ Sequence it after Phase 5, not before.** Recapturing with today's `capture_dataset.py` means doing it twice, since the enrolment tool is being replaced (Q2). Done afterwards, the recapture *is* the acceptance test for the new browser flow — one exercise, two results.
+
+   **⚠️ Impostors are data subjects.** Someone who is never enrolled still has their face captured and processed, which is sensitive personal information under RA 10173 exactly as an enrolled student's is. They need the same consent, and the consent has to name the actual purpose — "to test whether the system wrongly recognises you" — not enrolment. Nothing in the schema records consent yet (`docs/data_privacy.md` §2), so this is paper, and it needs collecting *before* the capture session, not after. An examiner reviewing an open-set evaluation is entitled to ask where the impostor faces came from.
+
+   **⚠️ `RECOGNITION_THRESHOLD` is expected to move, and only here.** 58.0 is the measured-working value, never a calibrated one, and `tests/test_settings.py` asserts it precisely so nobody changes it on a hunch ([`lessons.md` L2](lessons.md)). A threshold derived from a real DET curve is the one legitimate reason to change it — update that test in the same commit, with the curve as the justification.
 
 **Decided 2026-08-08 (Phase 2), no longer open:**
 

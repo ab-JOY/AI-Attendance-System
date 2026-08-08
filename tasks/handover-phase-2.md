@@ -231,10 +231,16 @@ same-session split, no impostors, N=3. Do not quote it without the caveats in
 
 ## 6. Phase 3 scope, with warnings
 
-From [`todo.md`](todo.md) §5. All of it is open.
+From [`todo.md`](todo.md) §5. **Phase 3 is unblocked** — the backend question
+was answered on 2026-08-08 (§7.1).
 
-- [ ] **Decide the recognition backend** (§7 Q1) — still the user's decision,
-      still unmade. It blocks the rest of this phase.
+- [x] ~~**Decide the recognition backend**~~ — **decided: keep LBPH, and do
+      not add a second backend.** No code change: `neighbors=8` has been in
+      place since Phase 0. **Do not reopen this, and do not "fix" PE-1/PE-2
+      while you are in the recognition code** — they are accepted, documented
+      limitations now, not defects. The constraint behind the decision is
+      manuscript time, not implementation time, so a "small, additive"
+      backend comparison is exactly the wrong offer to make.
 - [ ] **Extract `vision/validation.py`** as the single face-geometry gate
       (MA-4).
       ⚠️ The two copies use *different* thresholds, so enrolment and
@@ -274,19 +280,48 @@ MA-4 lands, that number may legitimately change — say so and show both.
 
 From [`todo.md`](todo.md) §7.
 
-1. **Recognition backend (blocks Phase 3).** Unchanged and undecided.
-   Recommendation on the table: keep LBPH for thesis continuity *and* add an
-   embedding backend behind the same interface as a documented comparison.
-2. **Deployment topology (blocks Phase 5).** Unchanged and undecided.
-   ⚠️ Phase 2 added a second reason this matters: the system runs over plain
-   HTTP, so `SESSION_COOKIE_SECURE` defaults to `false`. The moment the
-   browser is on another machine, credentials and the camera stream cross the
-   network in clear text. Answering Q2 with "yes, remote" means TLS is a
-   prerequisite, not a nicety.
-3. **Dataset recapture (blocks Phase 6).** Feasibility still unknown.
+1. ~~**Recognition backend (blocks Phase 3).**~~ ✅ **Decided 2026-08-08:
+   keep LBPH, no second backend.** The manuscript is written and the thesis
+   is pending prefinal defense, so changing the recognition model would mean
+   rewriting it. The embedding-backend-as-comparison recommendation is
+   withdrawn for the same reason — it would add a chapter.
+   ⚠️ **The consequence needs writing up, not fixing.** LBPH at
+   `neighbors=8` costs ~18.3 MB per student and `cv::FileStorage` cannot read
+   a model back between 0.57 GB and 1.84 GB, so the hard ceiling is roughly
+   **31–100 students; plan on 31**. That is below one large class, and
+   exceeding it reproduces the Phase 0 outage. A prefinal examiner asking
+   whether this scales deserves that number and a straight "no, and here is
+   the measurement" — Phase 6 evidence work, cheap because the measurement
+   already exists (§3a of `todo.md`).
+2. ~~**Deployment topology (blocks Phase 5).**~~ ✅ **Decided 2026-08-08:
+   move enrolment into the browser.** `getUserMedia` + upload; the
+   `subprocess` + server-side OpenCV window goes, and **CO-1, CO-2, CO-3,
+   PO-6 and MA-2** go with it.
+   ⚠️ **TLS is now a hard prerequisite, not a nicety.** `getUserMedia` is
+   only available in a secure context, so browser enrolment **cannot work**
+   over plain HTTP served to another machine. Phase 2 left
+   `SESSION_COOKIE_SECURE` at `false` for exactly that reason; HTTPS flips it
+   to `true`. Both are Phase 5 items now — see `todo.md` §5.
+   ⚠️ **Keep the vision logic on the server.** The browser supplies a camera
+   and a screen; the face-geometry, blur, brightness and pose checks stay
+   server-side. Reimplementing them in JavaScript recreates MA-4, which
+   Phase 3 exists to *delete*.
+   ⚠️ Only *enrolment* moves. Attendance keeps the server-side camera — the
+   classroom camera is at the kiosk and `/video_feed` already streams to a
+   remote browser. If that reading is wrong, it needs saying before Phase 5.
+3. ~~**Dataset recapture (blocks Phase 6).**~~ ✅ **Decided 2026-08-08:
+   feasible.** Phase 6 becomes a real open-set evaluation with FAR/FRR/EER
+   instead of a caveated same-session 60/60.
+   ⚠️ **Sequence it after Phase 5**, or the recapture happens twice — once
+   with the tool being replaced, once with its replacement. Done afterwards
+   it doubles as the acceptance test for browser enrolment.
+   ⚠️ **Every impostor is a data subject.** Never enrolled, still captured,
+   still sensitive personal information under RA 10173. Consent on paper,
+   before the session, naming the real purpose.
 
-**Decided during this sprint, no longer open:** CI (added), and the SE-3
-folder scheme (sanitise + containment, not a surrogate key).
+**All three §7 questions are now answered, so nothing in Phases 3–6 is
+blocked on a decision.** Also decided during this sprint: CI (added), and the
+SE-3 folder scheme (sanitise + containment, not a surrogate key).
 
 ---
 
