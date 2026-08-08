@@ -59,6 +59,33 @@ class Settings(BaseSettings):
     flask_debug: bool = False
 
     # -----------------------------------------------------------------
+    # Session hardening (SE-11)
+    #
+    # session_cookie_secure defaults to False, and that is a decision
+    # rather than an oversight. The deployed system is the Flask
+    # development server over plain HTTP on localhost (PO-4, CO-3);
+    # setting Secure there means the browser never sends the cookie back
+    # and nobody can log in at all. Turn it on - and you should - the
+    # moment this sits behind TLS.
+    #
+    # HTTPONLY and SAMESITE are not configurable: there is no deployment
+    # of this application that wants JavaScript reading the session
+    # cookie, or wants it sent on a cross-site POST.
+    # -----------------------------------------------------------------
+    session_cookie_secure: bool = False
+    session_lifetime_minutes: int = 30
+
+    # -----------------------------------------------------------------
+    # Login throttling (SE-13)
+    #
+    # Consecutive failures per (username, client address). See
+    # security/rate_limit.py for why this is in-memory.
+    # -----------------------------------------------------------------
+    login_max_attempts: int = 5
+    login_lockout_seconds: int = 900
+    login_attempt_window_seconds: int = 900
+
+    # -----------------------------------------------------------------
     # Recognition
     #
     # Configurable, but NOT free to change. This is the LBPH distance below
