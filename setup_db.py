@@ -20,6 +20,7 @@ import mysql.connector
 
 from config.logging_config import configure_logging
 from config.settings import settings
+from security.passwords import hash_password
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,54 @@ logger = logging.getLogger(__name__)
 # request, but interpolating an unvalidated string into SQL is the habit that
 # produces injection bugs, so it is checked against a strict allowlist first.
 _VALID_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def column_exists(cursor, database, table, column):
+    """True if `table` already has `column`. Read-only."""
+    cursor.execute(
+        """
+        SELECT COUNT(*)
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND COLUMN_NAME = %s
+        """,
+        (database, table, column),
+    )
+
+    row = cursor.fetchone()
+
+    # Callers use both plain and dictionary cursors.
+    count = row["COUNT(*)"] if isinstance(row, dict) else row[0]
+
+    return bool(count)
+
+
+def ensure_column(cursor, database, table, column, definition):
+    """
+    Add `column` to `table` if it is not already there. Returns True if the
+    column was added.
+
+    `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table, so it will
+    happily leave a database several columns behind the schema in this file
+    and report success. Every column added after the first release therefore
+    needs an explicit check. MySQL has no `ADD COLUMN IF NOT EXISTS`, so the
+    check goes through information_schema.
+
+    Identifiers are validated by the same allowlist as the database name -
+    they cannot be passed as query parameters, and interpolating unchecked
+    strings into DDL is the habit that produces injection bugs. `definition`
+    is a SQL fragment and is deliberately not validated: it must only ever be
+    a literal written in this repository, never anything from a request.
+    """
+    for identifier in (table, column):
+        if not _VALID_IDENTIFIER.match(identifier):
+            raise ValueError(f"Refusing to use {identifier!r} as a SQL identifier")
+
+    if column_exists(cursor, database, table, column):
+        return False
+
+    cursor.execute(f"ALTER TABLE `{table}` ADD COLUMN `{column}` {definition}")
+    logger.info("Added column %s.%s", table, column)
+    return True
 
 
 def setup_database(host=None, user=None, password=None, database=None):
@@ -72,11 +121,15 @@ def setup_database(host=None, user=None, password=None, database=None):
         cursor.execute(f"USE `{database}`")
 
         # 1. Admin Table
+        #
+        # `password` holds a bcrypt hash, never a plaintext password (SE-1),
+        # and is never compared in SQL (SE-15). See security/passwords.py.
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS admin (
             id INT AUTO_INCREMENT PRIMARY KEY,
             username VARCHAR(100) NOT NULL UNIQUE,
-            password VARCHAR(255) NOT NULL
+            password VARCHAR(255) NOT NULL,
+            must_change_password TINYINT(1) NOT NULL DEFAULT 0
         )
         """)
         logger.info("Table 'admin' verified")
@@ -87,7 +140,8 @@ def setup_database(host=None, user=None, password=None, database=None):
             id INT AUTO_INCREMENT PRIMARY KEY,
             instructor_id VARCHAR(100) NOT NULL UNIQUE,
             fullname VARCHAR(255) NOT NULL,
-            password VARCHAR(255) NOT NULL
+            password VARCHAR(255) NOT NULL,
+            must_change_password TINYINT(1) NOT NULL DEFAULT 0
         )
         """)
         logger.info("Table 'instructors' verified")
@@ -137,20 +191,37 @@ def setup_database(host=None, user=None, password=None, database=None):
         """)
         logger.info("Table 'attendance' verified")
 
+        # Columns added after the first release. The CREATE TABLE statements
+        # above do nothing on a database that already exists, so these have
+        # to be applied separately.
+        for table in ("admin", "instructors"):
+            ensure_column(
+                cursor,
+                database,
+                table,
+                "must_change_password",
+                "TINYINT(1) NOT NULL DEFAULT 0",
+            )
+
+        conn.commit()
+
         # Seed Default Admin
+        #
+        # The credential is still admin/admin and is still public knowledge -
+        # but it is now stored as a bcrypt hash (SE-1) and flagged so the
+        # account can do nothing except change it (see security/access.py).
         cursor.execute("SELECT * FROM admin WHERE id = 1")
         if cursor.fetchone() is None:
             cursor.execute(
-                "INSERT INTO admin (id, username, password) "
-                "VALUES (1, 'admin', 'admin')"
+                "INSERT INTO admin (id, username, password, must_change_password) "
+                "VALUES (1, 'admin', %s, 1)",
+                (hash_password("admin"),),
             )
             conn.commit()
-            # SE-1: this password is stored in plaintext and the credentials
-            # are public knowledge. Phase 2 replaces this with a bcrypt hash
-            # and a forced change on first login.
             logger.warning(
                 "Seeded the default admin account (username 'admin', "
-                "password 'admin'). Change it before any real use."
+                "password 'admin'). You will be required to change the "
+                "password at first login."
             )
         else:
             logger.info("Admin user already exists")
