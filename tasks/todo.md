@@ -58,7 +58,7 @@ Severity: **P0** blocker · **P1** critical · **P2** major · **P3** minor
 | FS-9 | P2 | `capture_face` **inserts the student row before capture succeeds**. Cancel the capture (ESC) and you get a student with no dataset — which then permanently breaks training (FS-2). This is how the current outage was created. | [app.py:180-231](../app.py#L180-L231) |
 | FS-10 | P2 | No attendance edit/override UI. A false negative cannot be corrected by the instructor. | — |
 | FS-11 | P3 | `/export_excel` ignores all report filters and always exports the entire table to a fixed filename. | [app.py:1332-1360](../app.py#L1332-L1360) |
-| **FS-12** | **P1** | **A fatal failure during enrolment is reported to the operator as success.** Every bare `sys.exit()` in `capture_dataset.py` exits with status **0** — a missing `face_preprocessing`, missing arguments, or an empty student ID all exit cleanly. `app.py` treats returncode 0 as success, then runs an automatic retrain. The operator sees a completed enrolment for a student who has no dataset, which then feeds FS-2/FS-9. **Found during Phase 1; deliberately not fixed there** to keep that phase behaviour-neutral — it changes enrolment control flow and cannot be verified without a camera. One-line change per exit site: `sys.exit(1)`. | [capture_dataset.py](../capture_dataset.py) exit sites vs [app.py:241](../app.py#L241); found 2026-08-08 |
+| **FS-12** | **P1** | ~~**A fatal failure during enrolment is reported to the operator as success.**~~ ✅ **Fixed 2026-08-08.** Every bare `sys.exit()` in `capture_dataset.py` exited with status **0** — missing `face_preprocessing`, missing arguments, an empty student ID, an unopenable camera, and a camera read error part-way through all exited "cleanly". `app.py` treats 0 as success and runs an automatic retrain, so the operator saw a completed enrolment for a student with no usable dataset, feeding FS-2/FS-9. **Root cause was an implicit contract:** the exit codes were literals on both sides and nothing tied them together. Now `config/exit_codes.py` defines `EXIT_SUCCESS`/`EXIT_FAILURE`/`EXIT_CANCELLED` and both modules import it; the code is decided in one place after cleanup, and **only a complete capture (`count == MAX_IMAGES`) reports success**. Covered by `tests/test_capture_exit_codes.py`, including a ban on bare `sys.exit()`. | [capture_dataset.py](../capture_dataset.py), [config/exit_codes.py](../config/exit_codes.py), [app.py:242](../app.py#L242) |
 
 ### 2.2 Performance Efficiency
 
@@ -332,7 +332,10 @@ the import to `app_config`; `tests/test_no_import_shadowing.py` now checks all
 eight modules for this class of bug by parsing them with `ast`. See
 [`lessons.md` L5](lessons.md).
 
-**New finding:** FS-12 (§2.1) — enrolment reports fatal errors as success.
+**New finding:** FS-12 (§2.1) — enrolment reported fatal errors as success.
+**Fixed immediately after Phase 1 merged**, on its own branch so the
+foundation work stayed behaviour-neutral and reviewable on its own. See the
+FS-12 row in §2.1 and `config/exit_codes.py`.
 
 ### Phase 2 — Security *(≈2 days)*
 - [ ] Hash passwords with `bcrypt`; migration to rehash existing rows; force change of the seeded `admin`/`admin` (SE-1)

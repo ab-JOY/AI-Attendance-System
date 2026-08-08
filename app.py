@@ -19,6 +19,7 @@ from flask import (
     url_for,
 )
 
+from config.exit_codes import EXIT_CANCELLED, EXIT_SUCCESS
 from config.logging_config import configure_logging
 
 # Aliased deliberately. There is a route handler named `settings()` at the
@@ -238,14 +239,14 @@ def capture_face():
             name
         ], check=True)
 
-        if result.returncode == 0:
+        if result.returncode == EXIT_SUCCESS:
             # Auto-train LBPH model after capturing dataset
             logger.info("Auto-training model after dataset capture")
             train_success, train_msg = train_model()
             logger.info("Train result: %s - %s", train_success, train_msg)
 
     except subprocess.CalledProcessError as error:
-        if error.returncode == 2:
+        if error.returncode == EXIT_CANCELLED:
             logger.info("Face capture cancelled by user")
             return redirect(url_for('students'))
         logger.exception("Capture dataset script failed")
@@ -744,7 +745,7 @@ def recapture_face():
         logger.info("Train result: %s - %s", train_success, train_msg)
 
     except subprocess.CalledProcessError as error:
-        if error.returncode == 2:
+        if error.returncode == EXIT_CANCELLED:
             logger.info("Face recapture cancelled by user")
             return redirect(url_for('manage_students'))
 

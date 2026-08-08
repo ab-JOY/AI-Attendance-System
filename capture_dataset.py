@@ -15,6 +15,7 @@ from camera_utils import (
     open_camera_by_index,
     save_camera_index,
 )
+from config.exit_codes import EXIT_CANCELLED, EXIT_FAILURE, EXIT_SUCCESS
 from config.logging_config import configure_logging
 from config.settings import settings
 
@@ -31,15 +32,15 @@ configure_logging()
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# FS-12 (found during Phase 1, not fixed here): every bare `sys.exit()` below
-# exits with status 0, which app.py reads as success (app.py:238) and follows
-# with an automatic retrain. A fatal startup failure in this script is
-# therefore reported to the operator as a completed enrolment.
+# EXIT CODES - FS-12
 #
-# The exit codes are left exactly as they were so this phase stays
-# behaviour-neutral and the held-out result remains comparable. Fixing them
-# is a one-line change per site, but it alters the enrolment control flow,
-# which cannot be tested without a camera. See tasks/todo.md FS-12.
+# Every failure path below used to be a bare `sys.exit()`, which exits with
+# status 0. app.py reads 0 as a completed enrolment and retrains the model,
+# so a missing dependency, a bad argument or an unopenable camera was
+# reported to the operator as success for a student who had no dataset.
+#
+# The contract now lives in config/exit_codes.py and both sides import it.
+# Anything that is not a complete capture must exit non-zero.
 # ---------------------------------------------------------------------------
 
 try:
@@ -51,7 +52,7 @@ except ImportError:
         "capture_dataset.py.",
         exc_info=True
     )
-    sys.exit()
+    sys.exit(EXIT_FAILURE)
 
 
 # =====================================================
@@ -62,7 +63,7 @@ if len(sys.argv) < 3:
     logger.error(
         "Usage: python capture_dataset.py <student_id> <student_name>"
     )
-    sys.exit()
+    sys.exit(EXIT_FAILURE)
 
 student_id = sys.argv[1].strip()
 student_name = sys.argv[2].strip()
@@ -70,7 +71,7 @@ preferred_camera_idx = sys.argv[3].strip() if len(sys.argv) > 3 else None
 
 if not student_id or not student_name:
     logger.error("Student ID and name are required")
-    sys.exit()
+    sys.exit(EXIT_FAILURE)
 
 
 # =====================================================
@@ -195,7 +196,7 @@ if cap is None or not cap.isOpened():
 
     face_mesh.close()
     cv2.destroyAllWindows()
-    sys.exit()
+    sys.exit(EXIT_FAILURE)
 
 current_camera_idx = get_saved_camera_index()
 if current_camera_idx is None:
@@ -1083,6 +1084,11 @@ def save_face_image(face):
 # MAIN CAPTURE LOOP
 # =====================================================
 
+# Initialised up front rather than only inside the loop, so the exit-code
+# decision below never has to ask whether the name exists yet.
+cancelled = False
+capture_error = False
+
 try:
 
     while True:
@@ -1090,7 +1096,12 @@ try:
         ret, frame = cap.read()
 
         if not ret:
+            # Part of FS-12. This break used to fall through to a status-0
+            # exit, so a camera unplugged half way through enrolment was
+            # reported as a completed capture - with however many images
+            # happened to be on disk at that moment.
             logger.error("Camera read error")
+            capture_error = True
             break
 
         display = frame.copy()
@@ -1974,6 +1985,13 @@ try:
 # CLEANUP & EXIT CODES
 # =====================================================
 
+except Exception:
+    # Without this the traceback was lost: sys.exit() inside the finally
+    # below replaces any in-flight exception, so an unexpected crash exited
+    # silently. Log it here, while the exception is still live.
+    logger.exception("Dataset capture failed with an unexpected error")
+    capture_error = True
+
 finally:
 
     if cap is not None:
@@ -1984,5 +2002,32 @@ finally:
 
     logger.info("Camera released")
 
-    if 'cancelled' in locals() and cancelled:
-        sys.exit(2)
+
+# ---------------------------------------------------------------------------
+# The exit code is the only thing app.py sees, so it is decided in one place
+# rather than scattered through the loop. Deciding it here - after the finally
+# rather than inside it - keeps cleanup and reporting separate, and means a
+# SystemExit raised here can never pre-empt cleanup.
+#
+# FS-12: the rule is that only a *complete* capture reports success. Anything
+# else must be non-zero, or app.py retrains on a dataset that is not there.
+# ---------------------------------------------------------------------------
+
+if cancelled:
+    logger.info("Enrolment cancelled by the operator after %d image(s)", count)
+    sys.exit(EXIT_CANCELLED)
+
+if capture_error or count < MAX_IMAGES:
+    logger.error(
+        "Enrolment incomplete for %s: captured %d of %d images. The dataset "
+        "folder is unusable and the model was not retrained.",
+        student_id,
+        count,
+        MAX_IMAGES,
+    )
+    sys.exit(EXIT_FAILURE)
+
+logger.info(
+    "Enrolment complete for %s: %d images captured", student_id, count
+)
+sys.exit(EXIT_SUCCESS)

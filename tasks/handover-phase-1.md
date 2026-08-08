@@ -3,7 +3,7 @@
 **Sprint:** Phase 1, Foundation
 **Date:** 2026-08-08
 **Status:** Complete. One item deferred by the user (CI).
-**Branch:** `phase-1-foundation`, 3 commits on top of `3bce899`
+**Branch:** merged to `main` 2026-08-08 (3 commits), followed by `fix-fs-12`
 **Read with:** [`todo.md`](todo.md) (audit + full plan), [`lessons.md`](lessons.md)
 
 Phase 0's handover is history now — read it only for background on the
@@ -78,7 +78,7 @@ Every number below was measured today, not carried forward.
 | Check | Result |
 |---|---|
 | `ruff check .` | **clean** |
-| `pytest tests/` | **35 passed in 3.0 s** |
+| `pytest tests/` | **43 passed in 33 s** (33 in 1.8 s with `-m "not slow"`) |
 | `eval_heldout_accuracy.py` | **60/60, avg distance 34.95** — identical to the Phase 0 baseline |
 | `import app` + real requests | boots in ~12 s; `POST /login` → 302 `/dashboard`, `GET /students` → 200, `GET /settings` → 200 |
 | `py_compile` (11 modules) | clean |
@@ -95,9 +95,9 @@ against the live database, which is further than Phase 0 got.
 ### Re-establish the baseline before you start
 
 ```bash
-git checkout phase-1-foundation
+git checkout main
 .venv/Scripts/python.exe -m ruff check .              # expect: All checks passed
-.venv/Scripts/python.exe -m pytest tests/ -q          # expect: 35 passed
+.venv/Scripts/python.exe -m pytest tests/ -q          # expect: 43 passed
 .venv/Scripts/python.exe eval_heldout_accuracy.py     # expect 60/60, avg 34.95
 git status --porcelain                                # expect empty
 ```
@@ -154,7 +154,8 @@ live runtime state read by `camera_utils.py`. Retiring them is PO-3.
 - **Evaluators renamed** `test_accuracy.py` → `eval_accuracy.py`,
   `test_heldout_accuracy.py` → `eval_heldout_accuracy.py`. Both now import
   the threshold from config rather than restating 58.0.
-- **`tests/` — 35 tests, 3 s.** Covers `write_model_atomically()` (the four
+- **`tests/` — 35 tests at the time of this commit, 43 after the FS-12 fix.**
+  Covers `write_model_atomically()` (the four
   RE-1 cases), the FS-2 skip-don't-abort path, `parse_dataset_folder()`,
   `config/settings.py`, and import shadowing.
 - **`ruff check` clean.** `SIM103`/`SIM108` disabled with reasoning recorded
@@ -186,17 +187,47 @@ live runtime state read by `camera_utils.py`. Retiring them is PO-3.
 
 ---
 
-## 5. New finding
+## 5. New finding — FS-12, found in Phase 1 and **fixed immediately after**
 
 | ID | Sev | Finding |
 |---|---|---|
-| **FS-12** | **P1** | **A fatal enrolment failure is reported as success.** Every bare `sys.exit()` in `capture_dataset.py` exits with status **0** — missing `face_preprocessing`, missing arguments, empty student ID. `app.py:241` treats returncode 0 as success and runs an automatic retrain, so the operator sees a completed enrolment for a student who has no dataset. That feeds straight into FS-2 and FS-9. |
+| **FS-12** | **P1** | **A fatal enrolment failure was reported as success.** Every bare `sys.exit()` in `capture_dataset.py` exits with status **0** — missing `face_preprocessing`, missing arguments, empty student ID, unopenable camera, and a camera read error part-way through the capture. `app.py` treats returncode 0 as success and runs an automatic retrain, so the operator saw a completed enrolment for a student with no usable dataset. That fed straight into FS-2 and FS-9. |
 
-**Deliberately not fixed in Phase 1.** It changes enrolment control flow and
-cannot be verified without a camera, and this phase was scoped to be
-behaviour-neutral so the held-out number stayed comparable. The fix is
-`sys.exit(1)` at each site plus a check of what `app.py` does with each code.
-A comment marks it at the call site.
+It was **deliberately excluded from Phase 1** so that phase stayed
+behaviour-neutral, then fixed on `fix-fs-12` once Phase 1 was merged.
+
+**What the fix changed:**
+
+- **`config/exit_codes.py` (new)** — `EXIT_SUCCESS` / `EXIT_FAILURE` /
+  `EXIT_CANCELLED`, imported by both `capture_dataset.py` and `app.py`. The
+  root cause was not the individual `sys.exit()` calls; it was that the
+  contract was implicit, written as literals on both sides with nothing
+  tying them together. The module is import-free and side-effect-free on
+  purpose — `app.py` imports it, and importing `capture_dataset` would run a
+  camera session (MA-2).
+- **Only a complete capture reports success.** The exit code is now decided
+  in one place after cleanup, and `count < MAX_IMAGES` is a failure. This
+  caught a second path the original finding missed: the camera-read-error
+  `break` mid-capture also exited 0, so a camera unplugged half way through
+  reported a completed enrolment with a partial dataset.
+- **Unexpected exceptions are logged.** `sys.exit()` inside the old `finally`
+  replaced any in-flight exception, so a crash exited with no traceback.
+- `cancelled` is initialised up front, replacing the
+  `'cancelled' in locals()` guard.
+
+**Tested** in `tests/test_capture_exit_codes.py`, which runs the real script
+as a subprocess. This is possible without a camera because argument
+validation happens before `open_best_camera()` *and* before the dataset
+folder is created — one of the tests asserts exactly that, since an empty
+`dataset/{id}_{name}` left by a failed run is what creates the dangling
+folders behind FS-2/FS-9. There is also an AST check banning bare
+`sys.exit()` outright. Verified against the old code: 6 of the 8 fail, with
+`returncode=0` alongside a usage error.
+
+**Still open, and unchanged by this fix:** `app.py` inserts the student row
+*before* capture runs (FS-9), so a failed enrolment still leaves a student in
+the database with no dataset. The failure is now visible instead of silent,
+but making enrolment atomic is Phase 4.
 
 ---
 
@@ -274,7 +305,7 @@ choose unilaterally.
 ## 8. Suggested first move
 
 ```bash
-git checkout phase-1-foundation
+git checkout main
 git checkout -b phase-2-security
 ```
 
@@ -282,5 +313,6 @@ Phase 2 changes authentication for every user of the system. Do it on a
 branch, and read §6's warning about SE-15 before touching the login query —
 the collation problem is invisible unless you look for it.
 
-Phase 1 is on a branch and not merged. Merging it to `main` is the user's
-call.
+Phase 1 was merged to `main` on 2026-08-08. The FS-12 fix sits on
+`fix-fs-12`; merge it before starting Phase 2 so you are not carrying two
+open branches through a security refactor.
