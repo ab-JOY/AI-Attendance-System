@@ -229,3 +229,95 @@ sails straight into it on the old.
   with the same credentials as everything else.
 - Point destructive negative tests at a scratch database, or accept that they
   will mutate the live one and seed a disposable row first.
+
+---
+
+## L7 — When a refactor "should be" equivalent, prove it. A docstring is not a measurement
+
+**2026-08-08, Phase 3 MA-4 extraction.**
+
+I merged two divergent copies of the face-geometry gate into one profiled
+implementation. The originals computed in truncated integers
+(`x + int(width * 0.18)`, with `nose_x` truncated too); I wrote the shared
+version in floats and put a confident note in the module docstring saying the
+difference was "under one pixel on bands tens of pixels wide" and could only
+matter for a face sitting exactly on a boundary.
+
+That note was a **guess wearing the clothes of a measurement.** It was written
+before anything had been run.
+
+So I built a differential harness instead: the pre-refactor functions were
+pulled out of the previous commit's blob with `ast` and exec'd in a clean
+namespace — neither module can be imported, one loads a 55 MB model at import
+and the other opens a camera — then both implementations were run over 40,000
+randomised synthetic meshes.
+
+The recognition gate matched on all 40,000. **The enrolment gate disagreed on
+105.** My docstring had been directionally right and quantitatively unfounded,
+and I would have shipped it as fact.
+
+**The part that mattered was the second experiment.** Knowing there were 105
+mismatches, "it is probably the truncation" is still a guess. So I transcribed
+the *original* logic with only the `int()` calls removed and ran that against
+the new module: **0 mismatches on all 40,000.** That is what turned "probably
+truncation" into "truncation, and nothing else" — a claim about the mechanism,
+not a correlation. The residual then had a real bound: worst case 0.865 px
+from a band edge, median 0.339 px.
+
+**How to apply:**
+
+- **A behaviour-preserving refactor is a testable claim.** Test it. The old
+  code is one `git show` away, and `ast` will lift a function out of a module
+  that cannot be imported — which is exactly the case where the refactor is
+  riskiest and the temptation to skip verification is strongest.
+- **Randomised differential testing beats hand-picked cases** for this. Every
+  case I would have written by hand was a face near the middle of a band; all
+  105 disagreements lived at the edges.
+- **A discrepancy is not explained until an experiment isolates its
+  mechanism.** "It is probably X" and "removing X makes the discrepancy
+  disappear entirely" are different epistemic objects, and only the second one
+  belongs in a commit message or a thesis.
+- **Do not let prose do a measurement's job.** If a docstring states a
+  quantity, either it came from a run or it is marked as an estimate. This is
+  L1 again — *measure artifacts by regenerating them* — but for behaviour
+  rather than for files.
+
+---
+
+## L8 — Verify an inherited warning before you plan around it
+
+**Same session.**
+
+The Phase 2 handover flagged MA-4 as "the first Phase 3 task that can move
+that figure", meaning the 60/60 held-out accuracy, and told the next agent to
+record the number before and after. I planned the sprint around that warning.
+
+It is wrong. `eval_heldout_accuracy.py` imports `settings`,
+`preprocess_for_lbph`, `LBPH_PARAMS` and `parse_dataset_folder` — and never
+the geometry gate. It scores stored 200×200 crops; the gate decides which
+frames are *saved during capture* and *recognised at runtime*. The evaluator
+exercises neither, so no change to the gate can move it. The run afterwards
+confirmed it: 60/60, avg 34.95, unchanged.
+
+The same handover reported the route table as "4 public, 9 authenticated, 22
+admin-only". Measured today, with `app.py` untouched this sprint: **3 public,
+9 authenticated, 23 admin-only**.
+
+**Why this matters more than two small errors.** A handover is written to be
+trusted by someone with no memory of the session, and this project's CLAUDE.md
+makes reading it mandatory *precisely* so findings are not re-derived. That
+trust is the point — and it means a wrong line propagates unchallenged into
+the next sprint's plan, and from there into the manuscript.
+
+**How to apply:**
+
+- **Inherited claims are evidence, not axioms.** Read the handover first, as
+  instructed — then, before a warning changes what you build, spend the two
+  minutes to check the thing it describes. Here it was one `grep` of the
+  evaluator's imports.
+- **Warnings that are cheap to check and expensive to be wrong about go
+  first.** "This task can change your headline accuracy number" is exactly
+  that shape.
+- **When you write a handover, mark which numbers you re-measured** and which
+  you carried forward from an earlier document. The next reader cannot
+  otherwise tell a fresh measurement from a five-sprint-old one.
