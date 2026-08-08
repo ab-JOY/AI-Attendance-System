@@ -159,3 +159,73 @@ This is the third defect in this project that **looked like working code**
 (after PE-0 and the `test_accuracy.py` zero-image bug). The pattern is
 consistent: the check that would have caught it was one layer away from where
 the failure lives.
+
+---
+
+## L6 — A negative test runs the code you are proving broken. Give it nothing real to break
+
+**2026-08-08, Phase 2 security work.**
+
+L4 says a check whose job is to detect a problem must also be run against
+broken input. I did that: I built `tests/test_route_security.py`, then
+checked out `main` in a worktree and ran the suite there to prove the tests
+actually caught SE-4 and SE-5 rather than passing vacuously. 48 of 74 failed,
+exactly as they should.
+
+One of them was:
+
+```python
+sign_in_as(client, "instructor")
+client.post("/delete_student/23-1-1-0559")   # a real, enrolled student
+```
+
+On `main` that route checks only `'user' in session`, so it did not return
+403. It **ran**, against the live MySQL database, and deleted the student
+row. I noticed twenty minutes later, from an unrelated assertion in the
+end-to-end script (`no student row created` — the count was 3, not 4).
+
+**And I under-counted the damage on first inspection.** Having found the
+student row, I restored it and moved on. The placeholder subject `CS401` had
+gone too, and I only found that an hour later while checking the row counts I
+was about to write into the handover. It went the same way, through a
+different test: `test_deletes_reject_get` issues `GET /delete_subject/1` to
+assert a 405, and on `main` that route *was* a GET route. So the test whose
+whole purpose was "this URL must not do anything on a GET" did the thing on a
+GET. **When a negative run turns out to have mutated shared state, audit
+everything it touched — not just the thing that alerted you.** I had a
+complete list available the whole time: the parametrised route table in the
+test file.
+
+**Two things stopped this being worse, and neither was a decision I made.**
+The dataset folder survived because `main` builds the path as the *relative*
+`os.path.join("dataset", ...)` and the worktree had no `dataset/` directory,
+so `os.path.isdir` was False — the exact path-handling weakness this phase
+existed to fix is what spared 100 face images. The row itself was restorable
+because `trainer/labels.txt` still held the student's name, so it could be
+reconstructed rather than retyped from memory.
+
+**Why the reasoning failed.** I checked that the tests asserted *denials*, so
+they needed no database — true on the fixed code, where the hook refuses
+before the route body runs. That is precisely the property the negative run
+removes. A test that cannot reach the database on the new code is a test that
+sails straight into it on the old.
+
+**How to apply:**
+
+- **Never put a real identifier in a test URL.** Every identifier in
+  `test_route_security.py` is now `SEC-TEST-NOBODY` / `SEC-TEST-NOONE`. Had
+  it been that from the start, the negative run would have deleted a row
+  matching nothing. Note that `/delete_subject/1` was still a real row —
+  numeric IDs have no obviously-fake form, which is an argument for a scratch
+  database rather than for careful naming.
+- **Audit the full blast radius, not the part that alerted you.** Two rows
+  were lost; I found one, declared it handled, and found the second by
+  accident an hour later.
+- **A negative test is an execution of the vulnerable code path.** Before
+  running one, ask what it does if the guard is absent — that is the whole
+  point of the exercise, so the answer is never "nothing".
+- **A worktree is not isolation.** It isolates the *files*. The database,
+  `.env` and every other external resource are shared, and the checkout runs
+  with the same credentials as everything else.
+- Point destructive negative tests at a scratch database, or accept that they
+  will mutate the live one and seed a disposable row first.

@@ -35,6 +35,29 @@ python app.py                   # http://127.0.0.1:5000
 it, deliberately: the value it replaced is in git history, and a known Flask
 secret key means session cookies can be forged.
 
+### First login
+
+`setup_db.py` seeds **`admin` / `admin`**, and that credential is published
+here, so it is not a password. The account is flagged `must_change_password`
+and can reach nothing but the change-password screen until it is replaced.
+Sign in with it once, set a real password, and it is done.
+
+### Upgrading a database created before Phase 2
+
+If the `admin` or `instructors` tables already exist, they hold plaintext
+passwords and have no `must_change_password` column. `CREATE TABLE IF NOT
+EXISTS` will not fix either, so run the migration once:
+
+```bash
+python scripts/migrate_passwords.py --dry-run   # report what would change
+python scripts/migrate_passwords.py             # apply
+```
+
+It adds the column, replaces every plaintext password with a bcrypt hash, and
+flags any account still using a shipped default. Running it twice is safe.
+**Hashing is one-way** — take a `mysqldump` first if any of those passwords
+exist nowhere else.
+
 ## Layout
 
 | Path | What it is |
@@ -46,6 +69,11 @@ secret key means session cookies can be forged.
 | `face_preprocessing.py` | Alignment and CLAHE, shared by training and recognition |
 | `config/settings.py` | All configuration, environment-driven and validated |
 | `config/logging_config.py` | Rotating file + console logging |
+| `security/passwords.py` | bcrypt hashing, and verification **in Python** rather than in SQL |
+| `security/paths.py` | The only sanctioned way to build a dataset path |
+| `security/access.py` | Default-deny route access control |
+| `security/rate_limit.py` | Failed-login throttling |
+| `scripts/migrate_passwords.py` | One-off plaintext → bcrypt migration |
 | `eval_accuracy.py` | In-sample harness — **see the caveat below** |
 | `eval_heldout_accuracy.py` | Held-out harness — **see the caveat below** |
 | `tests/` | Unit tests (`pytest`) |
@@ -86,13 +114,23 @@ detail. Reporting FAR/FRR/EER against a separate-session test set is Phase 6.
 - **Single machine only.** `/capture_face` spawns an OpenCV GUI window on the
   *server*, so enrolment only works when the browser and the server are the
   same computer.
-- **Development server.** `app.run()` binds loopback; there is no WSGI server
-  or reverse proxy (PO-4).
-- **Security work outstanding.** Passwords are stored and compared in
-  plaintext (SE-1) and case-insensitively (SE-15); several routes lack
-  authentication (SE-4) and there is no role enforcement (SE-5) or CSRF
-  protection (SE-7). Phase 2 addresses these. Do not deploy this on a shared
-  network as it stands.
+- **Development server, no TLS.** `app.run()` binds loopback; there is no WSGI
+  server and no reverse proxy (PO-4). Everything therefore travels over plain
+  HTTP, which is why `SESSION_COOKIE_SECURE` defaults to `false` — setting it
+  on an HTTP origin stops the browser returning the cookie and nobody can log
+  in. Turn it on the day there is TLS in front.
+- **Renaming a student breaks their dataset.** The folder is
+  `dataset/{student_id}_{name}`, so changing a name in the database without
+  renaming the folder silently breaks delete, edit and recapture. Phase 2
+  closed the traversal risk here but deliberately left the naming scheme
+  alone; a surrogate key belongs with the Phase 4 schema work.
+- **Liveness is defeatable by a video replay** (SE-12). The challenge is one
+  of two fixed head poses, so a phone playing a recording passes it.
+- **Security work still outstanding.** Phase 2 fixed authentication, roles,
+  CSRF, password storage, path traversal, error disclosure, session hardening
+  and login throttling. Not fixed: no encryption at rest for `dataset/` and
+  `trainer/`, no consent record in the schema, no automated retention. See
+  [`docs/data_privacy.md`](docs/data_privacy.md) §7.
 
 ## Data protection
 
@@ -108,4 +146,12 @@ Before committing, confirm the ignore rules are intact:
 [ "$(git check-ignore dataset trainer | wc -l)" -eq 2 ] && echo SAFE || echo STOP
 ```
 
-A written consent, retention and erasure policy is still outstanding (SE-9).
+[`docs/data_privacy.md`](docs/data_privacy.md) covers consent, retention,
+erasure and the RA 10173 mapping. Two things there are worth knowing before
+you need them:
+
+- **Erasure takes three steps, not one.** Deleting a student removes their
+  images, but their histograms stay in `trainer/trainer.yml` until a retrain,
+  and in the `.bak` generation until a second one.
+- **Consent is not yet recorded in software.** Until it is, collect it on
+  paper before any enrolment.
