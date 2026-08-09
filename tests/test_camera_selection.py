@@ -487,6 +487,103 @@ def test_no_usable_camera_returns_none_and_says_what_to_check(monkeypatch, caplo
     assert "DroidCam" in messages, "the log does not name the likely cause"
 
 
+# ---------------------------------------------------------------------------
+# A still image is a last resort, and is never remembered
+# ---------------------------------------------------------------------------
+
+
+def frozen_device():
+    """The OBS Virtual Camera placeholder: a real picture, but never changing."""
+    still = scene_frame(42)
+    return FakeCapture([still] * PROBE_FRAMES)
+
+
+def test_a_live_camera_is_preferred_over_a_still_image(monkeypatch):
+    """
+    Found on 2026-08-09 while checking whether the system could be
+    demonstrated. The OBS Virtual Camera stays registered and serves a static
+    "not started" placeholder even with OBS shut down. It carries a picture, so
+    the content gate passes it - and it sat at a lower index than nothing else,
+    so the scan took it and stopped.
+    """
+    devices = {
+        0: FakeCapture([black_frame()]),
+        1: frozen_device(),
+        2: FakeCapture([scene_frame(i) for i in range(PROBE_FRAMES)]),
+    }
+    install_devices(monkeypatch, devices)
+
+    capture = open_best_camera()
+
+    assert capture is devices[2], "a still image was chosen over a live camera"
+    assert devices[1].released, "the rejected still-image device was left open"
+
+
+def test_a_still_image_is_never_saved_as_the_preference(monkeypatch):
+    """
+    The part that would have made this stick. Saving it means it is tried
+    *first* on every subsequent run, ahead of the DroidCam device the operator
+    actually meant to use - and a frozen frame produces no recognition with
+    nothing obviously wrong.
+    """
+    install_devices(monkeypatch, {2: frozen_device()})
+
+    assert open_best_camera() is not None, "the fallback was not used at all"
+    assert camera_utils.get_saved_camera_index() is None, (
+        "a still image was saved as the default camera"
+    )
+
+
+def test_a_still_image_is_used_when_nothing_else_works(monkeypatch):
+    """
+    Still a last resort, not a refusal. A legitimate virtual-camera chain can
+    present a static test pattern, and this module cannot tell the difference.
+    """
+    devices = {
+        0: FakeCapture([black_frame()]),
+        3: frozen_device(),
+    }
+    install_devices(monkeypatch, devices)
+
+    assert open_best_camera() is devices[3]
+
+
+def test_a_saved_preference_that_has_gone_static_is_abandoned(monkeypatch):
+    """OBS stopped, or a capture card lost its input, since the last run."""
+    devices = {
+        1: frozen_device(),
+        2: FakeCapture([scene_frame(i) for i in range(PROBE_FRAMES)]),
+    }
+    install_devices(monkeypatch, devices)
+    camera_utils.save_camera_index(1)
+
+    capture = open_best_camera()
+
+    assert capture is devices[2]
+    assert camera_utils.get_saved_camera_index() == 2
+
+
+def test_an_explicitly_requested_still_image_is_honoured(monkeypatch):
+    """An index passed in by hand is a decision, not a guess."""
+    devices = {1: frozen_device()}
+    install_devices(monkeypatch, devices)
+
+    assert open_best_camera(preferred_index=1) is devices[1]
+
+
+def test_only_one_frozen_fallback_is_held_open(monkeypatch):
+    """Two placeholder devices must not leak one capture between them."""
+    devices = {1: frozen_device(), 2: frozen_device(), 3: frozen_device()}
+    install_devices(monkeypatch, devices)
+
+    capture = open_best_camera()
+
+    held = [d for d in devices.values() if not d.released]
+
+    assert len(held) == 1, f"{len(held)} captures left open"
+    assert capture is held[0]
+
+
 def test_get_available_cameras_lists_only_usable_ones(monkeypatch):
     devices = {
         0: FakeCapture([black_frame()]),

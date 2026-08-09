@@ -193,11 +193,12 @@ def probe_camera(cap, index=None):
     if len(distinct_frames) == 1 and len(samples) > 1:
         logger.warning(
             "Camera %s returned %d identical frames - this is probably a still "
-            "image or a stopped virtual camera, not a live feed. Opening it "
-            "anyway.",
+            "image or a stopped virtual camera, not a live feed. Usable only "
+            "if nothing else is.",
             index,
             len(samples),
         )
+        typical["frozen"] = True
 
     return True, None, typical
 
@@ -252,6 +253,18 @@ def open_camera_by_index(index):
     will not open, it opens but no frame can be read, or it reads frames that
     carry no picture. That last one is CAM-1 and used to be a success.
     """
+    cap, _statistics = open_and_probe(index)
+    return cap
+
+
+def open_and_probe(index):
+    """
+    `(capture, statistics)` - the same open, with the probe's numbers kept.
+
+    `open_best_camera()` needs to know *how* good a device is, not only that it
+    is usable, so it can prefer a live camera over a still image. The public
+    single-index helper above keeps its simpler signature.
+    """
     logger.debug("Trying camera index %s", index)
 
     started_at = time.monotonic()
@@ -270,7 +283,7 @@ def open_camera_by_index(index):
     if not cap.isOpened():
         logger.debug("Camera %s could not be opened", index)
         cap.release()
-        return None
+        return None, None
 
     ok, reason, statistics = probe_camera(cap, index=index)
 
@@ -288,36 +301,52 @@ def open_camera_by_index(index):
             ),
         )
         cap.release()
-        return None
+        return None, statistics
 
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     logger.info(
-        "Opened camera %s (%dx%d, mean %.1f, std dev %.1f, detail %.1f)",
+        "Opened camera %s (%dx%d, mean %.1f, std dev %.1f, detail %.1f%s)",
         index,
         width,
         height,
         statistics["mean"],
         statistics["stddev"],
         statistics["detail"],
+        ", FROZEN" if statistics.get("frozen") else "",
     )
 
-    return cap
+    return cap, statistics
 
 
 def open_best_camera(preferred_index=None, max_tested=5):
     """
-    Open the first camera that produces a picture: preferred, saved, then scan.
+    Open the best camera available: preferred, saved, then scan.
 
     The scan is the reason CAM-1 mattered rather than being a curiosity. It
     used to accept index 0 - the dead built-in webcam on this machine - and stop
     there, so no later index was ever reached. With the content gate in place
     the dead device is passed over and the scan finds the one that works.
+
+    **A frozen device is a last resort, and is never remembered.** Found on
+    2026-08-09 while checking whether the system could be demonstrated: with
+    the DroidCam client closed, the scan reached the OBS Virtual Camera - which
+    stays registered and serves a static "not started" placeholder even with
+    OBS shut down - accepted it, and *saved it as the preference*. That would
+    have made a still image the permanently preferred camera, tried ahead of
+    DroidCam on every subsequent run, and the operator would have got a frozen
+    frame and no recognition with nothing obviously wrong.
+
+    So a frozen device is held as a fallback while the scan keeps looking, and
+    is used only if nothing live turns up. It is still opened rather than
+    refused - a legitimate virtual-camera chain can present a static test
+    pattern, and this module cannot know - but it does not get to be sticky.
     """
     logger.info("Searching for a camera that produces a picture")
 
-    # 1. Explicit request from the caller.
+    # 1. Explicit request from the caller. Honoured even if frozen: an index
+    #    passed in by hand is a decision, not a guess.
     if preferred_index is not None:
         try:
             pref_idx = int(preferred_index)
@@ -326,38 +355,71 @@ def open_best_camera(preferred_index=None, max_tested=5):
                 "Ignoring unusable preferred camera index %r", preferred_index
             )
         else:
-            cap = open_camera_by_index(pref_idx)
+            cap, _statistics = open_and_probe(pref_idx)
 
             if cap is not None:
                 logger.info("Using camera %s (requested)", pref_idx)
                 return cap
 
-    # 2. The saved preference.
+    # 2. The saved preference. Never frozen, because step 3 does not save one.
     saved_idx = get_saved_camera_index()
 
     if saved_idx is not None:
-        cap = open_camera_by_index(saved_idx)
+        cap, statistics = open_and_probe(saved_idx)
 
-        if cap is not None:
+        if cap is not None and not statistics.get("frozen"):
             logger.info("Using camera %s (saved preference)", saved_idx)
             return cap
 
-        logger.warning(
-            "Saved camera %s is no longer usable, scanning for another",
-            saved_idx,
-        )
-
-    # 3. Scan.
-    for index in range(max_tested):
-        if index == saved_idx:
-            continue  # already tried, and it failed
-
-        cap = open_camera_by_index(index)
-
         if cap is not None:
-            logger.info("Using camera %s (found by scan)", index)
-            save_camera_index(index)
-            return cap
+            # The saved device has since gone static - OBS stopped, a capture
+            # card lost its input. Prefer anything live over it.
+            cap.release()
+            logger.warning(
+                "Saved camera %s is frozen now, looking for a live one",
+                saved_idx,
+            )
+        else:
+            logger.warning(
+                "Saved camera %s is no longer usable, scanning for another",
+                saved_idx,
+            )
+
+    # 3. Scan, keeping any frozen device as a fallback rather than taking it.
+    frozen_fallback = None
+    frozen_index = None
+
+    for index in range(max_tested):
+        cap, statistics = open_and_probe(index)
+
+        if cap is None:
+            continue
+
+        if statistics.get("frozen"):
+            if frozen_fallback is None:
+                frozen_fallback = cap
+                frozen_index = index
+            else:
+                cap.release()
+            continue
+
+        logger.info("Using camera %s (found by scan)", index)
+        save_camera_index(index)
+
+        if frozen_fallback is not None:
+            frozen_fallback.release()
+
+        return cap
+
+    if frozen_fallback is not None:
+        logger.warning(
+            "Using camera %s, which appears to be a still image rather than a "
+            "live feed - nothing else on this machine produced a picture. Not "
+            "saving it as the default. If a phone camera is meant to be in "
+            "use, start the DroidCam client and try again.",
+            frozen_index,
+        )
+        return frozen_fallback
 
     logger.error(
         "No camera produced a picture. Checked indices 0-%d. If a phone camera "
