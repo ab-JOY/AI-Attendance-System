@@ -1,6 +1,4 @@
 import logging
-import random
-import time
 from datetime import datetime
 
 import cv2
@@ -13,6 +11,7 @@ from infra.camera import CameraReader
 from infra.db import db_cursor
 from vision.geometry import get_face_box
 from vision.landmarks import LEFT_EYE_OUTER, NOSE_TIP, RIGHT_EYE_OUTER
+from vision.liveness import LivenessChallenge, LivenessConfig
 from vision.quality import RECOGNITION_QUALITY, quality_issue
 from vision.session import (
     RecognitionSession,
@@ -330,21 +329,24 @@ STREAM_FRAME_DELAY = 0.0
 
 
 # =====================================================
-# ACTIVE LIVENESS SETTINGS
+# ACTIVE LIVENESS (SE-12)
+#
+# Six loose constants used to live here - one of two fixed challenges, a
+# 10-second timeout, and three yaw thresholds in FRAME-NORMALISED units. They
+# are now vision/liveness.py, and the thresholds are in FACE-WIDTH units.
+#
+# That unit change is the substance of this, not tidying. The geometry gate
+# works in face widths (it refuses a nose past 0.28w); the old liveness
+# thresholds did not, so the turn they demanded grew with distance while the
+# turn a person actually makes stays at a constant ~0.14w. Past roughly a
+# 137 px face box the challenge asked for more turn than the gate would allow,
+# so a student standing a normal distance back could never pass it and nothing
+# said why. Measured; the table is in vision/liveness.py.
 # =====================================================
 
-LIVENESS_CHALLENGES = [
-    "TURN_LEFT",
-    "TURN_RIGHT"
-]
+LIVENESS_CONFIG = LivenessConfig()
 
-LIVENESS_TIMEOUT_SECONDS = 10.0
-
-LIVENESS_LEFT_YAW = 0.030
-LIVENESS_RIGHT_YAW = -0.030
-LIVENESS_CENTER_YAW = 0.018
-
-POST_LIVENESS_MATCH_FRAMES = 8
+POST_LIVENESS_MATCH_FRAMES = LIVENESS_CONFIG.post_match_frames
 
 
 # =====================================================
@@ -449,7 +451,18 @@ def get_face_quality_issue(aligned_face):
 # =====================================================
 
 
-def get_face_yaw(face_landmarks):
+def get_face_yaw(face_landmarks, frame_width=None, box=None):
+    """
+    How far the nose sits from the eye centre.
+
+    With `frame_width` and `box`, the answer is in **face-width units** - the
+    unit the geometry gate and the liveness challenge both work in, and a
+    property of the head rather than of how far away it is. Without them it is
+    the raw frame-normalised value the mesh gives, which is what the drawing
+    code and the old callers used.
+
+    SE-12 is the story of those two being conflated: see vision/liveness.py.
+    """
     nose = face_landmarks.landmark[NOSE_TIP]
     left_eye = face_landmarks.landmark[LEFT_EYE_OUTER]
     right_eye = face_landmarks.landmark[RIGHT_EYE_OUTER]
@@ -458,79 +471,17 @@ def get_face_yaw(face_landmarks):
         left_eye.x + right_eye.x
     ) / 2.0
 
-    return nose.x - eye_center_x
+    yaw = nose.x - eye_center_x
+
+    if frame_width is None or box is None or box.width <= 0:
+        return yaw
+
+    return yaw * frame_width / box.width
 
 
 def create_liveness_state():
-    return {
-        "challenge": random.choice(
-            LIVENESS_CHALLENGES
-        ),
-        "started_at": time.time(),
-        "movement_seen": False,
-        "passed": False,
-        "post_match_count": 0
-    }
-
-
-def update_liveness(liveness_state, yaw):
-    if liveness_state is None:
-        return create_liveness_state()
-
-    elapsed = (
-        time.time()
-        - liveness_state["started_at"]
-    )
-
-    if elapsed > LIVENESS_TIMEOUT_SECONDS:
-        return create_liveness_state()
-
-    challenge = liveness_state["challenge"]
-
-    if not liveness_state["movement_seen"]:
-        if (
-            challenge == "TURN_LEFT"
-            and yaw >= LIVENESS_LEFT_YAW
-        ) or (
-            challenge == "TURN_RIGHT"
-            and yaw <= LIVENESS_RIGHT_YAW
-        ):
-            liveness_state["movement_seen"] = True
-
-    elif abs(yaw) <= LIVENESS_CENTER_YAW:
-        liveness_state["passed"] = True
-
-    return liveness_state
-
-
-def get_liveness_message(liveness_state):
-    if liveness_state is None:
-        return "Preparing liveness..."
-
-    if liveness_state.get("passed", False):
-        post_match_count = liveness_state.get(
-            "post_match_count",
-            0
-        )
-
-        if post_match_count < POST_LIVENESS_MATCH_FRAMES:
-            return (
-                "Liveness passed - Rechecking "
-                f"{post_match_count}/"
-                f"{POST_LIVENESS_MATCH_FRAMES}"
-            )
-
-        return "Liveness Passed"
-
-    challenge = liveness_state["challenge"]
-
-    if not liveness_state["movement_seen"]:
-        if challenge == "TURN_LEFT":
-            return "Liveness: Turn LEFT"
-
-        return "Liveness: Turn RIGHT"
-
-    return "Liveness: Return to CENTER"
+    """A fresh challenge for a newly confirmed track."""
+    return LivenessChallenge(config=LIVENESS_CONFIG)
 
 
 # =====================================================
@@ -693,7 +644,7 @@ def process_confirmed_track(
         state.mismatch_frames += 1
 
         if state.liveness is not None:
-            state.liveness["post_match_count"] = 0
+            state.liveness.note_identity_mismatch()
 
         if (
             state.mismatch_frames
@@ -724,35 +675,13 @@ def process_confirmed_track(
             state
         )
 
-    state.liveness = update_liveness(
-        state.liveness,
-        current_yaw
-    )
+    if state.liveness is None:
+        state.liveness = create_liveness_state()
 
-    if state.liveness.get("passed", False):
-        state.liveness["post_match_count"] = (
-            state.liveness.get(
-                "post_match_count",
-                0
-            ) + 1
-        )
+    state.liveness.update(current_yaw)
+    state.liveness.note_identity_match()
 
-    liveness_passed = state.liveness.get(
-        "passed",
-        False
-    )
-
-    post_match_count = state.liveness.get(
-        "post_match_count",
-        0
-    )
-
-    identity_reconfirmed = (
-        post_match_count
-        >= POST_LIVENESS_MATCH_FRAMES
-    )
-
-    if liveness_passed and identity_reconfirmed:
+    if state.liveness.identity_reconfirmed:
         attendance_saved = save_attendance(
             locked_id,
             subject,
@@ -780,9 +709,7 @@ def process_confirmed_track(
     return (
         locked_id,
         locked_name,
-        get_liveness_message(
-            state.liveness
-        ),
+        state.liveness.message(),
         state
     )
 
@@ -998,6 +925,7 @@ def resolve_track_identity(
     issue,
     face_landmarks,
     box,
+    frame_width,
     claimed_student_ids
 ):
     """
@@ -1033,6 +961,8 @@ def resolve_track_identity(
             state,
             candidate_id,
             face_landmarks,
+            box,
+            frame_width,
             claimed_student_ids
         )
 
@@ -1069,6 +999,8 @@ def resolve_confirmed_track(
     state,
     candidate_id,
     face_landmarks,
+    box,
+    frame_width,
     claimed_student_ids
 ):
     """A track whose identity is already locked: hold it, or lose it."""
@@ -1083,11 +1015,14 @@ def resolve_confirmed_track(
     if locked_id in claimed_student_ids:
         return locked_id, locked_name, "Duplicate identity blocked", state
 
+    # SE-12: yaw in face-width units, which needs the box. Passing the raw
+    # frame-normalised value here is what made the challenge unpassable for
+    # anyone standing more than about a metre back.
     student_id, student_name, status, state = process_confirmed_track(
         context,
         state,
         candidate_id,
-        get_face_yaw(face_landmarks)
+        get_face_yaw(face_landmarks, frame_width, box)
     )
 
     if student_id != "Unknown":
@@ -1142,7 +1077,7 @@ def accumulate_towards_confirmation(
     return (
         verdict.dominant_id,
         verdict.dominant_name,
-        get_liveness_message(state.liveness),
+        state.liveness.message(),
         state
     )
 
@@ -1271,6 +1206,7 @@ def _stream_frames():
                 issue=issue,
                 face_landmarks=face_landmarks,
                 box=raw_box,
+                frame_width=frame_width,
                 claimed_student_ids=claimed_student_ids
             )
 

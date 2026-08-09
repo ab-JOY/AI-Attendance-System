@@ -199,11 +199,49 @@ Stated plainly, because an evaluation that omits these is not credible.
    browsers grant `getUserMedia` only in a secure context, so face capture
    from a remote machine simply will not run without it. Enabling TLS closes
    this gap and flips `SESSION_COOKIE_SECURE` at the same time.
-6. **Liveness detection is defeatable** (SE-12). The challenge is one of two
-   fixed head poses with no depth, texture or blink check, so a phone playing
-   a recording of an enrolled student passes it. This is a limitation of the
-   attendance guarantee rather than of privacy, but it is material to any
-   claim about anti-spoofing.
+6. **Liveness detection is still defeatable by a replay** (SE-12).
+   ⚠️ **Improved 2026-08-08 (Phase 3), not closed.** The wording below is
+   deliberately unchanged in its conclusion, because the conclusion has not
+   changed.
+
+   *Was:* one of two fixed head poses, with no depth, texture or blink check.
+   Any recording containing a single head turn defeated it outright.
+
+   *Now:* an ordered sequence of two distinct steps drawn at random from
+   LEFT / RIGHT / CENTER — six possible sequences — each with its own timeout,
+   issued only after an identity has been confirmed, and with the identity
+   required to still match for eight frames afterwards.
+
+   **What that is worth, stated plainly.** It raises the bar; it is not proof
+   of presence. A recording that cycles left, centre, right, centre satisfies
+   every one of the six sequences given enough time. What limits it is the
+   per-step timeout: whoever is holding up a video has to be at the right
+   point in the loop when the challenge is issued, so the attack goes from
+   *certain* to *roughly one attempt in six, retryable*. That is a real
+   improvement over a fixed challenge and nothing like a solution.
+
+   **Blink detection was considered and declined** (user, 2026-08-08). The
+   EAR thresholds are uncalibrated for this camera and this lighting, glasses
+   degrade them, and a threshold slightly wrong means a student who cannot
+   mark attendance at all. A false rejection here is a student recorded absent
+   from a class they attended, which is a worse failure than the replay risk
+   it would partly mitigate.
+
+   Closing this properly needs depth or texture analysis and is out of scope
+   for this thesis. It remains a limitation of the attendance guarantee rather
+   than of privacy, and it is material to any claim about anti-spoofing.
+
+   **A related defect was found and fixed while doing this**, and it is worth
+   recording because it cut the other way. The old thresholds compared yaw in
+   frame-normalised units against a constant, while the face-geometry gate
+   works in face widths. Past roughly a 137 px face box the challenge demanded
+   more head turn than the gate would accept — so a student standing a normal
+   distance from the camera could **never** pass liveness, with no error shown
+   and nothing logged. Measured: at a 208 px face box the challenge required a
+   turn of 0.185 face widths and a real turn is 0.136. Thresholds are now in
+   face-width units. That was a false-rejection bug of exactly the kind the
+   blink decision was made to avoid, already present in the mechanic that was
+   kept.
 7. **No data-protection officer, breach-notification procedure, or
    registration with the National Privacy Commission.** These are
    institutional obligations under RA 10173 that sit outside the software.

@@ -58,6 +58,7 @@ from pathlib import Path
 import pytest
 
 import infra.db
+from vision.liveness import CENTER, LEFT, LivenessChallenge
 from vision.session import RecognitionSession, SessionBusy, SessionHooks
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -314,10 +315,17 @@ def driven_session(
         patch.setattr(module.mysql.connector, "connect", refuse_to_connect)
         patch.setattr(infra.db, "get_pool", refuse_to_connect)
 
-        # One challenge, not a random one: this test is about the loop, not
-        # about the draw. SE-12 replaces this list with a randomised sequence,
-        # and that sequence's randomness gets its own tests in vision/.
-        patch.setattr(module, "LIVENESS_CHALLENGES", ["TURN_LEFT"])
+        # A fixed sequence, not a random one: this test is about the loop, not
+        # about the draw, and the scripted frames can only answer one sequence.
+        # The randomness has its own tests in tests/test_vision_liveness.py.
+        patch.setattr(
+            module,
+            "create_liveness_state",
+            lambda: LivenessChallenge(
+                config=module.LIVENESS_CONFIG,
+                sequence=(LEFT, CENTER),
+            ),
+        )
 
         # A real session with the real model, the real MediaPipe detector and
         # the real tracker - only the camera is faked. This is what
@@ -459,11 +467,12 @@ def test_liveness_passes_on_the_scripted_turn(driven_session):
     state = next(iter(tracker.states.values()))
 
     assert state.liveness is not None, "liveness never started"
-    assert state.liveness.get("movement_seen") is True, (
-        "the turn was not detected"
+    assert state.liveness.sequence == (LEFT, CENTER)
+    assert state.liveness.passed is True, (
+        "the scripted turn and return to centre did not complete the sequence"
     )
-    assert state.liveness.get("passed") is True, (
-        "liveness did not complete after the return to centre"
+    assert state.liveness.restarts == 0, (
+        "the challenge timed out and restarted part way through"
     )
 
 
