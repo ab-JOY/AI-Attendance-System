@@ -321,3 +321,57 @@ the next sprint's plan, and from there into the manuscript.
 - **When you write a handover, mark which numbers you re-measured** and which
   you carried forward from an earlier document. The next reader cannot
   otherwise tell a fresh measurement from a five-sprint-old one.
+
+---
+
+## L9 — A benchmark's assumptions are measurements too
+
+**2026-08-09, Phase 3 PE-6.**
+
+I fixed the camera reader and benchmarked it properly: the old class lifted out
+of git with `ast`, the new one beside it, both driven against a fake capture.
+The producer numbers were solid and remain so — a failing camera went from
+**94.7% of one core** to 0.0%, which is PE-6's "spins a core at 100%" confirmed
+literally.
+
+Then I measured the second half of the finding, "re-copies frames the consumer
+never reads", by polling the reader at an assumed consumer cost. I ran it at
+45 ms and 10 ms per frame, reported 30% and 81% of frames re-processed, and
+wrote in the commit message that the 45 ms row was "the realistic one for this
+deployment."
+
+**I had never measured the consumer.** When I did, two commits later, it costs
+**48.7 ms with no face in shot and 147.3 ms with one**, against a camera capped
+at 33.3 ms. The recognition loop is *always slower than the camera* on this
+machine, so it never outran it under the old code either, and that half of the
+fix saves nothing measurable here. The number I published was not wrong
+arithmetic — it was arithmetic about a machine that does not exist.
+
+**Why this is L7 again and still worth its own entry.** L7 was about a
+*docstring* asserting a quantity nobody had run. This is the same failure one
+level up: the run happened, the harness was careful, the old code was lifted
+from git rather than retyped — and the *parameter* fed to it was a guess
+wearing the clothes of a measurement. Rigour in the measuring apparatus does
+not launder an invented input, and a benchmark is more dangerous than a
+docstring because it comes with a table.
+
+**How to apply:**
+
+- **Before benchmarking a component, measure its collaborators.** If a
+  harness takes "how fast is the consumer?" or "how big is the input?" as a
+  parameter, that parameter is a finding in its own right and needs its own
+  run. Deriving it from the audit, from a comment, or from what sounds
+  plausible is the same mistake as never running anything.
+- **A component benchmark bounds a component, not a system.** "The reader can
+  now do X" and "the system now does X" are different claims. Say which one
+  the number supports.
+- **Correct it where it was published, not only where you noticed.** The wrong
+  figure was in a commit message, which is immutable; the correction therefore
+  belongs in `docs/benchmarks.md` §3 and in the handover, both of which say so
+  explicitly and name the commit. A benchmarks document that quietly disagrees
+  with a commit is worse than either alone.
+- The half of the fix that *was* real should still be stated plainly rather
+  than dropped in embarrassment. The producer brake matters, and the
+  frame-ready signal still removed a 20 ms poll-sleep and made `stop()`
+  immediate. Overstating a result and then hiding it are the same failure of
+  reporting.
