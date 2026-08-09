@@ -72,3 +72,11 @@ certs/
 *.swp
 .DS_Store
 Thumbs.db
+
+
+
+# =====================================================
+# BENCHMARK DATASET (GEORGIA TECH FACE DATABASE)
+# =====================================================
+./gt_db
+gt_db/
