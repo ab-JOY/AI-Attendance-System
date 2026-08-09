@@ -57,6 +57,7 @@ from pathlib import Path
 
 import pytest
 
+import infra.db
 from vision.session import RecognitionSession, SessionBusy, SessionHooks
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -296,17 +297,22 @@ def driven_session(
         # reaches the live MySQL database with a real enrolled student ID.
         patch.setattr(module, "save_attendance", recorder)
 
-        # And a tripwire behind the stub. If any code in this loop opens a
-        # database connection - now, or after a future refactor moves the write
-        # somewhere else - the test fails loudly instead of quietly writing an
-        # attendance row for a real student against a fake subject code.
+        # And a tripwire behind the stub. If any code in this loop reaches the
+        # database - now, or after a future refactor moves the write somewhere
+        # else - the test fails loudly instead of quietly writing an attendance
+        # row for a real student against a fake subject code.
+        #
+        # Both seams are armed. PE-7 moved the write from a direct
+        # `mysql.connector.connect()` onto the pool, and a tripwire on the seam
+        # a refactor has just abandoned protects nothing.
         def refuse_to_connect(*args, **kwargs):
             raise AssertionError(
-                "the recognition loop opened a database connection during a "
-                "test - see tasks/lessons.md L6"
+                "the recognition loop reached the database during a test - "
+                "see tasks/lessons.md L6"
             )
 
         patch.setattr(module.mysql.connector, "connect", refuse_to_connect)
+        patch.setattr(infra.db, "get_pool", refuse_to_connect)
 
         # One challenge, not a random one: this test is about the loop, not
         # about the draw. SE-12 replaces this list with a randomised sequence,
@@ -491,11 +497,11 @@ def test_no_database_connection_was_opened(driven_session):
     """
     The guard rail, asserted rather than assumed.
 
-    The whole 60-frame session ran with `mysql.connector.connect` replaced by
+    The whole 60-frame session ran with both database seams replaced by
     something that raises, so reaching this assertion at all is the evidence:
-    nothing in the loop touched the database. The tripwire is still armed, and
-    the check below proves it, so it is not silently uninstalled by a future
-    edit to the fixture.
+    nothing in the loop touched the database. The tripwires are still armed,
+    and the checks below prove it, so they are not silently uninstalled by a
+    future edit to the fixture.
     """
     module = driven_session["module"]
 
@@ -503,8 +509,11 @@ def test_no_database_connection_was_opened(driven_session):
         "save_attendance was not the stub for the whole run"
     )
 
-    with pytest.raises(AssertionError, match="opened a database connection"):
+    with pytest.raises(AssertionError, match="reached the database"):
         module.mysql.connector.connect()
+
+    with pytest.raises(AssertionError, match="reached the database"):
+        infra.db.get_pool()
 
 
 # ---------------------------------------------------------------------------

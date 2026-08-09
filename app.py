@@ -31,6 +31,7 @@ from config.logging_config import configure_logging
 # which point `settings` was the view function and every database call
 # raised AttributeError. Do not rename this back without renaming the route.
 from config.settings import settings as app_config
+from infra.db import db_connection, db_cursor
 from recognize_face import (
     SessionBusy,
     SessionNotRunning,
@@ -134,10 +135,19 @@ login_rate_limiter = LoginRateLimiter(
 
 
 # ==============================
-# DATABASE CONNECTION
+# DATABASE CONNECTION (PE-7)
+#
+# `get_db_connection()` used to live here - a bare
+# `mysql.connector.connect()`, called at 27 sites, each of which then had to
+# remember to close. Twenty-one of them did not do so on an exception path,
+# which is harmless against raw connections and fatal behind a pool.
+#
+# It is gone rather than rewritten to return a pooled connection, deliberately:
+# leaving it would have kept the shape that caused the problem while making the
+# consequences worse. Use `db_cursor()` from infra/db.py, and
+# tests/test_db_access.py fails the build if the old pattern reappears here.
 # ==============================
-def get_db_connection():
-    return mysql.connector.connect(**app_config.db_kwargs())
+
 
 # ==============================
 # DELETE READ-ONLY FILES/FOLDERS
@@ -288,13 +298,8 @@ def login():
         ), 429
 
     account = None
-    conn = None
-    cursor = None
 
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
-
+    with db_cursor(dictionary=True) as cursor:
         if role == "admin":
             cursor.execute(
                 "SELECT * FROM admin WHERE username=%s",
@@ -317,13 +322,11 @@ def login():
             if row is not None and row['instructor_id'] == user_id:
                 account = row
 
-    finally:
-        if cursor is not None:
-            cursor.close()
-
-        if conn is not None and conn.is_connected():
-            conn.close()
-
+    # SE-1/SE-15: verified in Python, outside the `with`. Keeping bcrypt off a
+    # pooled connection matters here more than anywhere - /login is the one
+    # route an unauthenticated attacker can call repeatedly, and holding one of
+    # five connections for the duration of each hash would turn the rate
+    # limiter's job into a denial-of-service opportunity.
     if account is None or not verify_password(password, account.get('password')):
         login_rate_limiter.record_failure(rate_limit_key)
 
@@ -381,14 +384,9 @@ def dashboard():
 @app.route('/students')
 @role_required('admin')
 def students():
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-
-    cursor.execute("SELECT * FROM students ORDER BY name ASC")
-    students = cursor.fetchall()
-
-    cursor.close()
-    conn.close()
+    with db_cursor(dictionary=True) as cursor:
+        cursor.execute("SELECT * FROM students ORDER BY name ASC")
+        students = cursor.fetchall()
 
     return render_template('students.html', students=students)
 
@@ -419,44 +417,37 @@ def capture_face():
         logger.warning("Rejected student enrolment: %s", error)
         return error_page(400, str(error))
 
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    with db_cursor(dictionary=True, commit=True) as cursor:
+        # Check if student already exists
+        cursor.execute(
+            "SELECT * FROM students WHERE student_id=%s",
+            (student_id,)
+        )
 
-    # Check if student already exists
-    cursor.execute(
-        "SELECT * FROM students WHERE student_id=%s",
-        (student_id,)
-    )
+        existing_student = cursor.fetchone()
 
-    existing_student = cursor.fetchone()
+        # Insert only if student does not exist
+        if existing_student is None:
 
-    # Insert only if student does not exist
-    if existing_student is None:
-
-        cursor.execute("""
-            INSERT INTO students
-            (
+            cursor.execute("""
+                INSERT INTO students
+                (
+                    student_id,
+                    name,
+                    college_department,
+                    program,
+                    year_level,
+                    section
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (
                 student_id,
                 name,
                 college_department,
                 program,
                 year_level,
                 section
-            )
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, (
-            student_id,
-            name,
-            college_department,
-            program,
-            year_level,
-            section
-        ))
-
-        conn.commit()
-
-    cursor.close()
-    conn.close()
+            ))
 
     # Capture student's face
     try:
@@ -492,14 +483,9 @@ def capture_face():
 @role_required('admin')
 def manage_students():
 
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-
-    cursor.execute("SELECT * FROM students ORDER BY name ASC")
-    students = cursor.fetchall()
-
-    cursor.close()
-    conn.close()
+    with db_cursor(dictionary=True) as cursor:
+        cursor.execute("SELECT * FROM students ORDER BY name ASC")
+        students = cursor.fetchall()
 
     return render_template(
         "manage_students.html",
@@ -515,19 +501,14 @@ def search_student():
 
     query = request.form.get('query', '')
 
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    with db_cursor(dictionary=True) as cursor:
+        cursor.execute("""
+            SELECT * FROM students
+            WHERE student_id LIKE %s OR name LIKE %s
+            ORDER BY name ASC
+        """, (f"%{query}%", f"%{query}%"))
 
-    cursor.execute("""
-        SELECT * FROM students
-        WHERE student_id LIKE %s OR name LIKE %s
-        ORDER BY name ASC
-    """, (f"%{query}%", f"%{query}%"))
-
-    students = cursor.fetchall()
-
-    cursor.close()
-    conn.close()
+        students = cursor.fetchall()
 
     return render_template("manage_students.html", students=students)
 
@@ -542,65 +523,59 @@ def search_student():
 @role_required('admin')
 def delete_student(student_id):
 
-    conn = None
-    cursor = None
-
+    # The hand-written rollback in each handler below is gone: db_cursor()
+    # rolls back on any exception and commits only on a clean exit, and the
+    # `with` unwinds before the matching `except` runs. Five copies of the same
+    # two lines were five chances to forget one.
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
+        with db_cursor(dictionary=True, commit=True) as cursor:
+            # Get the student's name first.
+            cursor.execute("""
+                SELECT
+                    student_id,
+                    name
+                FROM students
+                WHERE student_id = %s
+            """, (student_id,))
 
-        # Get the student's name first.
-        cursor.execute("""
-            SELECT
-                student_id,
-                name
-            FROM students
-            WHERE student_id = %s
-        """, (student_id,))
+            student = cursor.fetchone()
 
-        student = cursor.fetchone()
+            if student is None:
+                return redirect(url_for('manage_students'))
 
-        if student is None:
-            return redirect(url_for('manage_students'))
-
-        # SE-3. This was the worst of the four sites: an unvalidated name
-        # concatenated into a path and handed to shutil.rmtree(). A student
-        # named `..\..\Windows\Temp` deleted that directory instead.
-        # student_dataset_path() refuses anything that is not a direct child
-        # of dataset/, so a bad record now fails loudly rather than deleting
-        # the wrong tree.
-        dataset_path = student_dataset_path(
-            student['student_id'],
-            student['name']
-        )
-
-        # Delete the dataset folder first.
-        if dataset_path.is_dir():
-            shutil.rmtree(
-                dataset_path,
-                onerror=remove_readonly_and_retry
+            # SE-3. This was the worst of the four sites: an unvalidated name
+            # concatenated into a path and handed to shutil.rmtree(). A student
+            # named `..\..\Windows\Temp` deleted that directory instead.
+            # student_dataset_path() refuses anything that is not a direct
+            # child of dataset/, so a bad record now fails loudly rather than
+            # deleting the wrong tree.
+            dataset_path = student_dataset_path(
+                student['student_id'],
+                student['name']
             )
 
-        # Delete attendance records connected to the student.
-        cursor.execute("""
-            DELETE FROM attendance
-            WHERE student_id = %s
-        """, (student_id,))
+            # Delete the dataset folder first.
+            if dataset_path.is_dir():
+                shutil.rmtree(
+                    dataset_path,
+                    onerror=remove_readonly_and_retry
+                )
 
-        # Delete the student record.
-        cursor.execute("""
-            DELETE FROM students
-            WHERE student_id = %s
-        """, (student_id,))
+            # Delete attendance records connected to the student.
+            cursor.execute("""
+                DELETE FROM attendance
+                WHERE student_id = %s
+            """, (student_id,))
 
-        conn.commit()
+            # Delete the student record.
+            cursor.execute("""
+                DELETE FROM students
+                WHERE student_id = %s
+            """, (student_id,))
 
         return redirect(url_for('manage_students'))
 
     except UnsafeStudentPathError as error:
-        if conn is not None:
-            conn.rollback()
-
         logger.error("Refused to delete a student with an unsafe folder: %s", error)
 
         return error_page(
@@ -611,9 +586,6 @@ def delete_student(student_id):
         )
 
     except PermissionError:
-        if conn is not None:
-            conn.rollback()
-
         logger.exception("Delete student failed: dataset folder is in use")
 
         # Actionable and leaks nothing: it names what the operator has to do,
@@ -626,35 +598,19 @@ def delete_student(student_id):
         )
 
     except mysql.connector.Error:
-        if conn is not None:
-            conn.rollback()
-
         logger.exception("Delete student failed: database error")
 
         return error_page(500)
 
     except OSError:
-        if conn is not None:
-            conn.rollback()
-
         logger.exception("Delete student failed: could not remove dataset folder")
 
         return error_page(500, "The student's dataset folder could not be removed.")
 
     except Exception:
-        if conn is not None:
-            conn.rollback()
-
         logger.exception("Delete student failed")
 
         return error_page(500)
-
-    finally:
-        if cursor is not None:
-            cursor.close()
-
-        if conn is not None and conn.is_connected():
-            conn.close()
 
 # ==============================
 # EDIT STUDENT
@@ -663,26 +619,21 @@ def delete_student(student_id):
 @role_required('admin')
 def edit_student(student_id):
 
-    conn = None
-    cursor = None
-
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
+        with db_cursor(dictionary=True) as cursor:
+            cursor.execute("""
+                SELECT
+                    student_id,
+                    name,
+                    college_department,
+                    program,
+                    year_level,
+                    section
+                FROM students
+                WHERE student_id = %s
+            """, (student_id,))
 
-        cursor.execute("""
-            SELECT
-                student_id,
-                name,
-                college_department,
-                program,
-                year_level,
-                section
-            FROM students
-            WHERE student_id = %s
-        """, (student_id,))
-
-        student = cursor.fetchone()
+            student = cursor.fetchone()
 
         if student is None:
             return redirect(url_for('manage_students'))
@@ -695,13 +646,6 @@ def edit_student(student_id):
     except mysql.connector.Error:
         logger.exception("Edit student failed: database error")
         return error_page(500)
-
-    finally:
-        if cursor is not None:
-            cursor.close()
-
-        if conn is not None and conn.is_connected():
-            conn.close()
 
 
 # ==============================
@@ -747,99 +691,92 @@ def update_student(student_id):
     except (TypeError, ValueError):
         return error_page(400, "Year level must be a valid number.")
 
-    conn = None
-    cursor = None
-
     old_dataset_path = None
     new_dataset_path = None
     folder_was_renamed = False
 
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
+        with db_cursor(dictionary=True, commit=True) as cursor:
+            # Retrieve the student's old information.
+            cursor.execute("""
+                SELECT
+                    student_id,
+                    name
+                FROM students
+                WHERE student_id = %s
+            """, (student_id,))
 
-        # Retrieve the student's old information.
-        cursor.execute("""
-            SELECT
-                student_id,
-                name
-            FROM students
-            WHERE student_id = %s
-        """, (student_id,))
+            existing_student = cursor.fetchone()
 
-        existing_student = cursor.fetchone()
+            if existing_student is None:
+                return error_page(404, "That student record was not found.")
 
-        if existing_student is None:
-            return error_page(404, "That student record was not found.")
+            old_name = existing_student['name']
 
-        old_name = existing_student['name']
+            # SE-3. Both sides of the rename go through the same validator, so
+            # neither the stored name nor the submitted one can send
+            # os.rename() outside dataset/.
+            old_dataset_path = student_dataset_path(student_id, old_name)
+            new_dataset_path = student_dataset_path(student_id, name)
 
-        # SE-3. Both sides of the rename go through the same validator, so
-        # neither the stored name nor the submitted one can send os.rename()
-        # outside dataset/.
-        old_dataset_path = student_dataset_path(student_id, old_name)
-        new_dataset_path = student_dataset_path(student_id, name)
+            # Rename the dataset folder if the student's name changed.
+            if (
+                old_name != name
+                and old_dataset_path.is_dir()
+            ):
+                if new_dataset_path.exists():
+                    return error_page(
+                        409,
+                        "A dataset folder with the updated student name "
+                        "already exists."
+                    )
 
-        # Rename the dataset folder if the student's name changed.
-        if (
-            old_name != name
-            and old_dataset_path.is_dir()
-        ):
-            if new_dataset_path.exists():
-                return error_page(
-                    409,
-                    "A dataset folder with the updated student name "
-                    "already exists."
-                )
+                try:
+                    os.rename(
+                        old_dataset_path,
+                        new_dataset_path
+                    )
 
-            try:
-                os.rename(
-                    old_dataset_path,
-                    new_dataset_path
-                )
+                    folder_was_renamed = True
 
-                folder_was_renamed = True
+                except PermissionError:
+                    logger.exception(
+                        "Dataset folder rename denied by the operating system"
+                    )
 
-            except PermissionError:
-                logger.exception(
-                    "Dataset folder rename denied by the operating system"
-                )
+                    return error_page(
+                        500,
+                        "The student's dataset folder is currently in use. "
+                        "Close the attendance camera, the recognition "
+                        "program, File Explorer and any image preview, then "
+                        "try again."
+                    )
 
-                return error_page(
-                    500,
-                    "The student's dataset folder is currently in use. "
-                    "Close the attendance camera, the recognition program, "
-                    "File Explorer and any image preview, then try again."
-                )
-
-        # Update all editable student fields.
-        cursor.execute("""
-            UPDATE students
-            SET
-                name = %s,
-                college_department = %s,
-                program = %s,
-                year_level = %s,
-                section = %s
-            WHERE student_id = %s
-        """, (
-            name,
-            college_department,
-            program,
-            year_level,
-            section,
-            student_id
-        ))
-
-        conn.commit()
+            # Update all editable student fields.
+            cursor.execute("""
+                UPDATE students
+                SET
+                    name = %s,
+                    college_department = %s,
+                    program = %s,
+                    year_level = %s,
+                    section = %s
+                WHERE student_id = %s
+            """, (
+                name,
+                college_department,
+                program,
+                year_level,
+                section,
+                student_id
+            ))
 
         return redirect(url_for('manage_students'))
 
     except mysql.connector.Error:
-        if conn is not None:
-            conn.rollback()
-
-        # Restore the original folder name if the SQL update failed.
+        # Restore the original folder name if the SQL update failed. The
+        # database side is rolled back by db_cursor(); the filesystem side has
+        # no transaction, so it is undone by hand here.
         if (
             folder_was_renamed
             and new_dataset_path
@@ -862,25 +799,12 @@ def update_student(student_id):
         return error_page(500)
 
     except UnsafeStudentPathError as error:
-        if conn is not None:
-            conn.rollback()
-
         logger.error("Refused to update a student with an unsafe folder: %s", error)
         return error_page(400, str(error))
 
     except Exception:
-        if conn is not None:
-            conn.rollback()
-
         logger.exception("Update student failed")
         return error_page(500)
-
-    finally:
-        if cursor is not None:
-            cursor.close()
-
-        if conn is not None and conn.is_connected():
-            conn.close()
 
 
 # ==============================
@@ -903,33 +827,21 @@ def recapture_face():
         logger.warning("Rejected recapture request: %s", error)
         return error_page(400, str(error))
 
-    conn = None
-    cursor = None
-
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
+        with db_cursor(dictionary=True) as cursor:
+            cursor.execute("""
+                SELECT
+                    student_id,
+                    name
+                FROM students
+                WHERE student_id = %s
+            """, (student_id,))
 
-        cursor.execute("""
-            SELECT
-                student_id,
-                name
-            FROM students
-            WHERE student_id = %s
-        """, (student_id,))
-
-        student = cursor.fetchone()
+            student = cursor.fetchone()
 
     except mysql.connector.Error:
         logger.exception("Recapture failed: database error")
         return error_page(500)
-
-    finally:
-        if cursor is not None:
-            cursor.close()
-
-        if conn is not None and conn.is_connected():
-            conn.close()
 
     if student is None:
         return error_page(404, "That student ID was not found.")
@@ -1044,14 +956,9 @@ def train_model_route():
 @role_required('admin')
 def subjects():
 
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-
-    cursor.execute("SELECT * FROM subjects ORDER BY id DESC")
-    subjects = cursor.fetchall()
-
-    cursor.close()
-    conn.close()
+    with db_cursor(dictionary=True) as cursor:
+        cursor.execute("SELECT * FROM subjects ORDER BY id DESC")
+        subjects = cursor.fetchall()
 
     return render_template("subjects.html", subjects=subjects)
 
@@ -1069,18 +976,12 @@ def add_subject():
     time_in = request.form['time_in']
     time_out = request.form['time_out']
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        INSERT INTO subjects
-        (subject_code, subject_name, instructor, day, course, section, time_in, time_out)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-    """, (subject_code, subject_name, instructor, day, course, section, time_in, time_out))
-
-    conn.commit()
-    cursor.close()
-    conn.close()
+    with db_cursor(commit=True) as cursor:
+        cursor.execute("""
+            INSERT INTO subjects
+            (subject_code, subject_name, instructor, day, course, section, time_in, time_out)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (subject_code, subject_name, instructor, day, course, section, time_in, time_out))
 
     return redirect(url_for('subjects'))
 
@@ -1089,14 +990,9 @@ def add_subject():
 @role_required('admin')
 def edit_subject(id):
 
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-
-    cursor.execute("SELECT * FROM subjects WHERE id=%s", (id,))
-    subject = cursor.fetchone()
-
-    cursor.close()
-    conn.close()
+    with db_cursor(dictionary=True) as cursor:
+        cursor.execute("SELECT * FROM subjects WHERE id=%s", (id,))
+        subject = cursor.fetchone()
 
     return render_template("edit_subject.html", subject=subject)
 
@@ -1114,25 +1010,19 @@ def update_subject(id):
     time_in = request.form['time_in']
     time_out = request.form['time_out']
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        UPDATE subjects
-        SET subject_code=%s,
-            subject_name=%s,
-            instructor=%s,
-            day=%s,
-            course=%s,
-            section=%s,
-            time_in=%s,
-            time_out=%s
-        WHERE id=%s
-    """, (subject_code, subject_name, instructor, day, course, section, time_in, time_out, id))
-
-    conn.commit()
-    cursor.close()
-    conn.close()
+    with db_cursor(commit=True) as cursor:
+        cursor.execute("""
+            UPDATE subjects
+            SET subject_code=%s,
+                subject_name=%s,
+                instructor=%s,
+                day=%s,
+                course=%s,
+                section=%s,
+                time_in=%s,
+                time_out=%s
+            WHERE id=%s
+        """, (subject_code, subject_name, instructor, day, course, section, time_in, time_out, id))
 
     return redirect(url_for('subjects'))
 
@@ -1144,14 +1034,8 @@ def update_subject(id):
 @role_required('admin')
 def delete_subject(id):
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("DELETE FROM subjects WHERE id=%s", (id,))
-
-    conn.commit()
-    cursor.close()
-    conn.close()
+    with db_cursor(commit=True) as cursor:
+        cursor.execute("DELETE FROM subjects WHERE id=%s", (id,))
 
     return redirect(url_for('subjects'))
 # ==============================
@@ -1161,19 +1045,14 @@ def delete_subject(id):
 @role_required('admin')
 def instructors():
 
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    with db_cursor(dictionary=True) as cursor:
+        cursor.execute("""
+            SELECT *
+            FROM instructors
+            ORDER BY fullname ASC
+        """)
 
-    cursor.execute("""
-        SELECT *
-        FROM instructors
-        ORDER BY fullname ASC
-    """)
-
-    instructors = cursor.fetchall()
-
-    cursor.close()
-    conn.close()
+        instructors = cursor.fetchall()
 
     return render_template(
         "instructors.html",
@@ -1203,28 +1082,21 @@ def add_instructor():
     except PasswordTooLongError as error:
         return error_page(400, str(error))
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        INSERT INTO instructors
-        (
+    with db_cursor(commit=True) as cursor:
+        cursor.execute("""
+            INSERT INTO instructors
+            (
+                instructor_id,
+                fullname,
+                password,
+                must_change_password
+            )
+            VALUES (%s,%s,%s,1)
+        """, (
             instructor_id,
             fullname,
-            password,
-            must_change_password
-        )
-        VALUES (%s,%s,%s,1)
-    """, (
-        instructor_id,
-        fullname,
-        hashed_password
-    ))
-
-    conn.commit()
-
-    cursor.close()
-    conn.close()
+            hashed_password
+        ))
 
     logger.info("Instructor %r created by %r", instructor_id, session.get('user'))
 
@@ -1238,19 +1110,14 @@ def add_instructor():
 @role_required('admin')
 def manage_instructors():
 
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    with db_cursor(dictionary=True) as cursor:
+        cursor.execute("""
+            SELECT *
+            FROM instructors
+            ORDER BY fullname ASC
+        """)
 
-    cursor.execute("""
-        SELECT *
-        FROM instructors
-        ORDER BY fullname ASC
-    """)
-
-    instructors = cursor.fetchall()
-
-    cursor.close()
-    conn.close()
+        instructors = cursor.fetchall()
 
     return render_template(
         "manage_instructors.html",
@@ -1267,24 +1134,19 @@ def search_instructor():
 
     query = request.form.get('query', '')
 
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    with db_cursor(dictionary=True) as cursor:
+        cursor.execute("""
+            SELECT *
+            FROM instructors
+            WHERE instructor_id LIKE %s
+            OR fullname LIKE %s
+            ORDER BY fullname ASC
+        """, (
+            f"%{query}%",
+            f"%{query}%"
+        ))
 
-    cursor.execute("""
-        SELECT *
-        FROM instructors
-        WHERE instructor_id LIKE %s
-        OR fullname LIKE %s
-        ORDER BY fullname ASC
-    """, (
-        f"%{query}%",
-        f"%{query}%"
-    ))
-
-    instructors = cursor.fetchall()
-
-    cursor.close()
-    conn.close()
+        instructors = cursor.fetchall()
 
     return render_template(
         "manage_instructors.html",
@@ -1299,18 +1161,13 @@ def search_instructor():
 @role_required('admin')
 def edit_instructor(instructor_id):
 
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    with db_cursor(dictionary=True) as cursor:
+        cursor.execute(
+            "SELECT * FROM instructors WHERE instructor_id=%s",
+            (instructor_id,)
+        )
 
-    cursor.execute(
-        "SELECT * FROM instructors WHERE instructor_id=%s",
-        (instructor_id,)
-    )
-
-    instructor = cursor.fetchone()
-
-    cursor.close()
-    conn.close()
+        instructor = cursor.fetchone()
 
     if instructor is None:
         return error_page(404, "That instructor was not found.")
@@ -1336,8 +1193,11 @@ def update_instructor(instructor_id):
     if not fullname:
         return error_page(400, "Full name is required.")
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    # Hashed before a connection is taken, not after. bcrypt is deliberately
+    # slow - that is the point of it - and a pooled connection held across it
+    # is one of five that no other request can use. It also removes the two
+    # hand-written close calls that used to guard the early return.
+    hashed_password = None
 
     if password:
         # SE-1. An administrator setting someone else's password knows it,
@@ -1345,38 +1205,33 @@ def update_instructor(instructor_id):
         try:
             hashed_password = hash_password(password)
         except PasswordTooLongError as error:
-            cursor.close()
-            conn.close()
             return error_page(400, str(error))
 
-        cursor.execute("""
-            UPDATE instructors
-            SET
-                fullname=%s,
-                password=%s,
-                must_change_password=1
-            WHERE instructor_id=%s
-        """, (
-            fullname,
-            hashed_password,
-            instructor_id
-        ))
-    else:
-        # The form marks the password field optional. Leaving it blank must
-        # not overwrite the stored hash with an empty string.
-        cursor.execute("""
-            UPDATE instructors
-            SET fullname=%s
-            WHERE instructor_id=%s
-        """, (
-            fullname,
-            instructor_id
-        ))
-
-    conn.commit()
-
-    cursor.close()
-    conn.close()
+    with db_cursor(commit=True) as cursor:
+        if hashed_password is not None:
+            cursor.execute("""
+                UPDATE instructors
+                SET
+                    fullname=%s,
+                    password=%s,
+                    must_change_password=1
+                WHERE instructor_id=%s
+            """, (
+                fullname,
+                hashed_password,
+                instructor_id
+            ))
+        else:
+            # The form marks the password field optional. Leaving it blank must
+            # not overwrite the stored hash with an empty string.
+            cursor.execute("""
+                UPDATE instructors
+                SET fullname=%s
+                WHERE instructor_id=%s
+            """, (
+                fullname,
+                instructor_id
+            ))
 
     return redirect(url_for('manage_instructors'))
 # ==============================
@@ -1387,18 +1242,11 @@ def update_instructor(instructor_id):
 @role_required('admin')
 def delete_instructor(instructor_id):
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    cursor.execute(
-        "DELETE FROM instructors WHERE instructor_id=%s",
-        (instructor_id,)
-    )
-
-    conn.commit()
-
-    cursor.close()
-    conn.close()
+    with db_cursor(commit=True) as cursor:
+        cursor.execute(
+            "DELETE FROM instructors WHERE instructor_id=%s",
+            (instructor_id,)
+        )
 
     return redirect(url_for('manage_instructors'))
 # ==============================
@@ -1475,40 +1323,35 @@ def end_attendance():
     if not subject_code:
         return error_page(400, "Subject code is required.")
 
-    conn = None
-    cursor = None
-
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
+        with db_cursor(dictionary=True) as cursor:
+            # Get only today's attendance for the selected subject.
+            cursor.execute("""
+                SELECT DISTINCT
+                    student_id
+                FROM attendance
+                WHERE subject_code = %s
+                AND attendance_date = CURDATE()
+            """, (subject_code,))
 
-        # Get only today's attendance for the selected subject.
-        cursor.execute("""
-            SELECT DISTINCT
-                student_id
-            FROM attendance
-            WHERE subject_code = %s
-            AND attendance_date = CURDATE()
-        """, (subject_code,))
+            attendance_records = cursor.fetchall()
 
-        attendance_records = cursor.fetchall()
+            # Store unique present student IDs.
+            present_ids = {
+                str(record['student_id'])
+                for record in attendance_records
+            }
 
-        # Store unique present student IDs.
-        present_ids = {
-            str(record['student_id'])
-            for record in attendance_records
-        }
+            # Get all registered students.
+            cursor.execute("""
+                SELECT
+                    student_id,
+                    name
+                FROM students
+                ORDER BY name ASC
+            """)
 
-        # Get all registered students.
-        cursor.execute("""
-            SELECT
-                student_id,
-                name
-            FROM students
-            ORDER BY name ASC
-        """)
-
-        students = cursor.fetchall()
+            students = cursor.fetchall()
 
         session_results = []
 
@@ -1554,13 +1397,6 @@ def end_attendance():
     except mysql.connector.Error:
         logger.exception("End attendance failed: database error")
         return error_page(500)
-
-    finally:
-        if cursor is not None:
-            cursor.close()
-
-        if conn is not None and conn.is_connected():
-            conn.close()
 # ==============================
 # REPORTS
 # ==============================
@@ -1571,40 +1407,38 @@ def reports():
     selected_date = request.args.get('date')
     selected_subject = request.args.get('subject')
 
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    with db_cursor(dictionary=True) as cursor:
+        # Load subjects dropdown
+        cursor.execute("""
+            SELECT *
+            FROM subjects
+            ORDER BY subject_code
+        """)
+        subjects = cursor.fetchall()
 
-    # Load subjects dropdown
-    cursor.execute("""
-        SELECT *
-        FROM subjects
-        ORDER BY subject_code
-    """)
-    subjects = cursor.fetchall()
+        query = """
+            SELECT *
+            FROM attendance
+            WHERE 1=1
+        """
 
-    query = """
-        SELECT *
-        FROM attendance
-        WHERE 1=1
-    """
+        values = []
 
-    values = []
+        if selected_date:
+            query += " AND attendance_date=%s"
+            values.append(selected_date)
 
-    if selected_date:
-        query += " AND attendance_date=%s"
-        values.append(selected_date)
+        if selected_subject:
+            query += " AND subject_code=%s"
+            values.append(selected_subject)
 
-    if selected_subject:
-        query += " AND subject_code=%s"
-        values.append(selected_subject)
+        query += """
+            ORDER BY attendance_date DESC,
+            time_in DESC
+        """
 
-    query += """
-        ORDER BY attendance_date DESC,
-        time_in DESC
-    """
-
-    cursor.execute(query, values)
-    records = cursor.fetchall()
+        cursor.execute(query, values)
+        records = cursor.fetchall()
 
     total_present = sum(
         1 for r in records
@@ -1617,9 +1451,6 @@ def reports():
     )
 
     total_records = len(records)
-
-    cursor.close()
-    conn.close()
 
     return render_template(
         'reports.html',
@@ -1634,8 +1465,6 @@ def reports():
 @authenticated
 def export_excel():
 
-    conn = get_db_connection()
-
     query = """
         SELECT
         attendance_date,
@@ -1648,13 +1477,17 @@ def export_excel():
         ORDER BY attendance_date DESC
     """
 
-    df = pd.read_sql(query, conn)
+    # PE-8 (pandas being handed a raw DBAPI2 connection, and materialising the
+    # whole table) is still open and belongs to Phase 5 with FS-11. All that
+    # changes here is that the connection is returned to the pool even if
+    # read_sql or to_excel raises - which, on a pooled connection, is the
+    # difference between a failed export and a pool one slot smaller forever.
+    with db_connection() as conn:
+        df = pd.read_sql(query, conn)
 
     filename = "attendance_report.xlsx"
 
     df.to_excel(filename, index=False)
-
-    conn.close()
 
     return send_file(
         filename,
@@ -1667,14 +1500,9 @@ def export_excel():
 @role_required('admin')
 def settings():
 
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-
-    cursor.execute("SELECT * FROM admin LIMIT 1")
-    admin = cursor.fetchone()
-
-    cursor.close()
-    conn.close()
+    with db_cursor(dictionary=True) as cursor:
+        cursor.execute("SELECT * FROM admin LIMIT 1")
+        admin = cursor.fetchone()
 
     return render_template(
         'settings.html',
@@ -1690,19 +1518,12 @@ def update_admin():
     if not username:
         return error_page(400, "Username is required.")
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        UPDATE admin
-        SET username=%s
-        WHERE id=1
-    """, (username,))
-
-    conn.commit()
-
-    cursor.close()
-    conn.close()
+    with db_cursor(commit=True) as cursor:
+        cursor.execute("""
+            UPDATE admin
+            SET username=%s
+            WHERE id=1
+        """, (username,))
 
     session['user'] = username
 
@@ -1793,10 +1614,7 @@ def change_password():
     except PasswordTooLongError as error:
         return form_error(str(error))
 
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-
-    try:
+    with db_cursor(dictionary=True, commit=True) as cursor:
         cursor.execute(
             f"SELECT password FROM `{table}` WHERE `{key_column}` = %s",
             (key_value,)
@@ -1817,11 +1635,6 @@ def change_password():
             f"WHERE `{key_column}` = %s",
             (new_hash, key_value)
         )
-        conn.commit()
-
-    finally:
-        cursor.close()
-        conn.close()
 
     session.pop(MUST_CHANGE_PASSWORD, None)
 

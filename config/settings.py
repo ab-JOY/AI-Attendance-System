@@ -46,6 +46,17 @@ class Settings(BaseSettings):
     db_password: str = ""
     db_name: str = "attendancesystem_db"
 
+    # Connection pool size (PE-7). Five is mysql-connector's own default and
+    # is ample for the Flask development server this deploys on (PO-4), which
+    # serves a handful of concurrent requests at most. Raising it costs open
+    # connections against MySQL's max_connections whether they are used or
+    # not, so it is configurable rather than generous.
+    #
+    # A leak is what makes this dangerous rather than merely small: an
+    # exception that skips a close permanently removes one connection from a
+    # pool of five. infra/db.py exists so that cannot happen.
+    db_pool_size: int = 5
+
     # -----------------------------------------------------------------
     # Flask
     #

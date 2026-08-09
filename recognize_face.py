@@ -10,6 +10,7 @@ from camera_utils import open_best_camera
 from config.settings import settings
 from face_preprocessing import align_face, preprocess_for_lbph
 from infra.camera import CameraReader
+from infra.db import db_cursor
 from vision.geometry import get_face_box
 from vision.landmarks import LEFT_EYE_OUTER, NOSE_TIP, RIGHT_EYE_OUTER
 from vision.quality import RECOGNITION_QUALITY, quality_issue
@@ -538,103 +539,96 @@ def get_liveness_message(liveness_state):
 
 
 def save_attendance(student_id, subject, status):
-    conn = None
-    cursor = None
+    """
+    Write one attendance row, or report why not. True if the student is
+    enrolled and their attendance for today is now recorded.
 
+    PE-7 named this function specifically: it opened a brand new MySQL
+    connection per recognised face event, from inside the recognition loop. It
+    now takes one from the pool for the duration of the write and gives it
+    straight back.
+    """
     try:
-        conn = mysql.connector.connect(
-            **settings.db_kwargs()
-        )
-
-        cursor = conn.cursor(
-            dictionary=True
-        )
-
-        cursor.execute(
-            """
-            SELECT student_id, name
-            FROM students
-            WHERE student_id = %s
-            """,
-            (student_id,)
-        )
-
-        enrolled_student = cursor.fetchone()
-
-        if enrolled_student is None:
-            logger.warning(
-                "Rejected attendance: %s is not enrolled", student_id
-            )
-            return False
-
-        official_name = enrolled_student["name"]
-
-        cursor.execute(
-            """
-            SELECT student_id
-            FROM attendance
-            WHERE student_id = %s
-            AND attendance_date = %s
-            AND subject_code = %s
-            """,
-            (
-                student_id,
-                datetime.now().date(),
-                subject
-            )
-        )
-
-        existing_record = cursor.fetchone()
-
-        if existing_record is None:
+        with db_cursor(dictionary=True, commit=True) as cursor:
             cursor.execute(
                 """
-                INSERT INTO attendance
-                (
-                    student_id,
-                    student_name,
-                    subject_code,
-                    attendance_date,
-                    time_in,
-                    status
+                SELECT student_id, name
+                FROM students
+                WHERE student_id = %s
+                """,
+                (student_id,)
+            )
+
+            enrolled_student = cursor.fetchone()
+
+            if enrolled_student is None:
+                logger.warning(
+                    "Rejected attendance: %s is not enrolled", student_id
                 )
-                VALUES (%s, %s, %s, %s, %s, %s)
+                return False
+
+            official_name = enrolled_student["name"]
+
+            # RE-3: read-then-write, still a TOCTOU race. The real fix is a
+            # UNIQUE constraint on (student_id, subject_code, attendance_date)
+            # and it belongs to Phase 4, where the schema is already moving.
+            cursor.execute(
+                """
+                SELECT student_id
+                FROM attendance
+                WHERE student_id = %s
+                AND attendance_date = %s
+                AND subject_code = %s
                 """,
                 (
                     student_id,
-                    official_name,
-                    subject,
                     datetime.now().date(),
-                    datetime.now().strftime(
-                        "%H:%M:%S"
-                    ),
-                    status
+                    subject
                 )
             )
 
-            conn.commit()
+            existing_record = cursor.fetchone()
 
-            logger.info(
-                "Attendance recorded: %s - %s", student_id, official_name
-            )
+            if existing_record is None:
+                cursor.execute(
+                    """
+                    INSERT INTO attendance
+                    (
+                        student_id,
+                        student_name,
+                        subject_code,
+                        attendance_date,
+                        time_in,
+                        status
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        student_id,
+                        official_name,
+                        subject,
+                        datetime.now().date(),
+                        datetime.now().strftime(
+                            "%H:%M:%S"
+                        ),
+                        status
+                    )
+                )
 
-        else:
-            logger.info(
-                "Attendance already recorded for %s", student_id
-            )
+                logger.info(
+                    "Attendance recorded: %s - %s", student_id, official_name
+                )
+
+            else:
+                logger.info(
+                    "Attendance already recorded for %s", student_id
+                )
 
         return True
 
     except mysql.connector.Error:
         logger.exception("Database error while saving attendance")
         return False
-
-    finally:
-        if cursor is not None:
-            cursor.close()
-
-        if conn is not None:
-            conn.close()
 
 
 # =====================================================
