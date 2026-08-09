@@ -32,6 +32,7 @@ from config.logging_config import configure_logging
 # raised AttributeError. Do not rename this back without renaming the route.
 from config.settings import settings as app_config
 from infra.db import db_connection, db_cursor
+from infra.jobs import BackgroundJob
 from recognize_face import (
     SessionBusy,
     SessionNotRunning,
@@ -459,10 +460,14 @@ def capture_face():
         ], check=True)
 
         if result.returncode == EXIT_SUCCESS:
-            # Auto-train LBPH model after capturing dataset
+            # PE-5. This used to train inline and branch on the result, so the
+            # request held open for the whole retrain and the operator was told
+            # afterwards whether it had worked. Asynchronous training changes
+            # what this caller can promise: enrolment is complete, and the
+            # model is being rebuilt. The Students page polls /train_status for
+            # the rest.
             logger.info("Auto-training model after dataset capture")
-            train_success, train_msg = train_model()
-            logger.info("Train result: %s - %s", train_success, train_msg)
+            training_job.start(started_by=session.get('user'))
 
     except subprocess.CalledProcessError as error:
         if error.returncode == EXIT_CANCELLED:
@@ -902,10 +907,11 @@ def recapture_face():
             result.returncode
         )
 
-        # Auto-train LBPH model after recapturing face dataset
+        # PE-5, as in capture_face above: started, not awaited. The recapture
+        # is finished; the retrain that follows it is reported by
+        # /train_status rather than by holding this request open.
         logger.info("Auto-training model after face recapture")
-        train_success, train_msg = train_model()
-        logger.info("Train result: %s - %s", train_success, train_msg)
+        training_job.start(started_by=session.get('user'))
 
     except subprocess.CalledProcessError as error:
         if error.returncode == EXIT_CANCELLED:
@@ -935,17 +941,58 @@ def recapture_face():
 
 
 # ==========================================================
-# MANUAL MODEL RETRAINING ROUTE
+# MODEL RETRAINING (PE-5, US-2)
+#
+# This used to call train_model() inline and block the request until it
+# finished. Phase 0 took training from minutes to roughly twenty seconds at
+# three students, but the shape was still wrong: the browser has no way to
+# show progress for a request that has not answered, any proxy in front of the
+# app will time it out, and the cost grows with enrolment.
+#
+# The route now starts a job and answers 202 immediately. /train_status is
+# what the page polls.
+#
+# ⚠️ Still admin-only. Opening retraining to instructors is a decision about
+# who is allowed to change the biometric model, not an oversight to correct
+# in passing.
 # ==========================================================
+
+training_job = BackgroundJob(name="train_model", runner=train_model)
+
+
 @app.route('/train_model', methods=['POST'])
 @role_required('admin')
 @json_api
 def train_model_route():
-    success, message = train_model()
+    started = training_job.start(started_by=session.get('user'))
+
+    if not started:
+        # 409, not an error page: the caller is JavaScript, and "already
+        # running" is a normal thing for a double-clicked button to hit.
+        return jsonify({
+            "success": False,
+            "started": False,
+            "message": "Training is already running.",
+            "status": training_job.status().as_dict(),
+        }), 409
+
     return jsonify({
-        "success": success,
-        "message": message
-    })
+        "success": True,
+        "started": True,
+        "message": "Training started.",
+        "status": training_job.status().as_dict(),
+    }), 202
+
+
+# @json_api as well as @authenticated, and both are load-bearing. Without the
+# JSON marker the access-control hook answers an expired session with an HTML
+# redirect to the login page, and the polling JavaScript parses that as JSON
+# and fails with a syntax error rather than saying "please sign in again".
+@app.route('/train_status')
+@authenticated
+@json_api
+def train_status():
+    return jsonify(training_job.status().as_dict())
 
 
 # ==========================================================

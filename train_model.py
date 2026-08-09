@@ -169,7 +169,20 @@ def write_model_atomically(recognizer, label_dict):
 # TRAIN MODEL FUNCTION
 # =====================================================
 
-def train_model():
+def train_model(report=None):
+    """
+    Retrain the LBPH model from `dataset/`. Returns `(ok, message)`.
+
+    `report` is an optional callable taking one string, used to name the stage
+    the run has reached. PE-5 moved this off the request thread, and the
+    polling UI needs something true to display; stages are that, where a
+    percentage would have to be invented. It defaults to None so every existing
+    caller and every test is unaffected.
+    """
+    def stage(name):
+        if report is not None:
+            report(name)
+
     logger.info("OpenCV version: %s", cv2.__version__)
 
     if not hasattr(cv2, "face"):
@@ -268,6 +281,8 @@ def train_model():
         "Training start: shared preprocessing (resize 200x200 + CLAHE), "
         "each dataset image processed exactly once"
     )
+
+    stage(f"Reading images for {len(folder_records)} student(s)")
 
     for record in folder_records:
         folder_name = record[
@@ -391,6 +406,8 @@ def train_model():
 
     logger.info("Training LBPH model with %s", LBPH_PARAMS)
 
+    stage(f"Training on {len(faces)} image(s) from {len(label_dict)} student(s)")
+
     recognizer.train(
         faces,
         np.asarray(
@@ -400,6 +417,8 @@ def train_model():
     )
 
     logger.info("Saving model")
+
+    stage("Saving model")
 
     try:
         write_model_atomically(

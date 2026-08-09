@@ -98,6 +98,11 @@
 
     </div>
 
+    {# PE-5/US-2. Enrolment on this page starts a retrain in the background
+       now instead of holding the request open, so the page has to be able to
+       say what happened to it. #}
+    {% include 'training_status.html' %}
+
     <!-- ================= STUDENT LIST ================= -->
 
     <h2 style="margin-top:30px;">Registered Students</h2>
