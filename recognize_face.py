@@ -1,5 +1,7 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import NamedTuple
 
 import cv2
 import mysql.connector
@@ -9,6 +11,7 @@ from config.settings import settings
 from face_preprocessing import align_face, preprocess_for_lbph
 from infra.camera import CameraReader
 from infra.db import db_cursor
+from security.paths import UnsafeStudentPathError, validate_student_id
 from vision.geometry import get_face_box
 from vision.landmarks import LEFT_EYE_OUTER, NOSE_TIP, RIGHT_EYE_OUTER
 from vision.liveness import LivenessChallenge, LivenessConfig
@@ -20,7 +23,11 @@ from vision.session import (
     SessionNotRunning,
 )
 from vision.tracking import TrackConfig
-from vision.validation import RECOGNITION_PROFILE, is_valid_face_candidate
+from vision.validation import (
+    RECOGNITION_PROFILE,
+    is_frontal,
+    is_structurally_a_face,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -140,30 +147,18 @@ def load_model_and_labels():
                 continue
 
             try:
-                label_text, folder_name = line.split(
+                label_text, id_text = line.split(
                     ",",
                     1
                 )
 
                 label = int(label_text.strip())
 
-                folder_parts = folder_name.split(
-                    "_",
-                    1
-                )
-
-                if len(folder_parts) != 2:
-                    raise ValueError(
-                        "Expected student_id_student_name"
-                    )
-
-                student_id = folder_parts[0].strip()
-                student_name = folder_parts[1].strip()
-
-                if not student_id or not student_name:
-                    raise ValueError(
-                        "Student ID or name is empty"
-                    )
+                # `{label},{student_id}`. It was `{label},{id}_{name}` before
+                # todo.md §7.5, and validate_student_id refuses an underscore,
+                # so an un-migrated labels.txt fails here with the line quoted
+                # rather than loading a model whose identities are wrong.
+                student_id = validate_student_id(id_text)
 
                 if label in new_label_map:
                     raise ValueError(
@@ -177,14 +172,14 @@ def load_model_and_labels():
 
                 new_label_map[label] = {
                     "student_id": student_id,
-                    "name": student_name
+                    "name": student_id,
                 }
 
                 loaded_student_ids.add(
                     student_id
                 )
 
-            except ValueError as error:
+            except (ValueError, UnsafeStudentPathError) as error:
                 raise ValueError(
                     "Invalid labels.txt entry on line "
                     f"{line_number}: {line} ({error})"
@@ -195,12 +190,69 @@ def load_model_and_labels():
             "labels.txt does not contain any students."
         )
 
+    _attach_display_names(new_label_map)
+
     logger.info(
         "Trainer loaded successfully: %d student identities",
         len(new_label_map)
     )
 
     return new_recognizer, new_label_map
+
+
+def _attach_display_names(label_map):
+    """
+    Fill in the on-screen name for each loaded identity, from `students`.
+
+    ⚠️ **The name is not in labels.txt any more, and this is the reason
+    (todo.md §7.5).** It used to come from the dataset folder name, so a
+    student corrected from `Jose Cruz` to `José Cruz` kept the old spelling on
+    the overlay until somebody retrained - the model was the authority on how
+    to spell a person's name, which it has no business being.
+
+    **A failure here is not a failure to load the model.** Recognition works
+    without a display name; what it cannot do is start at all if this raises.
+    So a database that is down leaves the ID showing - accurate, unhelpful,
+    and better than a refused session. The same fallback covers a trained
+    student whose row has since been deleted.
+
+    `save_attendance()` already reads the official name from `students` for the
+    row it writes. This is that pattern, one layer up.
+    """
+    try:
+        with db_cursor(dictionary=True) as cursor:
+            cursor.execute(
+                "SELECT student_id, name FROM students WHERE student_id IN ("
+                + ",".join(["%s"] * len(label_map))
+                + ")",
+                tuple(entry["student_id"] for entry in label_map.values()),
+            )
+
+            names = {row["student_id"]: row["name"] for row in cursor.fetchall()}
+
+    except Exception:
+        logger.exception(
+            "Could not read student names; the overlay will show IDs instead"
+        )
+        return
+
+    missing = []
+
+    for entry in label_map.values():
+        name = names.get(entry["student_id"])
+
+        if name:
+            entry["name"] = name
+        else:
+            missing.append(entry["student_id"])
+
+    if missing:
+        logger.warning(
+            "%d trained student(s) have no row in `students`: %s. They will "
+            "be shown by ID and refused at save_attendance().",
+            len(missing),
+            ", ".join(missing),
+        )
 
 
 # =====================================================
@@ -220,25 +272,18 @@ def load_model_and_labels():
 
 
 def make_detector():
-    """A MediaPipe FaceMesh for one session."""
-    import mediapipe as mp
+    """
+    A MediaPipe FaceMesh for one session.
 
-    try:
-        mp_face_mesh = mp.solutions.face_mesh
-    except AttributeError:
-        import mediapipe.python.solutions.face_mesh as mp_face_mesh
+    The construction moved to infra/facemesh.py when browser enrolment needed
+    one too, so there is one place that knows how to build a FaceMesh and one
+    place carrying the AttributeError fallback for MediaPipe's two module
+    layouts. The settings are unchanged and still named here by their profile.
+    The deferred import survives the move - see that module on why.
+    """
+    from infra.facemesh import make_recognition_detector
 
-    detector = mp_face_mesh.FaceMesh(
-        static_image_mode=False,
-        max_num_faces=10,
-        refine_landmarks=True,
-        min_detection_confidence=0.60,
-        min_tracking_confidence=0.55
-    )
-
-    logger.info("MediaPipe Face Mesh loaded successfully")
-
-    return detector
+    return make_recognition_detector()
 
 
 # =====================================================
@@ -267,28 +312,11 @@ MIN_FACE_HEIGHT = RECOGNITION_PROFILE.min_face_height
 # the whole set can be varied in a test (MA-12, and MA-6's "60 magic numbers
 # with no configuration layer").
 #
-# The values are unchanged. Like the geometry profiles, they are the "safe
-# starting values" the original comment described and have never been
-# calibrated; Phase 6 is where that happens.
+# The values are unchanged apart from confirmation_confidence, which is now
+# derived rather than restated - see below. Like the geometry profiles, they
+# are the "safe starting values" the original comment described and have never
+# been calibrated; Phase 6 is where that happens.
 # =====================================================
-
-TRACK_CONFIG = TrackConfig(
-    timeout_seconds=1.5,
-    max_distance=180.0,
-    min_iou=0.08,
-    min_size_similarity=0.40,
-    real_face_confirm_frames=5,
-    prediction_history_size=20,
-    min_label_agreement=0.85,
-    min_consecutive_identity_frames=8,
-    confirmation_confidence=52.0,
-    max_weak_frames_before_clear=3,
-    max_confirmed_mismatch_frames=5,
-    liveness_reset_mismatch_frames=2,
-)
-
-REAL_FACE_CONFIRM_FRAMES = TRACK_CONFIG.real_face_confirm_frames
-PREDICTION_HISTORY_SIZE = TRACK_CONFIG.prediction_history_size
 
 
 # =====================================================
@@ -301,9 +329,54 @@ PREDICTION_HISTORY_SIZE = TRACK_CONFIG.prediction_history_size
 # tasks/lessons.md L2 - this threshold is calibrated against the distance
 # scale that LBPH_PARAMS in train_model.py produces, and changing either one
 # without the other silently rejects every face.
+#
+# Defined above TRACK_CONFIG because the confirmation bar is derived from it.
 # =====================================================
 
 RECOGNITION_THRESHOLD = settings.recognition_threshold
+
+
+TRACK_CONFIG = TrackConfig(
+    timeout_seconds=1.5,
+    max_distance=180.0,
+    min_iou=0.08,
+    min_size_similarity=0.40,
+    real_face_confirm_frames=5,
+    prediction_history_size=20,
+    min_label_agreement=0.85,
+    min_consecutive_identity_frames=8,
+    # ⚠️ This was a separate literal 52.0, and that was a live bug.
+    #
+    # A frame's prediction is voted into the window when its distance is at or
+    # under RECOGNITION_THRESHOLD (58.0). The window's *average* then had to
+    # beat 52.0 to lock the identity. So any student whose live distance
+    # settled between the two produced a full, unanimous, 20/20 window that
+    # could never confirm: the box stayed yellow, the overlay read
+    # "Verifying 20/20 100%" forever, nothing was logged and no attendance was
+    # saved. Reported from a live run at distance 56.1, squarely in the band.
+    #
+    # This is lessons.md L2 again - two thresholds on one metric scale, tuned
+    # independently, and the stricter one silently swallowing a band of
+    # legitimate matches. The fix is to have one number, not two.
+    #
+    # Measured before changing it, against this model (docs/benchmarks.md §8):
+    # 750 impostor images from 50 unenrolled Georgia Tech subjects score
+    # 62.2 at the very closest, and the closest subject mean is 69.9. Genuine
+    # same-session crops top out at 34.9. Nothing at all lies between 52.0 and
+    # 58.0 in either population, so raising the bar costs zero measured false
+    # acceptances and leaves 4.2 of headroom to the nearest impostor frame.
+    #
+    # Phase 6 may reintroduce a stricter confirmation bar than the match
+    # threshold - but from a DET curve, with the gap justified, and with the
+    # unreachable-band failure made impossible by the diagnostics below.
+    confirmation_confidence=RECOGNITION_THRESHOLD,
+    max_weak_frames_before_clear=3,
+    max_confirmed_mismatch_frames=5,
+    liveness_reset_mismatch_frames=2,
+)
+
+REAL_FACE_CONFIRM_FRAMES = TRACK_CONFIG.real_face_confirm_frames
+PREDICTION_HISTORY_SIZE = TRACK_CONFIG.prediction_history_size
 
 
 # =====================================================
@@ -416,7 +489,9 @@ session = RecognitionSession(
 #
 # get_face_box, box_iou, box_center, box_area, is_valid_face_candidate and
 # the quality gate all used to be defined here, and again - differently - in
-# capture_dataset.py. They now come from vision/, which both modules import.
+# capture_dataset.py. They now come from vision/, which this module imports -
+# and since Phase 5 deleted capture_dataset.py, vision/enrolment.py is the
+# other consumer, using the enrolment profile beside the recognition one.
 #
 # The two wrappers below exist so the call sites in this file stay readable:
 # they bind the recognition profile once instead of repeating it at every
@@ -430,7 +505,45 @@ def face_passes_geometry_gate(
     frame_height,
     box
 ):
-    return is_valid_face_candidate(
+    """
+    Is this a face worth tracking? **Structure only - not frontality.**
+
+    ⚠️ It used to be `is_valid_face_candidate()`, which also applies the
+    profile's two frontality checks, and that is what made the liveness
+    challenge unpassable. This gate runs in `_stream_frames()` *before*
+    `tracker.assign()`, so refusing a turned head here does not merely skip a
+    recognition attempt - it drops the frame entirely, which means the track's
+    `last_seen` is never refreshed and `expire_old_tracks()` deletes it 1.5 s
+    later. A student obeying "Turn LEFT" was therefore deleted for obeying,
+    and came back to "Verifying 0/20".
+
+    Frontality still decides whether an identity may be *confirmed* - see
+    `face_is_frontal()` and `vision/validation.frontality_reason()`.
+    """
+    return is_structurally_a_face(
+        face_landmarks,
+        frame_width,
+        frame_height,
+        box,
+        RECOGNITION_PROFILE
+    )
+
+
+def face_is_frontal(
+    face_landmarks,
+    frame_width,
+    frame_height,
+    box
+):
+    """
+    Is this face square-on enough to make a decision about?
+
+    Gates confirmation, and nothing else. An attendance mark is a decision and
+    a decision wants a frontal face - that property is unchanged. What changed
+    is that a face failing it is still seen, still boxed, and still keeps its
+    place in a liveness challenge.
+    """
+    return is_frontal(
         face_landmarks,
         frame_width,
         frame_height,
@@ -489,118 +602,257 @@ def create_liveness_state():
 # =====================================================
 
 
-def save_attendance(student_id, subject, status):
+class ActiveSubject(NamedTuple):
     """
-    Write one attendance row, or report why not. True if the student is
-    enrolled and their attendance for today is now recorded.
+    Which offering an attendance session is recording, and under which session.
 
-    PE-7 named this function specifically: it opened a brand new MySQL
-    connection per recognised face event, from inside the recognition loop. It
-    now takes one from the pool for the duration of the write and gives it
-    straight back.
+    `subject_code` is carried for logging and for the operator's screen only.
+    Every write keys on `subject_id`, because a subjects row is a section
+    offering and two sections can share a code (see migration 004).
+    """
+
+    subject_id: int
+    session_id: int | None
+    subject_code: str
+
+
+def derive_status(arrival, scheduled_start):
+    """
+    "Present" or "Late", from the subject's scheduled start time (FS-8).
+
+    Everything this system has ever recorded is "Present": `subjects.time_in`
+    was a VARCHAR while `attendance.time_in` is a TIME, so there was nothing
+    sound to compare. Migration 005 made it a real TIME.
+
+    A subject with no scheduled start cannot make anyone late, so the answer is
+    Present - that is a statement about missing data, not punctuality.
+    """
+    if scheduled_start is None:
+        return "Present"
+
+    # MySQL hands back a TIME as a timedelta from midnight.
+    if isinstance(scheduled_start, timedelta):
+        scheduled = (datetime.min + scheduled_start).time()
+    else:
+        scheduled = scheduled_start
+
+    return "Late" if arrival > scheduled else "Present"
+
+
+class NotRecorded(Enum):
+    """
+    Why a recognised face produced no attendance row, and what to show.
+
+    ⚠️ **These were one `None` and one orange "Not Enrolled" on the overlay**
+    (US-10). Three different situations rendered identically: a student who is
+    not in this class, a face the model knows that the database does not, and
+    the database being unreachable. Only the first is a roster problem, and it
+    is the only one the operator can act on at the kiosk - so a MySQL outage
+    looked like somebody had forgotten to add a student to a class.
+
+    **Falsy on purpose.** `save_attendance()` returns the written status or one
+    of these, and every existing caller tests the result for truth. Keeping
+    them false means the reason can be carried without any call site having to
+    learn about it first.
+    """
+
+    NOT_IN_CLASS = "Not in this class"
+    UNKNOWN_STUDENT = "Not enrolled"
+    ERROR = "Not recorded - system error"
+
+    def __bool__(self):
+        return False
+
+
+def save_attendance(student_id, subject):
+    """
+    Record one student as present for one offering, once.
+
+    `subject` is an ActiveSubject. Returns the status that was written -
+    "Present" or "Late" - or None if nothing was recorded.
+
+    ⚠️ **There is deliberately no `status` parameter.** There used to be one,
+    defaulting to None and meaning "work it out from the schedule", added so a
+    correction could force a value. The recognition path was then given one
+    too:
+
+        save_attendance(locked_id, subject, "Present")
+
+    and since the function resolved `status or derive_status(...)`, that
+    literal short-circuited the derivation for the only production caller there
+    is. Every row the system wrote was Present whatever the subject's scheduled
+    start, and /reports rendered a Late counter that was structurally 0 - the
+    exact shape of FS-4, which Phase 4 existed to remove. FS-8 was closed in
+    Phase 4 and quietly reopened by the argument.
+
+    The parameter is gone rather than merely unused at the call site. Its
+    claimed consumer, the FS-10 correction route, does not go through this
+    function at all - it writes through `repositories.attendance.set_status()`,
+    which is where a forced status belongs, beside the audit row that explains
+    it. With no parameter the defect is unrepresentable, which is worth more
+    than a test forbidding it.
+
+    **The return value is the status rather than True**, so the overlay can
+    show what was actually recorded. A student marked Late on the register and
+    "Present" on the screen is two screens disagreeing about one session, which
+    is FS-7 one layer up.
+
+    Three things changed with the Phase 4 schema, and each removes a defect:
+
+    **RE-3 - the read-then-write is gone.** Duplicate suppression used to be a
+    SELECT followed by an INSERT, a TOCTOU race under concurrent recognition
+    that a comment in this function acknowledged. There is now a UNIQUE index
+    on (student_id, subject_id, attendance_date) and the write is an
+    INSERT ... ON DUPLICATE KEY UPDATE, so the database decides. The old check
+    is deleted rather than kept alongside it, as the Phase 3 handover asked.
+
+    ⚠️ **The exception handling matters more than it looks.** This function
+    used to wrap everything in `except mysql.connector.Error: return False`.
+    IntegrityError is a subclass of that, so once the UNIQUE index existed a
+    perfectly ordinary duplicate would have been read as failure - the caller
+    renders a falsy result as "Not Enrolled", never sets attendance_saved, and
+    retries on every frame. ON DUPLICATE KEY avoids raising at all, and the
+    handler below no longer has to distinguish them.
+
+    **FS-3 - enrolment is checked against `enrolments`, not `students`.** Being
+    in the database is not being in the class. Without this, any recognised
+    face is recorded against whatever subject happens to be running.
+
+    **FS-8 - Late is derived** from the subject's scheduled start.
     """
     try:
         with db_cursor(dictionary=True, commit=True) as cursor:
             cursor.execute(
                 """
-                SELECT student_id, name
-                FROM students
-                WHERE student_id = %s
+                SELECT s.student_id, s.name, sub.time_in AS scheduled_start
+                FROM students s
+                JOIN enrolments e
+                    ON e.student_id = s.student_id
+                JOIN subjects sub
+                    ON sub.id = e.subject_id
+                WHERE s.student_id = %s
+                AND e.subject_id = %s
                 """,
-                (student_id,)
+                (student_id, subject.subject_id)
             )
 
-            enrolled_student = cursor.fetchone()
+            enrolled = cursor.fetchone()
 
-            if enrolled_student is None:
-                logger.warning(
-                    "Rejected attendance: %s is not enrolled", student_id
+            if enrolled is None:
+                # ⚠️ **Two causes, and the operator needs them apart** (US-10).
+                # The log always said which; the screen never did, so "add them
+                # to the class list" and "the model is ahead of the database"
+                # looked the same to the person standing at the kiosk.
+                #
+                # The second query runs only on this branch - once per
+                # confirmed identity, not per frame - so the hot path above is
+                # unchanged.
+                cursor.execute(
+                    "SELECT student_id FROM students WHERE student_id = %s",
+                    (student_id,)
                 )
-                return False
 
-            official_name = enrolled_student["name"]
+                known = cursor.fetchone() is not None
 
-            # RE-3: read-then-write, still a TOCTOU race. The real fix is a
-            # UNIQUE constraint on (student_id, subject_code, attendance_date)
-            # and it belongs to Phase 4, where the schema is already moving.
+                logger.warning(
+                    "Rejected attendance: %s is %s (subject %s / %s)",
+                    student_id,
+                    "not in this class" if known
+                    else "not in the students table",
+                    subject.subject_id,
+                    subject.subject_code,
+                )
+
+                return (
+                    NotRecorded.NOT_IN_CLASS if known
+                    else NotRecorded.UNKNOWN_STUDENT
+                )
+
+            # One reading, used for the row and for the Late decision. The old
+            # code called datetime.now() three separate times, so a write
+            # crossing midnight could compare one date and store another.
+            now = datetime.now()
+
+            resolved = derive_status(now.time(), enrolled["scheduled_start"])
+
             cursor.execute(
                 """
-                SELECT student_id
-                FROM attendance
-                WHERE student_id = %s
-                AND attendance_date = %s
-                AND subject_code = %s
+                INSERT INTO attendance
+                (
+                    student_id,
+                    subject_id,
+                    session_id,
+                    attendance_date,
+                    time_in,
+                    status
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE id = id
                 """,
                 (
                     student_id,
-                    datetime.now().date(),
-                    subject
+                    subject.subject_id,
+                    subject.session_id,
+                    now.date(),
+                    now.strftime("%H:%M:%S"),
+                    resolved,
                 )
             )
 
-            existing_record = cursor.fetchone()
-
-            if existing_record is None:
-                cursor.execute(
-                    """
-                    INSERT INTO attendance
-                    (
-                        student_id,
-                        student_name,
-                        subject_code,
-                        attendance_date,
-                        time_in,
-                        status
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        student_id,
-                        official_name,
-                        subject,
-                        datetime.now().date(),
-                        datetime.now().strftime(
-                            "%H:%M:%S"
-                        ),
-                        status
-                    )
-                )
-
-                logger.info(
-                    "Attendance recorded: %s - %s", student_id, official_name
-                )
-
-            else:
+            if cursor.rowcount == 0:
                 logger.info(
                     "Attendance already recorded for %s", student_id
                 )
+            else:
+                logger.info(
+                    "Attendance recorded: %s - %s (%s)",
+                    student_id,
+                    enrolled["name"],
+                    resolved,
+                )
 
-        return True
+        return resolved
 
     except mysql.connector.Error:
         logger.exception("Database error while saving attendance")
-        return False
 
+        # Not a roster problem, and it must not read as one on the overlay.
+        return NotRecorded.ERROR
 
 # =====================================================
 # CAMERA CONTROL
 # =====================================================
 
 
-def start_camera(subject_code):
+def start_camera(subject):
     """
     Begin an attendance session. True if recognition can now run.
 
-    Thin now: the model reload, the camera open, the tracker reset and the
+    `subject` is an ActiveSubject rather than the free-text code it used to be.
+    It is a NamedTuple, so the session's "is this the same subject?" comparison
+    still works by value - but the identity it carries is now `subject_id`,
+    which is what every attendance write keys on.
+
+    Thin: the model reload, the camera open, the tracker reset and the
     "already running" decision all belong to the session, which holds the lock
     that makes them one atomic transition (RE-2).
     """
-    return session.start(subject_code)
+    return session.start(subject)
 
 
 def stop_camera():
     """End the session and release the camera."""
     session.stop()
+
+
+# ⚠️ `attendance_is_running()` used to sit here and is gone (Phase 5).
+#
+# It existed for one caller: the enrolment routes asked it before spawning
+# `capture_dataset.py`, because that subprocess opened the *same physical
+# device* this session holds and would otherwise fail with a bare read error.
+# Browser enrolment uses the operator's camera through getUserMedia, so the
+# contention it guarded against no longer exists. `session.is_running` remains
+# for anything that genuinely needs to know.
 
 
 # =====================================================
@@ -622,6 +874,15 @@ def stop_camera():
 # Liveness advances only while LBPH still agrees with
 # the locked identity. This prevents another face from
 # completing the challenge after a track switch.
+#
+# ⚠️ "Still agrees" has two opposites and they are NOT
+# the same evidence. Reading a *different* enrolled
+# student is a contradiction and the thing this guard
+# exists to catch. Reading *nothing usable* - a blurred
+# crop mid-turn, a quality rejection, a distance over
+# the threshold - says nothing about identity at all.
+# Treating them alike is what made the liveness
+# challenge unpassable; see the two branches below.
 # =====================================================
 
 
@@ -635,13 +896,13 @@ def process_confirmed_track(
     locked_id = state.student_id
     locked_name = state.student_name
 
-    candidate_agrees = (
-        candidate_id is not None
-        and candidate_id == locked_id
-    )
-
-    if not candidate_agrees:
+    # A different enrolled student on a locked track. Evidence of a track
+    # switch - somebody else's face taking over a challenge already in
+    # progress - so this stays exactly as strict as it was: the sequence is
+    # redrawn after two such frames and the identity is dropped after five.
+    if candidate_id is not None and candidate_id != locked_id:
         state.mismatch_frames += 1
+        state.unreadable_frames = 0
 
         if state.liveness is not None:
             state.liveness.note_identity_mismatch()
@@ -656,6 +917,13 @@ def process_confirmed_track(
             state.mismatch_frames
             >= TRACK_CONFIG.max_confirmed_mismatch_frames
         ):
+            logger.warning(
+                "Dropped the locked identity %s after %d frames reading a "
+                "different student (%s). The track will start over.",
+                locked_id,
+                state.mismatch_frames,
+                candidate_id,
+            )
             state = state.reset_identity()
 
         return (
@@ -665,44 +933,142 @@ def process_confirmed_track(
             state
         )
 
+    # No usable prediction. Absence of evidence, and on the frames the
+    # challenge itself produces: a head turned to satisfy "Turn LEFT" is
+    # blurred while it moves and its crop is what the quality gate is most
+    # likely to refuse. The sequence is NOT redrawn - putting a fresh random
+    # prompt on screen while the student is still performing the last one is
+    # the behaviour that made this look like the system had lost them - and
+    # the identity survives far longer, because nothing here contradicts it.
+    if candidate_id is None:
+        state.unreadable_frames += 1
+
+        if state.liveness is not None:
+            state.liveness.note_identity_mismatch()
+
+            # ⚠️ **The challenge advances here, on a frame with no identity.**
+            #
+            # The paragraph above stopped the sequence being *redrawn* on
+            # these frames. It did not let it move *forward* on them, and the
+            # branch returns below - so `update()` was only ever reached from
+            # the readable path, and the challenge could only advance on
+            # frames where LBPH produced a match.
+            #
+            # That is the wrong precondition, because it is the requested
+            # movement itself that destroys the match: a turning head is
+            # motion-blurred, and a blurred crop is what
+            # RECOGNITION_QUALITY.min_blur_variance refuses; a profile view
+            # also pushes the distance past RECOGNITION_THRESHOLD. So the
+            # system asked for a turn and then discarded exactly the frames
+            # the turn produced, while the 8 s step timeout ran on wall-clock
+            # regardless. Measured live: 4 min 07 s to record one student.
+            #
+            # The yaw owes LBPH nothing. get_face_yaw() reads the FaceMesh
+            # landmarks, which are present whenever MediaPipe found a face -
+            # the precondition for being in this function at all.
+            #
+            # ⚠️ This does not recognise anybody. Completing the sequence sets
+            # `passed`; attendance additionally needs post_match_frames of
+            # *real* matches, and note_identity_mismatch() above keeps that
+            # counter at zero for every frame that reaches this branch. The
+            # challenge proves a live person moved on cue; the re-check proves
+            # it was still this student. Those stay separate.
+            state.liveness.update(current_yaw)
+
+        if (
+            state.unreadable_frames
+            >= TRACK_CONFIG.max_unreadable_frames_before_clear
+        ):
+            logger.warning(
+                "Dropped the locked identity %s after %d consecutive frames "
+                "with no usable match. The face was probably lost rather than "
+                "replaced.",
+                locked_id,
+                state.unreadable_frames,
+            )
+            state = state.reset_identity()
+
+            return (
+                "Unknown",
+                "Verifying...",
+                "Identity check lost",
+                state
+            )
+
+        # The identity is held, so the student keeps their name and their
+        # place in the sequence. The status says what the system needs rather
+        # than reporting a failure at them.
+        return (
+            locked_id,
+            locked_name,
+            "Hold still - looking for your face",
+            state
+        )
+
     state.mismatch_frames = 0
+    state.unreadable_frames = 0
 
     if state.attendance_saved:
         return (
             locked_id,
             locked_name,
-            "Present",
+            state.recorded_status,
             state
         )
 
     if state.liveness is None:
         state.liveness = create_liveness_state()
 
+    # A step that times out redraws the sequence inside update(), silently -
+    # the operator sees the prompt change and has no way to tell that from
+    # having completed a step. Logged at the transition, not per frame, the
+    # same way describe_confirmation_block() reports a stuck track.
+    #
+    # This is the instrument that did not exist: the only account of this
+    # defect was a person watching the screen, because none of the three ways
+    # a challenge can stall wrote a line anywhere.
+    restarts_before = state.liveness.restarts
+    step_before = state.liveness.current_step
+
     state.liveness.update(current_yaw)
+
+    if state.liveness.restarts > restarts_before:
+        logger.warning(
+            "Liveness challenge for %s timed out on step %s after %.0f s and "
+            "was redrawn (restart %d). The student is now being asked for a "
+            "different sequence.",
+            locked_id,
+            step_before,
+            LIVENESS_CONFIG.step_timeout_seconds,
+            state.liveness.restarts,
+        )
+
     state.liveness.note_identity_match()
 
     if state.liveness.identity_reconfirmed:
-        attendance_saved = save_attendance(
-            locked_id,
-            subject,
-            "Present"
-        )
+        # ⚠️ No status argument. Passing "Present" here is what made FS-8
+        # unreachable in production - see save_attendance(). The schedule
+        # decides, and what it decided is what goes on the overlay.
+        recorded = save_attendance(locked_id, subject)
 
-        if attendance_saved:
+        if recorded:
             context.recognized.add(locked_id)
             state.attendance_saved = True
+            state.attendance_status = recorded
 
             return (
                 locked_id,
                 locked_name,
-                "Present",
+                recorded,
                 state
             )
 
+        # `recorded` is a NotRecorded here - falsy, and carrying which of the
+        # three things went wrong (US-10).
         return (
             locked_id,
             locked_name,
-            "Not Enrolled",
+            recorded.value,
             state
         )
 
@@ -723,6 +1089,15 @@ def status_color(status):
     if status == "Present":
         return 0, 255, 0
 
+    # ⚠️ Late is *recorded*, not refused, and the colour has to say so. Without
+    # this branch it falls through to the final `return 0, 0, 255` - red, the
+    # same box a rejected face gets - so the first student the system ever
+    # marked Late would have been told on screen that recognition had failed.
+    # Amber: distinct from the green of an on-time mark, and distinct from the
+    # orange (0, 165, 255) used for "Not Enrolled" and the image-quality hints.
+    if status == "Late":
+        return 0, 215, 255
+
     if status.startswith("Verifying"):
         return 0, 255, 255
 
@@ -732,11 +1107,36 @@ def status_color(status):
     ):
         return 255, 255, 0
 
-    if status == "Not Enrolled":
+    # ⚠️ Actionable at the kiosk - orange, the colour the other hints use. The
+    # student is standing there and somebody can fix a class list.
+    if status in (
+        NotRecorded.NOT_IN_CLASS.value,
+        NotRecorded.UNKNOWN_STUDENT.value,
+    ):
         return 0, 165, 255
 
+    # ⚠️ **Red, and deliberately not orange.** This one is not a roster
+    # problem: the database was unreachable and nothing was written. Showing it
+    # in the same colour as "add them to the class list" is what US-10 was
+    # about - an outage that looks like paperwork does not get reported as an
+    # outage.
+    if status == NotRecorded.ERROR.value:
+        return 0, 0, 255
+
+    # ⚠️ Both of these are *instructions to a person the system has not given
+    # up on*, and neither may be red. Falling through to red is the FS-7 shape
+    # the Late branch above exists to prevent: "Look at the camera" in the
+    # same colour as a rejection tells the student recognition failed, at the
+    # exact moment they need to believe it is still working.
+    #
+    # "Hold still - looking for your face" is drawn on a track whose identity
+    # is still locked and whose liveness progress is intact - see
+    # process_confirmed_track(). Orange, the colour the other actionable hints
+    # already use.
     if (
-        "Move closer" in status
+        status.startswith("Hold still")
+        or status == "Look at the camera"
+        or "Move closer" in status
         or "blurry" in status.lower()
         or "dark" in status.lower()
         or "bright" in status.lower()
@@ -926,6 +1326,7 @@ def resolve_track_identity(
     face_landmarks,
     box,
     frame_width,
+    frame_height,
     claimed_student_ids
 ):
     """
@@ -970,12 +1371,28 @@ def resolve_track_identity(
         state.note_weak_prediction()
         return "Unknown", "Face detected", issue, state
 
+    # ⚠️ **An unconfirmed track makes no identity decision on a face that is
+    # not square-on**, and this is where the frontality check went when it was
+    # taken out of the tracking gate (see face_passes_geometry_gate).
+    #
+    # It has to sit above both branches below, not just the accumulation:
+    # adopting a completed identity re-locks the track and puts a mark on the
+    # screen, which is as much a decision as confirming one. What the two
+    # positions have in common is that the answer is about *who this is*, and
+    # this system does not answer that from a profile view.
+    #
+    # The face is still tracked, still boxed and still told what to do - which
+    # is the whole difference from dropping the frame.
+    if not face_is_frontal(face_landmarks, frame_width, frame_height, box):
+        state.note_weak_prediction()
+        return "Unknown", "Face detected", "Look at the camera", state
+
     # Only an unconfirmed track may inherit an identity that already
     # completed attendance. A confirmed track above can never be overwritten.
     if candidate_id is not None and candidate_id in context.recognized:
         state.adopt_completed_identity(candidate_id, candidate_name)
         claimed_student_ids.add(candidate_id)
-        return candidate_id, candidate_name, "Present", state
+        return candidate_id, candidate_name, state.recorded_status, state
 
     if not strong_prediction:
         state.note_weak_prediction()
@@ -1010,7 +1427,7 @@ def resolve_confirmed_track(
     if state.attendance_saved:
         if locked_id:
             claimed_student_ids.add(locked_id)
-        return locked_id, locked_name, "Present", state
+        return locked_id, locked_name, state.recorded_status, state
 
     if locked_id in claimed_student_ids:
         return locked_id, locked_name, "Duplicate identity blocked", state
@@ -1029,6 +1446,57 @@ def resolve_confirmed_track(
         claimed_student_ids.add(student_id)
 
     return student_id, student_name, status, state
+
+
+def describe_confirmation_block(blocker, verdict, first_time):
+    """
+    What to put under the box while a track is not confirming.
+
+    "Verifying 20/20 100%" is only useful while the numbers are still moving.
+    Once the window is full and agreeing, repeating it tells the operator
+    nothing about why nothing is happening - which is exactly the state a
+    student stood in while the confirmation bar sat below the recognition
+    threshold. These strings say which condition is unmet, and the two that a
+    person can actually do something about say what to do.
+
+    `distance` in particular is logged as well as drawn: it is the one that can
+    persist indefinitely without the picture looking wrong. `first_time` is
+    what keeps that to one line per stuck track instead of one per frame - at
+    roughly 7 fps the useful message would otherwise be the thing that buried
+    itself.
+    """
+    if blocker == "window":
+        return f"Verifying {verdict.history_count}/{PREDICTION_HISTORY_SIZE}"
+
+    if blocker == "agreement":
+        return (
+            f"Verifying {verdict.history_count}/{PREDICTION_HISTORY_SIZE} "
+            f"{verdict.agreement_ratio * 100:.0f}%"
+        )
+
+    if blocker == "distance":
+        if first_time:
+            logger.warning(
+            "Track will not confirm: %s matched %d/%d frames at %.0f%% "
+            "agreement, but the average distance %.1f is above the "
+                "confirmation bar %.1f. Nothing will be recorded for this "
+                "student until the match improves.",
+                verdict.dominant_id,
+                verdict.dominant_count,
+                verdict.history_count,
+                verdict.agreement_ratio * 100,
+                verdict.average_confidence,
+                TRACK_CONFIG.confirmation_confidence,
+            )
+        return "Match too weak - move closer / more light"
+
+    if blocker == "consecutive":
+        return "Hold still"
+
+    if blocker == "claimed":
+        return "Already recorded this session"
+
+    return "Verifying..."
 
 
 def accumulate_towards_confirmation(
@@ -1056,16 +1524,20 @@ def accumulate_towards_confirmation(
             state
         )
 
-    if not state.can_confirm(verdict, claimed_student_ids):
+    blocker = state.confirmation_blocker(verdict, claimed_student_ids)
+
+    if blocker is not None:
+        first_time = state.last_blocker != blocker
+        state.last_blocker = blocker
+
         return (
             "Unknown",
             "Verifying...",
-            (
-                f"Verifying {verdict.history_count}/{PREDICTION_HISTORY_SIZE} "
-                f"{verdict.agreement_ratio * 100:.0f}%"
-            ),
+            describe_confirmation_block(blocker, verdict, first_time),
             state
         )
+
+    state.last_blocker = None
 
     state.confirm(
         verdict.dominant_id,
@@ -1126,7 +1598,16 @@ def generate_frames(token):
     was RE-10, where one browser tab closing ended the session for everyone.
     """
     try:
-        yield from _stream_frames()
+        for part in _stream_frames():
+            # The heartbeat that lets an abandoned slot be reclaimed. The
+            # `finally` below is the tidy path and it is not reliable: a
+            # generator's `finally` runs when it is closed or collected, and
+            # for an MJPEG response whose browser has navigated away that is
+            # not prompt. Without this, the slot stayed held and the next
+            # `/video_feed` was refused with "already open in another window" -
+            # the relogin lockout.
+            session.note_viewer_frame(token)
+            yield part
     finally:
         session.release_viewer(token)
 
@@ -1207,6 +1688,7 @@ def _stream_frames():
                 face_landmarks=face_landmarks,
                 box=raw_box,
                 frame_width=frame_width,
+                frame_height=frame_height,
                 claimed_student_ids=claimed_student_ids
             )
 

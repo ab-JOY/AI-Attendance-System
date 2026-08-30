@@ -56,8 +56,10 @@ re-reading 55 MB of YAML on every one. It is no longer loaded at import.
 
 from __future__ import annotations
 
+import atexit
 import logging
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -65,6 +67,23 @@ from typing import Any
 from vision.tracking import DEFAULT_TRACK_CONFIG, FaceTracker, TrackConfig
 
 logger = logging.getLogger(__name__)
+
+# How long a viewer may hold the single stream slot without producing a frame
+# before another request may take it over.
+#
+# ⚠️ This exists because `generate_frames()` releases the slot in a `finally`,
+# and a generator's `finally` runs only when the generator is closed or
+# collected - which, for an MJPEG response under the development server, is not
+# prompt after a browser navigates away. Until it happened, `acquire_viewer()`
+# raised `SessionBusy` and the operator was told the stream was "already open
+# in another window" when no such window existed. Logging out and back in was
+# the reported symptom; nothing about the fresh login could clear it, because
+# the slot belongs to the process, not to the login.
+#
+# Generous on purpose: a live stream heartbeats on every frame, and the loop
+# runs at ~5 fps in the worst case measured. Anything that has produced no
+# frame for ten seconds is not streaming.
+VIEWER_STALE_SECONDS = 10.0
 
 
 class SessionBusy(RuntimeError):
@@ -126,7 +145,7 @@ class SessionSnapshot:
     """
 
     running: bool
-    subject: str | None
+    subject: Any
     reader: Any
     detector: Any
     recognizer: Any
@@ -147,9 +166,14 @@ class RecognitionSession:
         self,
         hooks: SessionHooks,
         config: TrackConfig = DEFAULT_TRACK_CONFIG,
+        clock: Callable[[], float] = time.monotonic,
+        register_exit_hook: Callable[[Callable[[], None]], Any] | None = None,
     ) -> None:
         self._hooks = hooks
         self._lock = threading.RLock()
+        self._clock = clock
+        self._register_exit_hook = register_exit_hook
+        self._exit_hook_registered = False
 
         self._tracker = FaceTracker(config=config)
 
@@ -162,11 +186,14 @@ class RecognitionSession:
         self._model_signature: Any = None
 
         self._running = False
-        self._subject: str | None = None
+        self._subject: Any = None
         self._recognized: set[str] = set()
 
         self._viewer: int | None = None
         self._next_viewer_token = 1
+        # When the current viewer last produced a frame. See
+        # VIEWER_STALE_SECONDS.
+        self._viewer_heartbeat_at = 0.0
 
     # -- introspection -----------------------------------------------------
 
@@ -176,7 +203,7 @@ class RecognitionSession:
             return self._running
 
     @property
-    def subject(self) -> str | None:
+    def subject(self) -> Any:
         with self._lock:
             return self._subject
 
@@ -207,15 +234,12 @@ class RecognitionSession:
         signature = self._hooks.model_signature()
 
         if signature is None:
-            logger.error(
-                "No trained model available, cannot start attendance"
-            )
+            logger.error("No trained model available, cannot start attendance")
             return False
 
         if signature == self._model_signature and self._recognizer is not None:
             logger.info(
-                "Model unchanged since it was last loaded, reusing it "
-                "(%d identities)",
+                "Model unchanged since it was last loaded, reusing it (%d identities)",
                 len(self._label_map),
             )
             return True
@@ -234,14 +258,18 @@ class RecognitionSession:
         self._label_map = label_map
         self._model_signature = signature
 
-        logger.info(
-            "Model loaded: %d student identities", len(label_map)
-        )
+        logger.info("Model loaded: %d student identities", len(label_map))
         return True
 
     # -- lifecycle ---------------------------------------------------------
 
-    def start(self, subject_code: str) -> bool:
+    # `subject_code` is `Any` rather than `str`: since Phase 4 the caller
+    # passes an ActiveSubject carrying subject_id and session_id, because a
+    # subjects row is a section offering and two sections can share a code.
+    # Nothing here interprets it - it is compared for equality, logged, and
+    # handed back in the snapshot - so this module still knows nothing about
+    # the schema.
+    def start(self, subject_code: Any) -> bool:
         """
         Begin a session for one subject. True if recognition can now run.
 
@@ -253,14 +281,11 @@ class RecognitionSession:
         with self._lock:
             if self._running:
                 if self._subject == subject_code:
-                    logger.info(
-                        "Attendance already running for %s", subject_code
-                    )
+                    logger.info("Attendance already running for %s", subject_code)
                     return True
 
                 logger.error(
-                    "Refusing to start %s: a session for %s is still "
-                    "running. End it first.",
+                    "Refusing to start %s: a session for %s is still running. End it first.",
                     subject_code,
                     self._subject,
                 )
@@ -281,6 +306,7 @@ class RecognitionSession:
 
                 self._capture = capture
                 self._reader = self._hooks.make_reader(capture)
+                self._ensure_released_at_exit()
 
             if self._detector is None:
                 self._detector = self._hooks.make_detector()
@@ -292,6 +318,68 @@ class RecognitionSession:
 
             logger.info("Attendance started for %s", subject_code)
             return True
+
+    def _ensure_released_at_exit(self) -> None:
+        """
+        Release the camera when the process ends, however it ends.
+
+        ⚠️ **This is the fix for the wedged camera.** Nothing released the
+        device on the way out: there was no `atexit` hook, no signal handler
+        and no shutdown path anywhere in `app.py`, and `logout()` is
+        `session.clear()`. So a session that was running when the process
+        stopped left `cv2.VideoCapture` open and the OS holding a claim on the
+        device. The next thing to ask for the camera - our app, the Windows
+        Camera app, anything - got a device that reported healthy and would not
+        open. Windows renders that as
+        `0xA00F429F<WindowShowFailed> (0x8007001F)`, which reads as a hardware
+        fault and is not one.
+
+        Registered on the first camera open rather than at construction, so a
+        session that never touches hardware never installs a hook, and
+        registered once - `atexit` keeps every registration it is given.
+
+        **What this does not cover, stated honestly:** `atexit` runs on a
+        normal exit and on Ctrl+C (which raises `KeyboardInterrupt` and unwinds
+        normally). It does **not** run when the process is killed outright -
+        `Stop-Process` without `-Force` already terminates rather than signals
+        on Windows, and `taskkill /F` never gives the process a say. Nothing in
+        userspace can cover that case; the OS is supposed to reclaim the
+        device, and a camera that stays wedged after a hard kill is a driver
+        problem, not this one.
+        """
+        if self._exit_hook_registered:
+            return
+
+        # Resolved here rather than as a parameter default, so that patching
+        # `atexit.register` actually takes effect - a default is bound once, at
+        # class-definition time, and would ignore the patch. The test suite
+        # relies on this: a fake session left running would otherwise install a
+        # real process-exit hook that logs after pytest has closed its capture
+        # streams.
+        register = self._register_exit_hook or atexit.register
+        register(self._release_at_exit)
+        self._exit_hook_registered = True
+
+    def _release_at_exit(self) -> None:
+        """
+        The `atexit` callback. Never raises - the interpreter is shutting down.
+
+        Deliberately quiet when there is nothing to release, because it runs on
+        every exit of any process that ever opened a camera, including a test
+        run that finished tidily.
+        """
+        try:
+            with self._lock:
+                if self._capture is None and self._reader is None:
+                    return
+
+            logger.info("Releasing the camera on process exit - a session was still running.")
+            self.stop()
+
+        except Exception:
+            # Logging may already be torn down at this point, so this must not
+            # be allowed to turn a clean exit into a traceback.
+            pass
 
     def stop(self) -> None:
         """
@@ -345,20 +433,47 @@ class RecognitionSession:
         """
         with self._lock:
             if not self._running:
-                raise SessionNotRunning(
-                    "no attendance session is running"
-                )
+                raise SessionNotRunning("no attendance session is running")
 
             if self._viewer is not None:
-                raise SessionBusy(
-                    "the camera stream is already open in another window"
+                idle = self._clock() - self._viewer_heartbeat_at
+
+                # A slot whose holder has produced no frame for this long is
+                # an abandoned generator, not a live stream. Taking it over is
+                # safe *because* it is not streaming: the single-viewer
+                # invariant is about two generators advancing the tracker at
+                # once, and one that has stopped iterating advances nothing.
+                # `release_viewer()` already ignores a token that is no longer
+                # current, so the old generator cannot evict its replacement
+                # when it is finally collected.
+                if idle < VIEWER_STALE_SECONDS:
+                    raise SessionBusy("the camera stream is already open in another window")
+
+                logger.warning(
+                    "Taking over the stream slot from viewer %s: no frame for "
+                    "%.1f s, so it is an abandoned stream rather than a live "
+                    "one.",
+                    self._viewer,
+                    idle,
                 )
 
             self._viewer = self._next_viewer_token
             self._next_viewer_token += 1
+            self._viewer_heartbeat_at = self._clock()
 
             logger.info("Video stream opened (viewer %s)", self._viewer)
             return self._viewer
+
+    def note_viewer_frame(self, token: int) -> None:
+        """
+        Record that this viewer is still streaming. Called once per frame.
+
+        Cheap and lock-guarded; the alternative is a slot that can only be
+        freed by garbage collection.
+        """
+        with self._lock:
+            if self._viewer == token:
+                self._viewer_heartbeat_at = self._clock()
 
     def release_viewer(self, token: int) -> None:
         """

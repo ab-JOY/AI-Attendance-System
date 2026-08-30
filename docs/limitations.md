@@ -80,22 +80,30 @@ derived from any error-rate analysis. A unit test asserts it so it cannot drift
 on a hunch. The only legitimate reason to change it is a threshold re-derived
 from a DET curve on a proper open-set evaluation — planned, see §5.
 
-### 1.5 Dataset folders are named `{student_id}_{student_name}`
+### 1.5 Dataset folders are named `{student_id}` ✅ *resolved, Phase 5*
 
-The trained model's label file maps each label to that folder name, so the
-naming scheme is baked into the model artefact. Two consequences:
+**This section described a limitation that no longer exists.** It is kept
+because the original wording is quoted in earlier handovers, and because the
+constraint it left behind is still real.
 
-- **Student IDs may not contain underscores.** Both readers split the folder
-  name on the *first* underscore, so an ID containing one would silently move
-  part of the ID into the name and corrupt the mapping.
-- **Renaming a student in the database without renaming their folder breaks
-  their record** — deletion, editing and recapture all stop working for that
-  student. The system now fails loudly rather than acting on the wrong folder,
-  but it still fails.
+Folders were `dataset/{student_id}_{student_name}` and the model's label file
+mapped each label to that folder name, which made a student's *display name*
+part of the model artefact. Renaming a student in the database without renaming
+their folder broke deletion, editing and recapture for them; the system failed
+loudly rather than acting on the wrong folder, but it still failed.
 
-Replacing the scheme with a surrogate key would fix this. It was considered and
-deliberately deferred, because it requires migrating existing dataset folders
-and retraining the model, and Phase 2's remit was security.
+The folder is now the student ID alone, `labels.txt` is `{label},{student_id}`,
+and the display name is read from the `students` table at model load. Renaming
+a student touches one row. Existing installations migrate with
+`python scripts/rename_dataset_folders.py --apply` followed by a retrain; the
+migration was applied to this deployment on 2026-08-16 and held-out accuracy
+was re-measured at **60/60, average distance 34.95** — unchanged.
+
+**One rule survives it: student IDs may not contain underscores.** The reason
+changed rather than disappeared. It used to be that both readers split on the
+first underscore; now it is that a machine which has not run the rename still
+holds old-format folders, against which an ID containing `_` is ambiguous. Real
+IDs look like `23-1-1-0559`.
 
 ### 1.6 Browser-based face capture requires HTTPS
 
@@ -305,26 +313,44 @@ They are never enrolled, but their face is still captured and processed.
 
 ---
 
-## 6. Functional gaps still outstanding
+## 6. Functional gaps
 
-These are defects, not design decisions. All are scheduled.
+> ⚠️ **Revised 2026-08-16.** This section was written during the Phase 0 audit
+> and listed nine gaps as outstanding. **Eight of them have since been closed**,
+> and it had not been updated — so a reader was being told the system could not
+> record an absence, count a dashboard, or correct a mistake, all of which it
+> does. The closed items are kept below rather than deleted, because the
+> write-up needs the before as well as the after.
+
+### 6.1 Still outstanding
 
 | Gap | Effect |
 |---|---|
-| No student↔subject relation in the schema | Ending a session marks *every student in the database* absent for that subject, including students who do not take it |
-| Absences are never saved | The end-of-session screen and the reports screen disagree, permanently: reports always show zero absences because nothing writes them |
-| The dashboard is not wired up | Its four counters are hardcoded zeros in the template |
-| No late policy | Every recorded attendance is "Present", although the schedule has start and end times |
-| No attendance correction screen | An instructor cannot fix a missed recognition |
-| Excel export ignores the report filters | Always exports the whole table to a fixed filename |
-| Model loading blocks application startup | Roughly 9 seconds, and it happens again at the start of every session |
-| Training runs inside the web request | The browser waits, with no progress indication |
-| Liveness detection is defeatable by a video replay | The check is one of two fixed head poses with no depth, texture or blink component, so a phone playing a recording of an enrolled student passes it |
+| **Liveness is defeatable by a video replay** | The check is two fixed head poses with no depth, texture or blink component, so a phone playing a recording of an enrolled student passes it |
+| No consent record in the schema | Consent is collected on paper (§0.1 of the UAT manual). Nothing in the database records that it was given, or allows it to be withdrawn |
+| No encryption at rest for `dataset/` and `trainer/` | Face images and the templates derived from them sit on disk in the clear |
+| No automated retention or erasure | Deleting a student is a manual, multi-step process; nothing expires on its own |
+| Still the Flask development server | TLS is configured on it, which is not the same as a WSGI server behind a reverse proxy |
 
-The last one deserves its own sentence in any section that claims
+The first one deserves its own sentence in any section that claims
 anti-spoofing: **the current liveness check raises the effort required to spoof
 the system; it does not prevent it.** Overstating this is the kind of claim an
 examiner can disprove in the room with a phone.
+
+### 6.2 Closed since this section was written
+
+Listed with the finding ID, so the write-up can trace each one.
+
+| Gap as originally recorded | Closed by |
+|---|---|
+| No student↔subject relation in the schema — ending a session marked *every student in the database* absent | **FS-3**, migration 002 (`enrolments`) and the Class List screen |
+| Absences are never saved — reports always showed zero | **FS-4**. The absent register is written when a session ends, scoped to the class list |
+| The dashboard is not wired up — four hardcoded zeros | **FS-5** |
+| No late policy — every recorded attendance is "Present" | **FS-8**, migration 005. ⚠️ **And genuinely only true from 2026-08-16:** the derivation was implemented in Phase 4 but the recognition path passed a hardcoded `"Present"`, so it could not run. See R2 in `tasks/review-phase-5.md` |
+| No attendance correction screen | **FS-10**, migration 006 — with an audit row, so no correction is anonymous |
+| Excel export ignores the report filters | **FS-11**. It also no longer leaves a copy of the register on disk (**PE-8**) |
+| Model loading blocks application startup — roughly 9 seconds | **PE-4**. Nothing loads at import; the model is re-read only when the file on disk changes |
+| Training runs inside the web request | Background job with a progress endpoint |
 
 ---
 

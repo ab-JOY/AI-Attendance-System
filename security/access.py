@@ -100,6 +100,22 @@ def required_roles(view: Callable | None) -> frozenset[str]:
     return getattr(view, _ROLES_ATTR, frozenset())
 
 
+def wants_json(view: Callable | None) -> bool:
+    """
+    Whether this view was marked `@json_api`.
+
+    ⚠️ **Read by the error handlers as well as by the access hook**, and that
+    is the point of it being a function here rather than a `getattr` at one
+    call site. The marker used to be consulted only when a *request was
+    refused* - 401 and 403 - so a JSON route that **faulted** answered with
+    `error.html`, and `fetch()` was handed markup to `JSON.parse`. The caller
+    saw a syntax error where a message should have been. See web/errors.py.
+    """
+    if view is None:
+        return False
+    return bool(getattr(view, _JSON_ATTR, False))
+
+
 def install_access_control(
     app: Flask,
     *,
@@ -141,7 +157,7 @@ def install_access_control(
 
         view = app.view_functions.get(endpoint)
         access = classify(view)
-        is_json = bool(view is not None and getattr(view, _JSON_ATTR, False))
+        is_json = wants_json(view)
 
         if access is None:
             # Fail closed. An unclassified route is a mistake, and serving it

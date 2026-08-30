@@ -72,6 +72,20 @@ READ_FAILURE_BACKOFF_SECONDS = 0.02
 # usual case is immediate.
 DEFAULT_READ_TIMEOUT_SECONDS = 1.0
 
+# How many consecutive failed reads mean the camera has stopped delivering
+# rather than glitched. At READ_FAILURE_BACKOFF_SECONDS this is about two
+# seconds.
+#
+# ⚠️ `_read_failures` was counted from the day this class was written and
+# **nothing ever read it** - the property below had no caller anywhere in the
+# codebase. A camera that died mid-session therefore produced a silent,
+# permanent stall: `read()` returned `(False, None)`, the recognition loop
+# `continue`d, and not one line was written anywhere. The operator saw a frozen
+# picture and had nothing to go on. That is the same "code that looks like it
+# works" shape as CAM-1 and PE-0, so the counter now has a threshold and says
+# so once.
+READ_FAILURE_WARN_AFTER = 100
+
 
 class CameraReader:
     """
@@ -107,6 +121,12 @@ class CameraReader:
         self._frames_delivered = 0
         self._read_failures = 0
 
+        # Consecutive failures, as opposed to the lifetime total above. A
+        # camera that drops one frame an hour is healthy; one that has failed
+        # the last 100 reads in a row is gone.
+        self._consecutive_read_failures = 0
+        self._stall_reported = False
+
         self._thread = threading.Thread(
             target=self._reader,
             name="camera-reader",
@@ -125,6 +145,29 @@ class CameraReader:
             if not ret or frame is None:
                 with self._condition:
                     self._read_failures += 1
+                    self._consecutive_read_failures += 1
+                    # Logged outside the lock, and only on the transition -
+                    # this loop runs 50 times a second while the camera is
+                    # down, and a line per iteration would bury the one that
+                    # matters.
+                    report_stall = (
+                        not self._stall_reported
+                        and self._consecutive_read_failures >= READ_FAILURE_WARN_AFTER
+                    )
+
+                    if report_stall:
+                        self._stall_reported = True
+                        failures = self._consecutive_read_failures
+
+                if report_stall:
+                    logger.error(
+                        "The camera has stopped delivering frames: %d "
+                        "consecutive failed reads. It was unplugged, taken by "
+                        "another application, or its driver has stopped "
+                        "responding. Recognition will show a frozen picture "
+                        "until it returns or the session is ended.",
+                        failures,
+                    )
 
                 # The brake that PE-6 is really about. Without it an
                 # unplugged camera burns a core for the rest of the session.
@@ -132,10 +175,16 @@ class CameraReader:
                 continue
 
             with self._condition:
+                recovered = self._stall_reported
+                self._stall_reported = False
+                self._consecutive_read_failures = 0
                 self._frame = frame
                 self._sequence += 1
                 self._frames_captured += 1
                 self._condition.notify_all()
+
+            if recovered:
+                logger.info("The camera is delivering frames again.")
 
             remaining = self._min_interval - (self._clock() - started_at)
 
@@ -155,10 +204,7 @@ class CameraReader:
         with self._condition:
             if self._sequence == self._last_delivered and self._running:
                 self._condition.wait_for(
-                    lambda: (
-                        self._sequence != self._last_delivered
-                        or not self._running
-                    ),
+                    lambda: self._sequence != self._last_delivered or not self._running,
                     timeout=timeout,
                 )
 
@@ -214,6 +260,23 @@ class CameraReader:
     def read_failures(self) -> int:
         with self._condition:
             return self._read_failures
+
+    @property
+    def consecutive_read_failures(self) -> int:
+        with self._condition:
+            return self._consecutive_read_failures
+
+    @property
+    def is_delivering(self) -> bool:
+        """
+        False once the camera has missed `READ_FAILURE_WARN_AFTER` reads in a
+        row - i.e. it has stopped producing pictures rather than glitched.
+
+        Exposed so a caller can tell "no face in shot" from "no camera", which
+        are the same thing on screen and nothing alike in cause.
+        """
+        with self._condition:
+            return self._consecutive_read_failures < READ_FAILURE_WARN_AFTER
 
     @property
     def is_running(self) -> bool:

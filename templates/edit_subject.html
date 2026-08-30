@@ -1,41 +1,13 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Edit Subject</title>
+{% extends "base.html" %}
 
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
-</head>
+{% block title %}Edit Subject{% endblock %}
 
-<body>
-
-<!-- ================= SIDEBAR ================= -->
-<div class="sidebar">
-
-    <h2>AI Attendance</h2>
-
-    <ul>
-        <li><a href="/dashboard">Dashboard</a></li>
-        <li><a href="/students">Students</a></li>
-        <li><a href="/manage_students">Manage Students</a></li>
-        <li><a href="/subjects">Subjects</a></li>
-        <li><a href="/attendance">Attendance</a></li>
-        <li><a href="/reports">Reports</a></li>
-        <li><a href="/settings">Settings</a></li>
-        <li><a href="/logout">Logout</a></li>
-    </ul>
-
-</div>
-
-<!-- ================= MAIN CONTENT ================= -->
-<div class="main-content">
-
+{% block content %}
     <h1>Edit Subject</h1>
 
     <div class="form-container">
 
-        <form action="{{ url_for('update_subject', id=subject.id) }}" method="POST">
+        <form action="{{ url_for('subjects.update_subject', id=subject.id) }}" method="POST">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
 
@@ -111,11 +83,7 @@
 
         <br>
 
-        <a href="{{ url_for('subjects') }}" class="back-btn">← Back to Subjects</a>
+        <a href="{{ url_for('subjects.subjects') }}" class="back-btn">← Back to Subjects</a>
 
     </div>
-
-</div>
-
-</body>
-</html>
+{% endblock %}

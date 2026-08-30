@@ -7,6 +7,7 @@ import numpy as np
 
 from config.settings import settings
 from face_preprocessing import preprocess_for_lbph
+from security.paths import UnsafeStudentPathError, validate_student_id
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,29 @@ VALID_IMAGE_EXTENSIONS = (
     ".png"
 )
 
+# Where scripts/rename_dataset_folders.py parks a pre-migration folder whose
+# contents are byte-identical to the folder it would have been renamed onto.
+# It lives inside dataset/ so the images stay under the one gitignored path,
+# and it is named with a leading underscore so validate_student_id can never
+# accept it as a student ID. Skipped by name below rather than left to fall
+# through as an "invalid dataset folder", which would warn on every run about
+# something this project put there on purpose.
+QUARANTINE_DIR_NAME = "_migrated_duplicates"
+
+# The phrase that marks a *partial* success in train_model()'s returned
+# message: a model was written, and at least one student is missing from it.
+#
+# ⚠️ A constant rather than a literal in two places, because two places is
+# exactly how this stops working. `train_model()` returns `(bool, str)` and
+# `infra.jobs.BackgroundJob` unpacks precisely two values, so the CLI cannot
+# be given a structured list of skipped students without changing a contract
+# the web application depends on. It therefore has to read the message - and
+# a message read by code is an interface, not prose. Reword it here and the
+# CLI follows; reword it in only one of the two and
+# `test_train_model_skips.py` fails rather than the deploy silently going
+# back to exiting 0 on a shrinking roster (D1).
+SKIPPED_MARKER = "Skipped (too few images, not recognisable): "
+
 
 # =====================================================
 # HELPERS
@@ -73,30 +97,51 @@ VALID_IMAGE_EXTENSIONS = (
 
 def parse_dataset_folder(folder_name):
     """
-    Expected format:
-        student_id_student_name
+    Return the student ID a dataset folder belongs to, or None.
+
+    A folder is named for the student's ID and nothing else. It used to be
+    `{student_id}_{student_name}` and this function split on the first
+    underscore; todo.md §7.5 removed the name, because a display name that is
+    load-bearing for storage means renaming a student orphans their images.
+
+    Validation is `security.paths.validate_student_id` rather than a second
+    rule written here - the module that decides what may become a path is the
+    module that decides what a folder name may be.
     """
+    try:
+        return validate_student_id(folder_name)
+    except UnsafeStudentPathError:
+        return None
 
-    parts = folder_name.split(
-        "_",
-        1
+
+def looks_like_a_pre_migration_folder(folder_name):
+    """
+    True for a folder still named `{student_id}_{student_name}`.
+
+    Worth telling apart from any other unusable name: it means this checkout
+    is newer than its `dataset/`, and the fix is a documented one-line command
+    rather than a mystery. Without this, a machine that pulled the change and
+    never ran the rename would see "no valid student dataset folders" and have
+    to work out why.
+    """
+    student_id, separator, remainder = folder_name.partition("_")
+
+    return bool(
+        separator
+        and remainder.strip()
+        and parse_dataset_folder(student_id) is not None
     )
-
-    if len(parts) != 2:
-        return None
-
-    student_id = parts[0].strip()
-    student_name = parts[1].strip()
-
-    if not student_id or not student_name:
-        return None
-
-    return student_id, student_name
 
 
 def write_model_atomically(recognizer, label_dict):
     """
     Writes trainer.yml and labels.txt as an all-or-nothing pair.
+
+    `label_dict` maps LBPH label -> student ID, and each line of labels.txt is
+    `{label},{student_id}`. It used to be `{label},{student_id}_{name}`;
+    the name is now read from the `students` table by
+    `recognize_face.load_model_and_labels()`, so a rename cannot leave the
+    overlay showing a stale one (todo.md §7.5).
 
     Both files are written to temporary paths first, so a failure
     part-way through can never destroy the model that is currently
@@ -126,9 +171,9 @@ def write_model_atomically(recognizer, label_dict):
             "w",
             encoding="utf-8"
         ) as labels_file:
-            for label, folder_name in label_dict.items():
+            for label, student_id in label_dict.items():
                 labels_file.write(
-                    f"{label},{folder_name}\n"
+                    f"{label},{student_id}\n"
                 )
 
     except Exception:
@@ -203,6 +248,7 @@ def train_model(report=None):
 
     folder_records = []
     student_id_to_folders = {}
+    pre_migration_folders = []
 
     for folder_name in sorted(
         os.listdir(DATASET_DIR)
@@ -215,24 +261,30 @@ def train_model(report=None):
         if not os.path.isdir(folder_path):
             continue
 
-        parsed = parse_dataset_folder(
-            folder_name
-        )
-
-        if parsed is None:
-            logger.warning(
-                "Ignoring invalid dataset folder: %s", folder_name
+        if folder_name == QUARANTINE_DIR_NAME:
+            logger.info(
+                "Skipping the migration quarantine folder: %s", folder_name
             )
             continue
 
-        student_id, student_name = parsed
+        student_id = parse_dataset_folder(
+            folder_name
+        )
+
+        if student_id is None:
+            if looks_like_a_pre_migration_folder(folder_name):
+                pre_migration_folders.append(folder_name)
+            else:
+                logger.warning(
+                    "Ignoring invalid dataset folder: %s", folder_name
+                )
+            continue
 
         folder_records.append(
             {
                 "folder_name": folder_name,
                 "folder_path": folder_path,
-                "student_id": student_id,
-                "student_name": student_name
+                "student_id": student_id
             }
         )
 
@@ -240,6 +292,26 @@ def train_model(report=None):
             student_id,
             []
         ).append(folder_name)
+
+    # ⚠️ Named separately from any other unusable folder, and refused rather
+    # than ignored. Training on whatever *did* parse would quietly produce a
+    # model missing every student whose folder still carries a name - a model
+    # that loads, runs, and cannot recognise them.
+    if pre_migration_folders:
+        logger.error(
+            "%d dataset folder(s) still use the old {student_id}_{name} "
+            "naming: %s",
+            len(pre_migration_folders),
+            ", ".join(pre_migration_folders),
+        )
+        logger.error(
+            "Run: python scripts/rename_dataset_folders.py --apply"
+        )
+        return False, (
+            f"{len(pre_migration_folders)} dataset folder(s) still use the "
+            "old naming. Run scripts/rename_dataset_folders.py --apply, then "
+            "train again."
+        )
 
     duplicate_student_ids = {
         student_id: folders
@@ -371,7 +443,11 @@ def train_model(report=None):
             skipped_folders.append(folder_name)
             continue
 
-        label_dict[current_label] = folder_name
+        # The student ID, not the folder name. They are the same string today
+        # and this line is what keeps that an implementation detail: labels.txt
+        # is a map from LBPH label to *student ID*, and the recognition side
+        # looks the display name up in the database from it.
+        label_dict[current_label] = record["student_id"]
 
         faces.extend(
             student_faces
@@ -441,10 +517,10 @@ def train_model(report=None):
     logger.info("Trainer: %s (%s bytes)", TRAINER_FILE, f"{trainer_size:,}")
     logger.info("Labels : %s", LABELS_FILE)
 
-    for label, folder_name in (
+    for label, student_id in (
         label_dict.items()
     ):
-        logger.info("  label %s -> %s", label, folder_name)
+        logger.info("  label %s -> student %s", label, student_id)
 
     if skipped_folders:
         logger.warning(
@@ -456,7 +532,7 @@ def train_model(report=None):
     if skipped_folders:
         return True, (
             f"Training completed for {len(label_dict)} student(s). "
-            f"Skipped (too few images, not recognisable): "
+            + SKIPPED_MARKER
             + ", ".join(skipped_folders)
         )
 
@@ -467,9 +543,43 @@ if __name__ == "__main__":
     # Entry point, so this process owns logging configuration. When
     # train_model() is called from app.py instead, app.py has already
     # configured logging and this block never runs.
+    #
+    # ⚠️ **Nothing in the web application reaches this block.** The Train
+    # Model button and the post-enrolment retrain both go through
+    # services.training.training_job, which calls train_model() directly. This
+    # is the CLI contract only - which is precisely who needed fixing, because
+    # the CLI is what a deploy runs.
+    from config.exit_codes import EXIT_FAILURE, EXIT_INCOMPLETE, EXIT_SUCCESS
     from config.logging_config import configure_logging
 
     configure_logging()
 
-    success, msg = train_model()
-    sys.exit(0 if success else 1)
+    # ⚠️ **D1: `msg` used to be unpacked and then dropped on the floor**, and
+    # the exit status was `0 if success else 1`. `train_model()` returns True
+    # for a run that trained four students and skipped a fifth, so a deploy
+    # that retrains on every version update and gates on the exit status saw
+    # an unqualified pass while its roster silently shrank. The skipped names
+    # were on stdout - as a WARNING, the last line of the run - but nothing
+    # automated reads prose, and the one machine-readable signal said "fine".
+    #
+    # This is FS-12 at a second entry point; see config/exit_codes.py.
+    success, message = train_model()
+
+    if not success:
+        logger.error("%s", message)
+        sys.exit(EXIT_FAILURE)
+
+    incomplete = SKIPPED_MARKER in message
+
+    if incomplete and "--allow-incomplete" not in sys.argv:
+        logger.error("%s", message)
+        logger.error(
+            "Exiting %d: students are missing from the model. Recapture them "
+            "and train again, or pass --allow-incomplete to accept this "
+            "roster.",
+            EXIT_INCOMPLETE,
+        )
+        sys.exit(EXIT_INCOMPLETE)
+
+    logger.info("%s", message)
+    sys.exit(EXIT_SUCCESS)

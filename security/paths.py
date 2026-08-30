@@ -14,22 +14,31 @@ places in app.py and once in capture_dataset.py, each free to drift.
 
 Three defences, in order, and all three matter:
 
-1. **Allowlist the ID and the name at the boundary.** Reject rather than
-   quietly rewrite, so an operator who types something unusable is told,
-   instead of finding an empty folder later.
+1. **Allowlist the ID at the boundary.** Reject rather than quietly rewrite,
+   so an operator who types something unusable is told, instead of finding an
+   empty folder later.
 2. **Resolve the path and prove containment.** Even if the allowlist is ever
    widened, a path that leaves `dataset/` is refused. Belt and braces: the
    allowlist is the rule, containment is the proof.
-3. **One function, both sides.** app.py and capture_dataset.py call
-   `student_dataset_path()`, so enrolment and management can no longer
-   disagree about where a folder is.
+3. **One function, every side.** Enrolment, management and the store all call
+   `student_dataset_path()`, so nothing can disagree about where a folder is.
 
-The folder format is unchanged - `{student_id}_{student_name}` - so
-`train_model.parse_dataset_folder()`, `recognize_face.load_model_and_labels()`
-and the existing trained model all keep working. Replacing the format with a
-surrogate key would also fix the "renaming a student orphans the folder"
-coupling, but it needs a dataset migration and a retrain, so it is out of
-scope here (see tasks/handover-phase-1.md 1.6).
+**The folder is `dataset/{student_id}`, and the name is not part of it
+(Phase 5, todo.md §7.5).** It used to be `{student_id}_{student_name}`, which
+made a student's *display name* load-bearing for their data: renaming
+`Jose Cruz` to `Jose C. Cruz` in the database left the folder behind, and
+delete, edit and recapture then silently operated on a path with nothing at
+it. The record and the storage location are now coupled only through the key
+that cannot change.
+
+Two consequences worth knowing before touching this:
+
+* `trainer/labels.txt` stores `label,student_id`, so the display name on the
+  recognition overlay comes from the `students` table, not from the filesystem
+  (`recognize_face.load_model_and_labels()`).
+* `validate_student_name()` is still here and still used. Names are stored and
+  rendered even though they no longer become paths, and the allowlist is what
+  keeps a hostile one out of the database in the first place.
 """
 
 from __future__ import annotations
@@ -44,12 +53,13 @@ from config.settings import settings
 # a usability bug dressed as a security control (see US-1/US-5).
 _NAME_EXTRA_CHARS = frozenset(" .'-")
 
-# Underscore is excluded from student IDs, and this is load-bearing rather
-# than cautious. The folder is `{id}_{name}` and both
-# train_model.parse_dataset_folder() and
-# recognize_face.load_model_and_labels() split on the *first* underscore. An
-# ID containing one would silently reassign part of the ID to the name and
-# corrupt the label map.
+# Underscore is excluded from student IDs. It was load-bearing under the old
+# `{id}_{name}` folder scheme, where an underscore in the ID would silently
+# reassign part of it to the name and corrupt the label map. That scheme is
+# gone, but the restriction stays: `dataset/` still holds folders written under
+# the old convention on machines that have not run the rename, and an ID
+# containing `_` would be ambiguous against them. Real IDs look like
+# `23-1-1-0559`; nothing legitimate needs it.
 _ID_EXTRA_CHARS = frozenset("-")
 
 MAX_ID_LENGTH = 64
@@ -106,12 +116,45 @@ def validate_student_name(name: str | None) -> str:
     deployed in the Philippines and an ASCII-only rule would reject real
     students. Path separators, control characters and the Windows-reserved
     set are all non-alphanumeric and therefore refused.
+
+    ⚠️ **A name may end in a period, and that was a real rejection.** Reported
+    by the user 2026-08-29: `Juan Dela Cruz Jr.` was refused, and with it every
+    `Jr.` and `Sr.` - the two commonest suffixes in Filipino names.
+
+    Measured rather than assumed: the rule was on the **last** character, so
+    `Ma. Teresa Santos` and `Jose P. Rizal` were always accepted. A name is
+    refused only when the period ends it, which is exactly the suffix case.
+
+    The rule that refused them was correct **when it was written and is not
+    now.** Under the old `dataset/{student_id}_{student_name}` scheme the name
+    was a path component, and Windows silently strips trailing dots from those:
+    `Jose Jr.` would have been created as `Jose Jr` and never found again by a
+    lookup that rebuilt the path from the database. Phase 5 made the folder
+    `dataset/{student_id}` - see this module's header - so **the name has not
+    been part of any path since**, and the rule went on rejecting real students
+    to protect a filesystem behaviour nothing here can reach any more.
+
+    What replaces it is a rule about names rather than about paths: a name has
+    to contain at least one letter or digit. That refuses `.`, `..` and `...`,
+    which are the only inputs the old check was still usefully catching, and it
+    refuses them because they are not names.
+
+    ⚠️ **`validate_student_id()` still refuses a trailing dot, and must.** An
+    ID *is* the folder name. Do not "make the two consistent".
     """
     if name is None:
         raise UnsafeStudentPathError("Student name is required.")
 
-    # Normalise so that visually identical names cannot resolve to two
-    # different folders depending on how they were typed.
+    # Normalise so that two visually identical names are one value however
+    # they were typed - `Peña` composed and decomposed are different strings
+    # that render the same, and a search or a duplicate check would disagree
+    # with the operator's eyes.
+    #
+    # ⚠️ The reason used to be stated as "cannot resolve to two different
+    # folders", which stopped being true with the §7.5 migration. The rule is
+    # still right; only its justification had expired. That is exactly how the
+    # trailing-period rule above survived long enough to reject `Jr.` - see
+    # lessons.md L30 - so it is restated here rather than left to rot.
     value = unicodedata.normalize("NFC", name).strip()
 
     if not value:
@@ -132,40 +175,44 @@ def validate_student_name(name: str | None) -> str:
             f"periods, hyphens and apostrophes. {character!r} is not allowed."
         )
 
-    # Windows silently strips trailing dots and spaces from path components,
-    # so `Jose Jr.` would be created as `Jose Jr` and then never found again
-    # by a lookup that rebuilt the name from the database. Refuse instead of
-    # producing a folder whose name does not match the record.
-    if value[-1] in ". ":
+    # A string of punctuation is not a name. This is what stops `.`, `..` and
+    # `...` - which the allowlist above permits, since a period is a legitimate
+    # character inside a name - without saying anything about filesystems.
+    if not any(character.isalnum() for character in value):
         raise UnsafeStudentPathError(
-            "Student name may not end with a period or a space."
+            "Student name must contain at least one letter or digit."
         )
 
     return value
 
 
-def student_folder_name(student_id: str | None, name: str | None) -> str:
-    """Validated `{student_id}_{student_name}` folder name."""
-    return f"{validate_student_id(student_id)}_{validate_student_name(name)}"
+def student_folder_name(student_id: str | None) -> str:
+    """
+    Validated `{student_id}` folder name.
+
+    ⚠️ This took a `name` argument until Phase 5 and returned
+    `{student_id}_{name}`. If you are reading a caller that still passes two
+    arguments, it is out of date - the name never belonged in a path.
+    """
+    return validate_student_id(student_id)
 
 
 def student_dataset_path(
     student_id: str | None,
-    name: str | None,
     dataset_dir: Path | None = None,
 ) -> Path:
     """
     Absolute path to a student's dataset folder, proven to be inside
     `dataset/`.
 
-    Raises UnsafeStudentPathError if the ID or name is not acceptable, or if
-    the resolved path is anything other than a direct child of the dataset
+    Raises UnsafeStudentPathError if the ID is not acceptable, or if the
+    resolved path is anything other than a direct child of the dataset
     directory. Call this before any rmtree, rename or makedirs - it is the
     only sanctioned way to build one of these paths.
     """
     base = (dataset_dir if dataset_dir is not None else settings.dataset_dir).resolve()
 
-    folder_name = student_folder_name(student_id, name)
+    folder_name = student_folder_name(student_id)
     candidate = (base / folder_name).resolve()
 
     # `parent` rather than `is_relative_to`: a dataset folder is always a
@@ -184,3 +231,47 @@ def student_dataset_path(
         )
 
     return candidate
+
+
+def student_staging_path(
+    student_id: str | None,
+    staging_dir: Path | None = None,
+) -> Path:
+    """
+    Absolute path to a student's *in-progress* capture folder.
+
+    Browser enrolment writes here and the folder is promoted into `dataset/`
+    only when it is complete (FS-9). Same containment proof as
+    `student_dataset_path()`, against the staging root instead - the images
+    arriving here come from an HTTP request, so this is if anything the more
+    exposed of the two.
+    """
+    base = (
+        staging_dir if staging_dir is not None else settings.dataset_staging_dir
+    ).resolve()
+
+    return student_dataset_path(student_id, dataset_dir=base)
+
+
+def student_image_path(folder: Path, index: int, total: int) -> Path:
+    """
+    Absolute path to image `index` inside an already-validated `folder`.
+
+    ⚠️ **The index is never taken from a request.** Browser enrolment posts a
+    frame and the server decides which image number it is, from a counter it
+    owns. Accepting a client-supplied filename - or a client-supplied index -
+    would hand an authenticated caller a write primitive pointed at a path
+    this module exists to constrain.
+
+    `total` is passed rather than assumed so the bound is the plan's, not a
+    constant that could drift from it.
+    """
+    if not isinstance(index, int) or isinstance(index, bool):
+        raise UnsafeStudentPathError(f"Image index must be an integer, got {index!r}")
+
+    if not 1 <= index <= total:
+        raise UnsafeStudentPathError(
+            f"Image index {index} is outside 1..{total}"
+        )
+
+    return folder / f"{index}.jpg"

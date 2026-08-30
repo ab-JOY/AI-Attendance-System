@@ -17,14 +17,15 @@
   coloured dot is decoration.
 #}
 
-<div class="form-container" id="training-panel" style="margin-top:30px;">
+<section
+    class="form-container training-panel"
+    id="training-panel"
+    data-status-url="{{ url_for('enrolment.train_status') }}"
+    data-start-url="{{ url_for('enrolment.train_model_route') }}">
 
-    <h2 style="margin-top:0;">Face recognition model</h2>
+    <h2>Face recognition model</h2>
 
-    <p id="training-status"
-       role="status"
-       aria-live="polite"
-       style="margin:8px 0;">
+    <p id="training-status" role="status" aria-live="polite">
         Checking…
     </p>
 
@@ -32,115 +33,17 @@
         Retrain model
     </button>
 
-    <p style="font-size:0.85em; color:#555; margin-bottom:0;">
+    <p class="hint">
         Retraining rebuilds the model from every enrolled student's images.
         Students who were added or recaptured are only recognised once it has
         finished.
     </p>
 
-</div>
+</section>
 
-<script>
-(function () {
-    "use strict";
+{#
+    Loaded by the including page rather than here: an include that carries its
+    own <script src> would load the file twice on any page that used the panel
+    twice, and there is no reason to make that possible.
+#}
 
-    var CSRF_TOKEN = "{{ csrf_token() }}";
-    var STATUS_URL = "{{ url_for('train_status') }}";
-    var START_URL  = "{{ url_for('train_model_route') }}";
-
-    var POLL_MS = 1500;
-
-    var statusText = document.getElementById("training-status");
-    var button     = document.getElementById("retrain-button");
-    var timer      = null;
-
-    function describe(status) {
-        if (status.running) {
-            var stage = status.stage || "Working";
-            var seconds = status.elapsed_seconds;
-            return "Training: " + stage +
-                   (seconds === null ? "" : " (" + seconds + "s)");
-        }
-
-        if (status.state === "succeeded") {
-            return "Last training succeeded. " + (status.message || "");
-        }
-
-        if (status.state === "failed") {
-            return "Last training FAILED. " + (status.message || "");
-        }
-
-        return "Idle. No training has run since the server started.";
-    }
-
-    function render(status) {
-        statusText.textContent = describe(status);
-        button.disabled = status.running;
-        button.textContent = status.running ? "Training…" : "Retrain model";
-
-        if (status.running) {
-            schedule();
-        } else if (timer !== null) {
-            window.clearTimeout(timer);
-            timer = null;
-        }
-    }
-
-    function schedule() {
-        if (timer !== null) {
-            window.clearTimeout(timer);
-        }
-        timer = window.setTimeout(poll, POLL_MS);
-    }
-
-    function poll() {
-        fetch(STATUS_URL, { credentials: "same-origin" })
-            .then(function (response) {
-                if (!response.ok) {
-                    // An expired session is the likely cause. The endpoint is
-                    // @json_api so the hook answers JSON rather than an HTML
-                    // login page, but a non-OK status still means stop asking.
-                    throw new Error("status " + response.status);
-                }
-                return response.json();
-            })
-            .then(render)
-            .catch(function (error) {
-                statusText.textContent =
-                    "Could not read the training status (" + error.message +
-                    "). Reload the page.";
-                button.disabled = false;
-                button.textContent = "Retrain model";
-            });
-    }
-
-    button.addEventListener("click", function () {
-        button.disabled = true;
-        button.textContent = "Starting…";
-
-        fetch(START_URL, {
-            method: "POST",
-            credentials: "same-origin",
-            headers: { "X-CSRFToken": CSRF_TOKEN }
-        })
-            .then(function (response) { return response.json(); })
-            .then(function (body) {
-                if (body.status) {
-                    render(body.status);
-                } else {
-                    poll();
-                }
-            })
-            .catch(function () {
-                statusText.textContent =
-                    "Could not start training. Reload the page and try again.";
-                button.disabled = false;
-                button.textContent = "Retrain model";
-            });
-    });
-
-    // One check on load, so a page opened while a retrain is already running
-    // shows it rather than claiming the model is idle.
-    poll();
-}());
-</script>

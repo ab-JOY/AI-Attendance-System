@@ -29,8 +29,10 @@ simply further from the lens than this test wants to simulate.
 
 **The capture stages are visible in the file numbering**, which is what makes a
 liveness challenge scriptable: images 1-25 are the frontal stage, **26-40 turn
-left** and **41-55 turn right** (matching `LEFT_IMAGES = 15` and
-`RIGHT_IMAGES = 15` in `capture_dataset.py`). So a scripted turn is a slice.
+left** and **41-55 turn right** (the stage plan in `vision/enrolment.py`, and
+before it `LEFT_IMAGES = 15` / `RIGHT_IMAGES = 15` in the deleted
+`capture_dataset.py`, which is what the images on disk were captured by). So a
+scripted turn is a slice.
 
 ⚠️ **`save_attendance()` is stubbed before the loop is ever started**, not
 after. That function reaches the live MySQL database, and this test drives a
@@ -158,14 +160,23 @@ class FakeCapture:
 
 
 class AttendanceRecorder:
-    """Replaces `save_attendance()`. Records calls, writes nothing."""
+    """
+    Replaces `save_attendance()`. Records calls, writes nothing.
+
+    ⚠️ **`*args` rather than a fixed signature, on purpose.** This stub used to
+    be `(student_id, subject, status)`, which was written to match the caller
+    and therefore *documented the defect it should have caught*: the loop
+    passed a hardcoded "Present" that made FS-8's derivation unreachable in
+    production. A stub shaped to the call site can never disagree with it. It
+    takes whatever it is given now, and the test below asserts what that was.
+    """
 
     def __init__(self):
         self.calls = []
 
-    def __call__(self, student_id, subject, status):
-        self.calls.append((student_id, subject, status))
-        return True
+    def __call__(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return "Present"
 
 
 # ---------------------------------------------------------------------------
@@ -188,23 +199,29 @@ def recognition_module():
 @pytest.fixture(scope="module")
 def enrolled_student():
     """
-    `(student_id, name, folder)` for the first student in `trainer/labels.txt`.
+    `(student_id, folder)` for the first student in `trainer/labels.txt`.
 
     Read from the labels file rather than hardcoded, so the test follows a
     retrain instead of breaking on one. The identifier is necessarily real -
     the model knows three faces - which is exactly why `save_attendance` is
     stubbed.
+
+    ⚠️ **The display name is no longer available here, and that is the point
+    of todo.md §7.5.** This used to return one by splitting the label line on
+    `_`; labels.txt is `{label},{student_id}` now and the name lives in the
+    `students` table. Nothing in this file needed the name - it asserts on the
+    ID - so it is simply gone rather than looked up.
     """
     first_line = LABELS_FILE.read_text(encoding="utf-8").strip().splitlines()[0]
-    _label, folder_name = first_line.split(",", 1)
-    student_id, name = folder_name.strip().split("_", 1)
+    _label, student_id = first_line.split(",", 1)
+    student_id = student_id.strip()
 
-    folder = DATASET_DIR / folder_name.strip()
+    folder = DATASET_DIR / student_id
 
     if not folder.is_dir():
         pytest.skip(f"dataset folder missing for {student_id}")
 
-    return student_id, name, folder
+    return student_id, folder
 
 
 @pytest.fixture(scope="module")
@@ -224,7 +241,7 @@ def scripted_frames(enrolled_student):
     import cv2
     import numpy as np
 
-    _student_id, _name, folder = enrolled_student
+    _student_id, folder = enrolled_student
 
     def load(number):
         path = folder / f"{number}.jpg"
@@ -289,7 +306,7 @@ def driven_session(
     which is what lets the tripwire below keep watching.
     """
     module = recognition_module
-    student_id, _name, _folder = enrolled_student
+    student_id, _folder = enrolled_student
 
     with pytest.MonkeyPatch.context() as patch:
         recorder = AttendanceRecorder()
@@ -379,6 +396,247 @@ def driven_session(
         }
 
         session.stop()
+
+
+# ---------------------------------------------------------------------------
+# The same session, interrupted by frames LBPH cannot read (UAT)
+# ---------------------------------------------------------------------------
+
+
+# Long enough to have been fatal before - the old code dropped the identity
+# after TRACK_CONFIG.max_confirmed_mismatch_frames (5) - and short of the
+# limit that now applies (max_unreadable_frames_before_clear, 25).
+UNREADABLE_STRETCH = 12
+
+
+@pytest.fixture(scope="module")
+def interrupted_frames(enrolled_student):
+    """
+    The same session, with a stretch of motion-blurred frames mid-challenge.
+
+    ⚠️ **This is the UAT defect, reproduced end to end.** Blur is how it
+    actually happens: the student is told "Turn LEFT", their head moves, and a
+    moving head under classroom lighting is blurred for as long as it takes to
+    get there. The quality gate refuses those crops
+    (`RECOGNITION_QUALITY.min_blur_variance` is 50), so `predict_identity()`
+    returns no prediction, so `candidate_id` is None.
+
+    The old `process_confirmed_track()` counted that as a mismatch, identical
+    to reading somebody else's face - so five such frames, a third of a second,
+    destroyed the locked identity and the student came back to
+    "Verifying 0/20". The frames after the blur here cannot re-answer the
+    challenge (a fixed LEFT, CENTER sequence, and the turn has already been
+    spent), so if the identity is lost, no attendance is written and
+    `test_the_interrupted_session_still_records_attendance` fails.
+
+    A Gaussian blur, not a grey frame: the face must still be *detected* and
+    still pass the geometry gate. What is being tested is the branch where a
+    face is present and unreadable, which is the branch that was wrong.
+    """
+    import cv2
+    import numpy as np
+
+    _student_id, folder = enrolled_student
+
+    def load(number):
+        path = folder / f"{number}.jpg"
+
+        if not path.exists():
+            pytest.skip(f"dataset image {path.name} missing")
+
+        crop = cv2.imread(str(path))
+
+        if crop is None:
+            pytest.skip(f"dataset image {path.name} unreadable")
+
+        return crop
+
+    def composite(crop):
+        frame = np.full(
+            (FRAME_HEIGHT, FRAME_WIDTH, 3),
+            BACKGROUND_GREY,
+            dtype=np.uint8,
+        )
+
+        face = cv2.resize(
+            crop,
+            (COMPOSITE_SIZE, COMPOSITE_SIZE),
+            interpolation=cv2.INTER_CUBIC,
+        )
+
+        x = (FRAME_WIDTH - COMPOSITE_SIZE) // 2
+        y = (FRAME_HEIGHT - COMPOSITE_SIZE) // 2
+        frame[y:y + COMPOSITE_SIZE, x:x + COMPOSITE_SIZE] = face
+
+        return frame
+
+    frontal = [composite(load(n)) for n in FRONTAL_IMAGES]
+    turned = [composite(load(n)) for n in LEFT_TURN_IMAGES]
+
+    if not frontal or not turned:
+        pytest.skip("not enough dataset images to script a session")
+
+    # Heavy enough to put the aligned crop under the blur floor. Verified by
+    # the run itself: if it were not, the identity would never be doubted and
+    # these tests would pass vacuously - which is what
+    # `test_the_blurred_frames_were_actually_unreadable` checks.
+    blurred = [cv2.GaussianBlur(frame, (31, 31), 0) for frame in frontal]
+
+    def cycle(source, count):
+        return [source[i % len(source)] for i in range(count)]
+
+    return (
+        cycle(frontal, 30)
+        + cycle(turned, 10)
+        + cycle(blurred, UNREADABLE_STRETCH)
+        + cycle(frontal, 20)
+    )
+
+
+@pytest.fixture(scope="module")
+def interrupted_session(recognition_module, enrolled_student, interrupted_frames):
+    """`driven_session`, over `interrupted_frames`. Same doubles, same guards."""
+    module = recognition_module
+    student_id, _folder = enrolled_student
+
+    with pytest.MonkeyPatch.context() as patch:
+        recorder = AttendanceRecorder()
+
+        # L6, and the same two tripwires as driven_session. This path reaches
+        # the live database with a real enrolled student ID.
+        patch.setattr(module, "save_attendance", recorder)
+
+        def refuse_to_connect(*args, **kwargs):
+            raise AssertionError(
+                "the recognition loop reached the database during a test - "
+                "see tasks/lessons.md L6"
+            )
+
+        patch.setattr(module.mysql.connector, "connect", refuse_to_connect)
+        patch.setattr(infra.db, "get_pool", refuse_to_connect)
+
+        patch.setattr(
+            module,
+            "create_liveness_state",
+            lambda: LivenessChallenge(
+                config=module.LIVENESS_CONFIG,
+                sequence=(LEFT, CENTER),
+            ),
+        )
+
+        capture = FakeCapture()
+        reader = ScriptedCameraReader(interrupted_frames)
+
+        session = RecognitionSession(
+            hooks=SessionHooks(
+                open_camera=lambda: capture,
+                load_model=module.load_model_and_labels,
+                model_signature=module.model_signature,
+                make_detector=module.make_detector,
+                make_reader=lambda _capture: reader,
+                configure_camera=None,
+            ),
+            config=module.TRACK_CONFIG,
+        )
+
+        patch.setattr(module, "session", session)
+
+        if not session.start("SMOKE-TEST-SUBJECT"):
+            pytest.skip("no LBPH model loaded - run train_model.py first")
+
+        token = session.acquire_viewer()
+        stream = module.generate_frames(token)
+
+        parts = list(itertools.islice(stream, len(interrupted_frames)))
+        stream.close()
+
+        yield {
+            "module": module,
+            "session": session,
+            "student_id": student_id,
+            "parts": parts,
+            "recorder": recorder,
+            "tracker": session.tracker,
+        }
+
+        session.stop()
+
+
+def test_the_blurred_frames_were_actually_unreadable(
+    recognition_module, interrupted_frames
+):
+    """
+    ⚠️ **Guards the two tests below against passing vacuously.**
+
+    If the blur were too light the quality gate would accept those crops, the
+    identity would never be doubted, and "the identity survived" would be
+    measuring nothing at all - the apparatus-measuring-nothing failure of
+    lessons.md L3. So this asserts the disruption is real, at the same seam
+    the loop uses.
+    """
+    module = recognition_module
+
+    blurred_frame = interrupted_frames[30 + 10]
+    detector = module.make_detector()
+
+    try:
+        results = module.detect_faces(
+            type("Context", (), {"detector": detector})(), blurred_frame
+        )
+    finally:
+        detector.close()
+
+    landmarks = (results.multi_face_landmarks or [None])[0]
+
+    assert landmarks is not None, (
+        "the blur hid the face from MediaPipe entirely. This test needs a "
+        "face that is DETECTED and unreadable - a face that is simply absent "
+        "exercises a different branch."
+    )
+
+    aligned = module.align_face(blurred_frame, landmarks)
+
+    assert module.get_face_quality_issue(aligned) is not None, (
+        "the blurred frames pass the quality gate, so the interrupted session "
+        "is not actually interrupted and proves nothing"
+    )
+
+
+def test_the_interrupted_session_still_records_attendance(interrupted_session):
+    """
+    ⚠️ **The UAT regression, end to end, with real faces.**
+
+    Twelve consecutive unreadable frames mid-challenge - two and a half times
+    what used to be fatal - and the student is still recorded.
+    """
+    recorder = interrupted_session["recorder"]
+    student_id = interrupted_session["student_id"]
+
+    assert len(recorder.calls) == 1, (
+        f"attendance was written {len(recorder.calls)} times after "
+        f"{UNREADABLE_STRETCH} unreadable frames. Before the fix the locked "
+        f"identity was destroyed after "
+        f"TRACK_CONFIG.max_confirmed_mismatch_frames of them and nothing was "
+        f"ever recorded."
+    )
+
+    (args, _kwargs) = recorder.calls[0]
+
+    assert args[0] == student_id
+
+
+def test_the_identity_was_held_through_the_interruption(interrupted_session):
+    """One track, still locked onto the same student when the script ran out."""
+    tracker = interrupted_session["tracker"]
+    student_id = interrupted_session["student_id"]
+
+    confirmed = [
+        state for state in tracker.states.values() if state.confirmed
+    ]
+
+    assert len(confirmed) == 1
+    assert confirmed[0].student_id == student_id
+    assert confirmed[0].attendance_saved
 
 
 # ---------------------------------------------------------------------------
@@ -488,11 +746,33 @@ def test_attendance_is_saved_exactly_once(driven_session):
         f"expected exactly one save_attendance call, got {recorder.calls}"
     )
 
-    student_id, subject, status = recorder.calls[0]
+    args, kwargs = recorder.calls[0]
 
-    assert student_id == expected_id
-    assert subject == "SMOKE-TEST-SUBJECT"
-    assert status == "Present"
+    assert args[0] == expected_id
+    assert args[1] == "SMOKE-TEST-SUBJECT"
+
+
+def test_the_loop_does_not_dictate_the_status(driven_session):
+    """
+    FS-8, guarded where it was lost.
+
+    `save_attendance()` derives Present or Late from the subject's scheduled
+    start. The loop used to hand it a literal "Present" as a third argument,
+    which short-circuited that for the only production caller there is, so
+    every row the system wrote was Present and /reports rendered a Late counter
+    that was structurally 0.
+
+    The parameter has been removed, so this is belt and braces - but it is the
+    assertion that would have caught it, and it is cheap. The status is the
+    schedule's answer, and the loop's job is to ask.
+    """
+    args, kwargs = driven_session["recorder"].calls[0]
+
+    assert len(args) == 2 and not kwargs, (
+        f"the recognition loop passed a status to save_attendance: "
+        f"args={args}, kwargs={kwargs}. That is FS-8 reopening - the schedule "
+        "decides, not the caller."
+    )
 
 
 def test_the_student_is_added_to_the_recognised_set(driven_session):
@@ -614,7 +894,7 @@ def test_the_dataset_folder_numbering_still_matches_the_capture_stages(
     flow - this test says so, instead of the liveness assertions failing for a
     reason that looks like a liveness bug.
     """
-    _student_id, _name, folder = enrolled_student
+    _student_id, folder = enrolled_student
 
     numbers = {
         int(os.path.basename(path)[:-4])

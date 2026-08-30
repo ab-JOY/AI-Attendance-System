@@ -31,7 +31,6 @@ MODULES = [
     "app.py",
     "recognize_face.py",
     "train_model.py",
-    "capture_dataset.py",
     "camera_utils.py",
     "setup_db.py",
     "eval_accuracy.py",

@@ -304,7 +304,12 @@ def client(flask_app):
 @pytest.fixture
 def fake_training(monkeypatch):
     """Replace the real trainer so no model is written and nothing is slow."""
-    import app as app_module
+    # The job singleton moved out of app.py in Phase 5: three places start it,
+    # so it belongs to services/ rather than to whichever blueprint got there
+    # first. Both the module attribute and the blueprint's reference to it are
+    # replaced - the route reads `training_job` from its own namespace.
+    import services.training as training_module
+    import web.enrolment as enrolment_module
 
     release = threading.Event()
     release.set()
@@ -315,7 +320,8 @@ def fake_training(monkeypatch):
         return True, "Training completed successfully."
 
     job = BackgroundJob(name="test-train", runner=runner)
-    monkeypatch.setattr(app_module, "training_job", job)
+    monkeypatch.setattr(training_module, "training_job", job)
+    monkeypatch.setattr(enrolment_module, "training_job", job)
 
     yield job, release
 
@@ -415,7 +421,7 @@ def test_an_unauthenticated_status_poll_is_not_html(client, fake_training):
     import app as app_module
     from security.access import classify
 
-    view = app_module.app.view_functions["train_status"]
+    view = app_module.app.view_functions["enrolment.train_status"]
 
     assert classify(view) is not None, "/train_status has no access-control marker"
     assert getattr(view, "_security_json_api", False), (

@@ -56,14 +56,11 @@ def run_heldout_evaluation(split_ratio=0.80, seed=42):
         folder_path = os.path.join(DATASET_DIR, folder_name)
         if not os.path.isdir(folder_path):
             continue
-        parsed = parse_dataset_folder(folder_name)
-        if parsed:
-            student_id, student_name = parsed
+        student_id = parse_dataset_folder(folder_name)
+        if student_id:
             folder_records.append({
-                "folder_name": folder_name,
                 "folder_path": folder_path,
                 "student_id": student_id,
-                "student_name": student_name
             })
 
     train_faces = []
@@ -76,7 +73,6 @@ def run_heldout_evaluation(split_ratio=0.80, seed=42):
 
     for record in folder_records:
         folder_path = record["folder_path"]
-        folder_name = record["folder_name"]
         student_id = record["student_id"]
 
         all_images = [
@@ -90,7 +86,7 @@ def run_heldout_evaluation(split_ratio=0.80, seed=42):
         train_img_names = all_images[:split_idx]
         test_img_names = all_images[split_idx:]
 
-        label_dict[current_label] = folder_name
+        label_dict[current_label] = student_id
 
         # Process Training Images
         # No augmentation - train_model.py does not augment either, and
@@ -109,10 +105,10 @@ def run_heldout_evaluation(split_ratio=0.80, seed=42):
         # Collect Held-Out Test Images
         for fname in test_img_names:
             img_path = os.path.join(folder_path, fname)
-            test_set.append((img_path, current_label, student_id, folder_name))
+            test_set.append((img_path, current_label, student_id))
 
         print(
-            f"Student: {folder_name:40s} | "
+            f"Student: {student_id:40s} | "
             f"Train: {len(train_img_names)} | Test: {len(test_img_names)}"
         )
         current_label += 1
@@ -142,7 +138,7 @@ def run_heldout_evaluation(split_ratio=0.80, seed=42):
 
     per_student_stats = {lbl: {"correct": 0, "total": 0} for lbl in label_dict}
 
-    for img_path, exp_label, _student_id, _folder_name in test_set:
+    for img_path, exp_label, _student_id in test_set:
         img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
         if img is None:
             continue
@@ -165,11 +161,11 @@ def run_heldout_evaluation(split_ratio=0.80, seed=42):
     total_test = len(test_set)
 
     print("\nPer-Student Held-Out Accuracy:")
-    for lbl, folder_name in label_dict.items():
+    for lbl, student_id in label_dict.items():
         st = per_student_stats[lbl]
         pct = (st["correct"] / st["total"] * 100) if st["total"] > 0 else 0
         print(
-            f"Student: {folder_name:40s} | "
+            f"Student: {student_id:40s} | "
             f"Held-Out Accuracy: {pct:6.2f}% ({st['correct']}/{st['total']})"
         )
 

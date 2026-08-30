@@ -34,7 +34,18 @@ dependencies = [
     "mysql-connector-python==26.7.0",
     "opencv-contrib-python==4.10.0.84",
     "mediapipe==0.10.14",
-    "pandas==3.0.5",
+    # ⚠️ pandas was removed in Phase 5 (PE-8). It was used in exactly one
+    # place - `pd.read_sql()` on a raw mysql.connector connection, which pandas
+    # does not support and warns about - and it materialised the whole register
+    # twice for a file the browser downloads and the server forgets. openpyxl
+    # writes the workbook directly now, in write-only mode, from a server-side
+    # cursor.
+    #
+    # Measured, median of five cold subprocess imports on this machine:
+    # `import pandas` 1.94 s, `import openpyxl` 1.43 s. Both were already
+    # imported, so the saving is roughly 1.9 s of start-up, not the difference.
+    # (Do not read a start-up figure off `import app` here - it is dominated by
+    # OS file caching and swings between 3 s and 14 s across runs.)
     "openpyxl==3.1.5",
     "numpy==2.4.6",
     "pydantic-settings==2.15.0",
@@ -62,19 +73,33 @@ dev = [
 ]
 
 [tool.setuptools]
-# Flat-layout modules at the repository root. Phase 5 (MA-1) moves these into
-# src/attendance/; until then, list them explicitly so setuptools does not try
-# to auto-discover dataset/, trainer/, templates/ and friends as packages.
+# Flat layout: packages at the repository root, listed explicitly so setuptools
+# does not try to auto-discover dataset/, trainer/, templates/ and friends.
+#
+# ⚠️ The note that used to sit here said Phase 5 would move all of this into
+# `src/attendance/`, per todo.md §4's target tree. **It did not, and that was
+# the user's decision.** MA-1's finding is about layering, not about a
+# directory prefix: the split into web/ + services/ + repositories/ delivers it,
+# while an src/ move would additionally rewrite every import in the tests, both
+# evaluators, the scripts and this file for no measurable difference. Read §4's
+# tree as a description of the layers, which now exist.
 py-modules = [
     "app",
     "recognize_face",
     "train_model",
-    "capture_dataset",
     "camera_utils",
     "face_preprocessing",
     "setup_db",
 ]
-packages = ["config", "security", "vision"]
+packages = [
+    "config",
+    "infra",
+    "repositories",
+    "security",
+    "services",
+    "vision",
+    "web",
+]
 
 
 # ===========================================================================
@@ -103,8 +128,8 @@ ignore = [
     # guard-clause chain (`if bad: return False` x4, then `return True`).
     # Taking its advice makes the final check read differently from the four
     # identical ones above it, which is harder to scan, not easier. The
-    # geometry validators in recognize_face.py and capture_dataset.py are
-    # both built this way deliberately.
+    # geometry validators in vision/validation.py are built this way
+    # deliberately.
     "SIM103",
 
     # SIM108 rewrites if/else blocks as ternaries. This codebase is written
@@ -133,13 +158,14 @@ ignore = [
 [tool.pytest.ini_options]
 # testpaths is what keeps pytest out of eval_*.py at collection time.
 #
-# This matters more than it looks: importing recognize_face costs ~9 s and a
-# 55 MB allocation because it loads the LBPH model at module scope
-# (recognize_face.py:167) and constructs a MediaPipe FaceMesh (:184). That is
-# PE-4, deferred to Phase 3. Nothing under tests/ may import recognize_face
-# or app until it is fixed.
+# ⚠️ The note that used to sit here - "nothing under tests/ may import
+# recognize_face or app" - is stale and has been removed. PE-4 (Phase 3) moved
+# the model load and the MediaPipe construction out of module scope, taking
+# `import recognize_face` from 9.15 s to 1.57 s, and tests/conftest.py records
+# the measurement and lifts the ban. Importing either module is now allowed.
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 markers = [
     "slow: pays for real work - trains an LBPH model, imports app, or drives the recognition loop over real frames",
+    "integration: needs a running MySQL/MariaDB server and a scratch database; skipped unless INTEGRATION_DB_NAME is set (see tests/integration/conftest.py)",
 ]

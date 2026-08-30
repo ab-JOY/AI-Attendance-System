@@ -1,20 +1,8 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>System Settings</title>
+{% extends "base.html" %}
 
-    <link rel="stylesheet"
-          href="{{ url_for('static', filename='css/style.css') }}">
-</head>
+{% block title %}System Settings{% endblock %}
 
-<body>
-
-{% include 'sidebar.html' %}
-
-<div class="main-content">
-
+{% block content %}
     <h1>System Settings</h1>
 
     <!-- =========================
@@ -91,17 +79,38 @@
     <!-- =========================
          DATABASE MANAGEMENT
     ========================== -->
-    <div class="settings-card">
+    <section class="settings-card">
 
         <h2>Database Management</h2>
 
-        <a href="/backup_database">
-            <button type="button">
-                Backup Database
-            </button>
-        </a>
+        {#
+            ⚠️ This was a button linking to `/backup_database`, a route that
+            has never existed in this application - so it answered 404 on
+            every click. Removed rather than wired up: a database backup is a
+            `mysqldump`, and a button that produces one over HTTP would hand
+            every administrator a downloadable copy of the whole register plus
+            every password hash, which is a larger decision than a dead link.
 
-    </div>
+            Replaced with the instruction it should have been, so the
+            information the screen was trying to offer is still here.
+        #}
+        <p class="hint">
+            Back up from the command line, so the file lands somewhere you
+            chose:
+        </p>
+
+        <pre><code>mysqldump -u root {{ database_name }} &gt; backup.sql</code></pre>
+
+        <p class="hint">
+            ⚠️ The dump contains face-recognition attendance records and
+            password hashes. Treat it as sensitive personal information under
+            RA 10173 — see <code>docs/data_privacy.md</code>. It does
+            <strong>not</strong> include <code>dataset/</code> or
+            <code>trainer/</code>, which hold the face images and the
+            biometric templates.
+        </p>
+
+    </section>
 
     <!-- =========================
          SYSTEM INFORMATION
@@ -141,8 +150,4 @@
         </p>
 
     </div>
-
-</div>
-
-</body>
-</html>
+{% endblock %}

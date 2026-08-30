@@ -1,41 +1,8 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport"
-          content="width=device-width, initial-scale=1.0">
+{% extends "base.html" %}
 
-    <title>Edit Instructor</title>
+{% block title %}Edit Instructor{% endblock %}
 
-    <link rel="stylesheet"
-          href="{{ url_for('static',
-          filename='css/style.css') }}">
-</head>
-<body>
-
-<div class="sidebar">
-
-    <h2>AI Attendance</h2>
-
-    <ul>
-        <li><a href="/dashboard">Dashboard</a></li>
-        <li><a href="/students">Students</a></li>
-        <li><a href="/manage_students">Manage Students</a></li>
-
-        <li><a href="/instructors">Instructors</a></li>
-        <li><a href="/manage_instructors">Manage Instructors</a></li>
-
-        <li><a href="/subjects">Subjects</a></li>
-        <li><a href="/attendance">Attendance</a></li>
-        <li><a href="/reports">Reports</a></li>
-        <li><a href="/settings">Settings</a></li>
-        <li><a href="/logout">Logout</a></li>
-    </ul>
-
-</div>
-
-<div class="main-content">
-
+{% block content %}
     <h1>Edit Instructor</h1>
 
     <div class="form-container">
@@ -53,7 +20,7 @@
             Both fixed, because a route with authentication bolted onto it
             that still fails for the legitimate user is not secured.
         -->
-        <form action="{{ url_for('update_instructor',
+        <form action="{{ url_for('instructors.update_instructor',
                                  instructor_id=instructor.instructor_id) }}"
               method="POST">
 
@@ -89,8 +56,4 @@
         </form>
 
     </div>
-
-</div>
-
-</body>
-</html>
+{% endblock %}

@@ -1,28 +1,34 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Attendance Monitoring</title>
+{% extends "base.html" %}
 
-    <!--
-        CSRFProtect rejects any POST without a token, including the two
-        fetch() calls at the bottom of this page. They read the token from
-        here and send it as an X-CSRFToken header.
-    -->
-    <meta name="csrf-token" content="{{ csrf_token() }}">
+{% block title %}Attendance Monitoring{% endblock %}
 
-    <link rel="stylesheet"
-          href="{{ url_for('static', filename='css/style.css') }}">
-</head>
-
-<body>
-
-{% include 'sidebar.html' %}
-
-<div class="main-content">
+{% block content %}
 
     <h1>Attendance Monitoring</h1>
+
+    {#
+        Every URL the page's JavaScript needs, as data attributes rather than
+        interpolated into the script itself (US-8). A URL pasted into a
+        JavaScript string is a route reference that does not move with the
+        route - the blueprint split renamed every endpoint in this file.
+    #}
+    <div
+        data-attendance-page
+        data-start-url="{{ url_for('sessions.start_attendance') }}"
+        data-live-url="{{ url_for('sessions.attendance_live') }}"
+        data-feed-url="{{ url_for('sessions.video_feed') }}"
+        data-cameras-url="{{ url_for('sessions.list_cameras') }}"
+        data-select-camera-url="{{ url_for('sessions.select_camera') }}"
+        data-login-url="{{ url_for('auth.home') }}"
+        hidden></div>
+
+    {#
+        Where the page talks back. Previously every one of these was an
+        `alert()`: modal, unreadable to a screen reader until dismissed, and
+        gone the moment it is - so "an attendance session is already running"
+        had to be remembered rather than read (US-1, US-2).
+    #}
+    <p id="session-notice" class="flash" role="status" aria-live="polite" hidden></p>
 
     <!-- CAMERA + SUMMARY -->
     <div class="attendance-wrapper">
@@ -37,14 +43,44 @@
                 <img
                     id="camera"
                     src=""
-                    alt="Live Camera"
-                    style="display:none;
-                           width:100%;
-                           height:100%;
-                           object-fit:cover;">
+                    alt="Live view from the classroom camera"
+                    style="display:none;">
 
                 <p id="cameraText">
-                    Click Start Attendance Session
+                    Choose a subject and start the session.
+                </p>
+
+            </div>
+
+            {#
+                The *server's* camera, which is not the one the enrolment page
+                picks. Enrolment runs on getUserMedia and the browser
+                enumerates its own devices; recognition opens the classroom
+                camera with OpenCV on the server, where the browser cannot see
+                it at all.
+
+                Reported from a UAT as "a webcam and a laptop cam are both
+                available but the app defaults to the laptop cam". It does -
+                open_best_camera() scans upward from index 0 and takes the
+                first device that produces a picture. That is a reasonable
+                default and was the only option: nothing on any page said a
+                second camera existed.
+            #}
+            <div class="form-container camera-picker" style="margin-top:16px; padding:16px;">
+
+                <label for="camera-select">Camera</label>
+
+                <select id="camera-select" disabled>
+                    <option value="">Looking for cameras…</option>
+                </select>
+
+                <p id="camera-detail"
+                   class="camera-detail"
+                   role="status"
+                   aria-live="polite"
+                   style="font-size:0.85em; color:#555; margin:8px 0 0;">
+                    Checking which cameras this machine has. This can take a
+                    few seconds.
                 </p>
 
             </div>
@@ -52,21 +88,32 @@
             <div class="session-controls">
 
                 <!-- START -->
+                {#
+                    FS-7/US-4. This was a free-text box, and the subject was
+                    typed again into a second free-text box to end the session.
+                    Nothing checked either against the subjects table, so a typo
+                    started a session no report could find.
+
+                    It also has to be a list for a second reason: attendance now
+                    keys on subject_id, and a typed code cannot identify an
+                    offering because two sections share one code.
+                #}
                 <form id="startForm">
 
-                    <input
-                        type="text"
-                        id="subject_code"
-                        name="subject_code"
-                        placeholder="Enter Subject Code (SE101)"
-                        required>
+                    <label for="subject_id">Subject</label>
+                    <select id="subject_id" name="subject_id" required>
+                        <option value="">Choose a subject…</option>
+                        {% for subject in subjects %}
+                            <option value="{{ subject.id }}"
+                                {% if selected_subject_id == subject.id %}selected{% endif %}>
+                                {{ subject.subject_code }} - {{ subject.subject_name }}
+                                {% if subject.section %}({{ subject.section }}){% endif %}
+                            </option>
+                        {% endfor %}
+                    </select>
 
-                    <button
-                        type="submit"
-                        class="start-btn">
-
+                    <button type="submit" class="start-btn">
                         Start Attendance Session
-
                     </button>
 
                 </form>
@@ -74,26 +121,44 @@
                 <!-- END -->
                 <form
                     id="endForm"
-                    action="{{ url_for('end_attendance') }}"
+                    action="{{ url_for('sessions.end_attendance') }}"
                     method="POST">
 
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
-                    <input
-                        type="text"
-                        name="subject_code"
-                        placeholder="Enter Same Subject Code"
-                        required>
+                    {#
+                        Kept as its own control rather than mirrored from the
+                        start form: ending a session is a separate act and the
+                        operator may be a different person at a different
+                        machine.
 
-                <button
-                    type="submit"
-                    class="stop-btn">
+                        ⚠️ A list stops the two disagreeing by a *typo*. It does
+                        not stop them disagreeing by a mis-selection, and this
+                        comment used to claim otherwise. /end-attendance now
+                        prefers the running session's subject and refuses a
+                        submission that names a different one (409, R3) - the
+                        register a session writes is decided by the session,
+                        not by this control. What this dropdown is for is the
+                        case where no session is running and the server has
+                        nothing to prefer.
+                    #}
+                    <label for="end_subject_id">Subject</label>
+                    <select id="end_subject_id" name="subject_id" required>
+                        <option value="">Choose a subject…</option>
+                        {% for subject in subjects %}
+                            <option value="{{ subject.id }}"
+                                {% if selected_subject_id == subject.id %}selected{% endif %}>
+                                {{ subject.subject_code }} - {{ subject.subject_name }}
+                                {% if subject.section %}({{ subject.section }}){% endif %}
+                            </option>
+                        {% endfor %}
+                    </select>
 
-                    End Attendance Session
+                    <button type="submit" class="stop-btn">
+                        End Attendance Session
+                    </button>
 
-                </button>
-
-            </form>
+                </form>
 
             </div>
 
@@ -134,113 +199,60 @@
 
     </div>
 
-    <!-- RECOGNIZED STUDENTS -->
-    <div class="attendance-log">
+    {#
+        ==================================================================
+        RECOGNISED STUDENTS - US-3
+        ==================================================================
 
-        <h2>Recognized Students</h2>
+        This block used to render `session_results`, which only exists after
+        /end-attendance has run. So the operator had to **end the session** to
+        learn whether anyone had been recorded, and a session silently
+        recording nothing was indistinguishable from one nobody had walked past
+        yet.
 
-        <div class="recognized-grid">
+        FS-14 was exactly that failure: twenty of twenty frames agreeing on the
+        right student, nothing written, nothing logged, and the miss reported
+        by a person watching the screen - because the screen had no way to
+        disagree with itself.
 
-            {% if session_results %}
+        Filled by polling /attendance/live now. The server-rendered register
+        stays below, where it is the record rather than the live view.
+    #}
+    <section class="attendance-log">
 
-                {% for student in session_results %}
+        <h2>
+            Recognised so far
+            <span class="count-badge">
+                <span id="live-count">0</span> student(s)
+            </span>
+        </h2>
 
-                    {% if student.status == "Present" %}
+        <ul class="recognized-grid" id="live-recognised" aria-live="polite">
+            <li class="empty-state">
+                Nobody recognised yet.
+            </li>
+        </ul>
 
-                    <div class="student-card">
-
-                        <div class="student-avatar">👤</div>
-
-                        <strong>{{ student.name }}</strong>
-
-                        <p>{{ student.student_id }}</p>
-
-                    </div>
-
-                    {% endif %}
-
-                {% endfor %}
-
-            {% else %}
-
-                <div class="empty-state">
-                    No students recognized yet
-                </div>
-
-            {% endif %}
-
-        </div>
-
-    </div>
-
-    <!-- ATTENDANCE LOG -->
-    <div class="attendance-log">
-
-        <h2>Attendance Log</h2>
-
-        <table>
-
-            <thead>
-
-            <tr>
-                <th>Student ID</th>
-                <th>Name</th>
-                <th>Status</th>
-            </tr>
-
-            </thead>
-
-            <tbody>
-
-            {% if session_results %}
-
-                {% for student in session_results %}
-
-                <tr>
-
-                    <td>{{ student.student_id }}</td>
-
-                    <td>{{ student.name }}</td>
-
-                    <td>{{ student.status }}</td>
-
-                </tr>
-
-                {% endfor %}
-
-            {% else %}
-
-                <tr>
-
-                    <td colspan="3">
-                        No attendance records yet
-                    </td>
-
-                </tr>
-
-            {% endif %}
-
-            </tbody>
-
-        </table>
-
-    </div>
+    </section>
 
     <!-- SESSION RESULT -->
-    <div class="attendance-log">
+    <section class="attendance-log">
 
         <h2>Session Result</h2>
 
         <table>
 
+            <caption>
+                The register written when the session was ended. Empty until
+                then.
+            </caption>
+
             <thead>
-
-            <tr>
-                <th>Student ID</th>
-                <th>Name</th>
-                <th>Status</th>
-            </tr>
-
+                <tr>
+                    <th scope="col">Student ID</th>
+                    <th scope="col">Name</th>
+                    <th scope="col">Status</th>
+                </tr>
             </thead>
 
             <tbody>
@@ -250,29 +262,22 @@
                 {% for student in session_results %}
 
                 <tr>
-
                     <td>{{ student.student_id }}</td>
 
                     <td>{{ student.name }}</td>
 
                     <td>
-
-                        {% if student.status == "Present" %}
-
-                            <span class="status-present">
-                                Present
-                            </span>
-
-                        {% else %}
-
-                            <span class="status-absent">
-                                Absent
-                            </span>
-
-                        {% endif %}
-
+                        {#
+                            US-6. The status was a coloured box and nothing
+                            else, so Present and Absent were the same cell to
+                            anyone who cannot tell green from red - and to a
+                            screen reader, which sees no colour at all. The
+                            word is the status; the colour is decoration.
+                        #}
+                        <span class="status status-{{ student.status|lower }}">
+                            {{ student.status }}
+                        </span>
                     </td>
-
                 </tr>
 
                 {% endfor %}
@@ -280,11 +285,9 @@
             {% else %}
 
                 <tr>
-
                     <td colspan="3">
-                        Session not ended yet
+                        Session not ended yet.
                     </td>
-
                 </tr>
 
             {% endif %}
@@ -293,112 +296,10 @@
 
         </table>
 
-    </div>
+    </section>
 
-</div>
+{% endblock %}
 
-<script>
-
-// Read once. CSRFProtect checks this header on any POST that carries no
-// csrf_token form field.
-const CSRF_TOKEN = document
-    .querySelector('meta[name="csrf-token"]')
-    .getAttribute("content");
-
-
-// START CAMERA
-document.getElementById("startForm")
-.addEventListener("submit", async function(e){
-
-    e.preventDefault();
-
-
-    const subject =
-    document.getElementById("subject_code").value;
-
-
-    const response = await fetch("/start-attendance", {
-
-        method:"POST",
-
-        headers:{
-            "Content-Type":
-            "application/x-www-form-urlencoded",
-            "X-CSRFToken": CSRF_TOKEN
-        },
-
-        body:
-        "subject_code=" + encodeURIComponent(subject)
-
-    });
-
-
-    // The session can expire while this page is open. A 401 means the
-    // access-control hook refused the call, and the only useful thing to do
-    // is send the operator back to the login page.
-    if(response.status === 401){
-        window.location.href = "/";
-        return;
-    }
-
-
-    const data = await response.json();
-
-
-    if(data.success){
-
-
-        document.getElementById("camera")
-        .style.display="block";
-
-
-        document.getElementById("cameraText")
-        .style.display="none";
-
-
-        document.getElementById("camera")
-        .src="/video_feed";
-
-
-    }
-
-    else{
-
-
-        alert(data.message);
-
-    }
-
-
-});
-
-
-
-
-// STOP CAMERA WHEN ENDING SESSION
-
-document.getElementById("endForm")
-.addEventListener("submit", async function(e){
-
-    e.preventDefault();
-
-
-    await fetch("/stop_camera",{
-
-        method:"POST",
-
-        headers:{
-            "X-CSRFToken": CSRF_TOKEN
-        }
-
-    });
-
-
-    this.submit();
-
-});
-
-</script>
-
-</body>
-</html>
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/attendance.js') }}" defer></script>
+{% endblock %}

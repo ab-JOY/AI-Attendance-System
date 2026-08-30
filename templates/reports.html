@@ -1,26 +1,14 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Attendance Reports</title>
+{% extends "base.html" %}
 
-    <link rel="stylesheet"
-          href="{{ url_for('static', filename='css/style.css') }}">
-</head>
+{% block title %}Attendance Reports{% endblock %}
 
-<body>
-
-{% include 'sidebar.html' %}
-
-<div class="main-content">
-
+{% block content %}
     <h1>Attendance Reports</h1>
 
     <!-- REPORT FILTER -->
     <div class="report-filter">
 
-        <form method="GET" action="{{ url_for('reports') }}">
+        <form method="GET" action="{{ url_for('reports.reports') }}">
 
             <label for="date">Date</label>
             <input
@@ -38,12 +26,12 @@
 
                 {% for subject in subjects %}
                 <option
-                    value="{{ subject.subject_code }}"
-                    {% if request.args.get('subject') == subject.subject_code %}
+                    value="{{ subject.id }}"
+                    {% if request.args.get('subject') == subject.id|string %}
                     selected
                     {% endif %}
                 >
-                    {{ subject.subject_code }} - {{ subject.subject_name }}
+                    {{ subject.subject_code }} - {{ subject.subject_name }}{% if subject.section %} ({{ subject.section }}){% endif %}
                 </option>
                 {% endfor %}
 
@@ -54,7 +42,7 @@
             </button>
 
             <!-- EXPORT EXCEL -->
-            <a href="{{ url_for('export_excel') }}"
+            <a href="{{ url_for('reports.export_excel') }}"
                class="export-btn">
                 Export Excel
             </a>
@@ -95,6 +83,7 @@
                 <th>Subject Code</th>
                 <th>Time In</th>
                 <th>Status</th>
+                <th>Correction</th>
             </tr>
 
         </thead>
@@ -115,7 +104,13 @@
 
                 <td>{{ record.subject_code }}</td>
 
-                <td>{{ record.time_in }}</td>
+                {#
+                    An absence has no arrival time, so `time_in` is NULL on
+                    those rows (migration 007). Jinja renders a None as the
+                    literal word "None", which reads as data rather than as an
+                    empty field - the fallback is explicit for that reason.
+                #}
+                <td>{{ record.time_in if record.time_in is not none else "—" }}</td>
 
                 <td>
 
@@ -141,6 +136,22 @@
 
                 </td>
 
+                {#
+                    FS-10. A GET link, not a form: this opens the correction
+                    screen, it does not change anything. The state change is
+                    the POST on that screen, and it carries a CSRF token.
+
+                    The label names the student so the accessible name is
+                    unique - a table of rows all reading "Correct" is
+                    unusable with a screen reader (US-6).
+                #}
+                <td>
+                    <a href="{{ url_for('sessions.correct_attendance', attendance_id=record.id) }}"
+                       aria-label="Correct attendance for {{ record.student_name }} on {{ record.attendance_date }}">
+                        Correct
+                    </a>
+                </td>
+
             </tr>
 
             {% endfor %}
@@ -149,7 +160,7 @@
 
             <tr>
 
-                <td colspan="6" class="no-records">
+                <td colspan="7" class="no-records">
                     No attendance records found.
                 </td>
 
@@ -160,8 +171,4 @@
         </tbody>
 
     </table>
-
-</div>
-
-</body>
-</html>
+{% endblock %}

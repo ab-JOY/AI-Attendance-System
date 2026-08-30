@@ -33,6 +33,17 @@ at session start and cached against a signature of the file on disk.
 What remains is library import cost, which any process using these libraries
 pays: cv2 0.60 s, pandas 1.32 s, flask 0.51 s.
 
+> **Update, 2026-08-16 (Phase 5).** `pandas` is no longer imported: PE-8
+> replaced `pd.read_sql` with openpyxl, and it was the only caller. Re-measured
+> as a median of five cold subprocess imports on this machine, `import pandas`
+> is **1.94 s** and `import openpyxl` **1.43 s** — both slower than the 1.32 s
+> recorded above, which is a different machine-state, not a regression.
+>
+> ⚠️ **Do not read a start-up figure off `import app` here.** Consecutive runs
+> gave 3.11 s, 3.54 s, 3.59 s, 12.52 s and 14.23 s — dominated by OS file
+> caching, not by the import graph. That is why the saving above is quoted as
+> the library's own cost rather than as a change in start-up time (L9).
+
 **Consequence for the test suite**, which was the stated payoff:
 `tests/conftest.py` no longer forbids importing `recognize_face` or `app`, and
 `tests/test_route_security.py` is no longer marked `slow` — 74 access-control
@@ -130,19 +141,115 @@ student and a `cv::FileStorage` read failure somewhere between 0.57 GB and
 1.84 GB, the hard limit is roughly **31 students** as a planning figure.
 See `tasks/todo.md` §2.2 (PE-2) and §3a.
 
+### 4b. Training cost *(measured 2026-08-29)*
+
+§7 used to list this as unmeasured. It matters now because the demo machine
+retrains on **every version update**, which makes the retrain part of the
+deploy rather than an occasional operator action.
+
+| | value |
+|---|---:|
+| Full retrain, 4 identities / 400 source images | **17 s** |
+| Model produced | 72 MB, 4 identities |
+| Held-out accuracy on that model | **80/80, average distance 33.46** |
+
+⚠️ **The 80/80 above is not an improvement on the 60/60 in the table before
+it.** It is a different model: the dataset gained a fourth identity, so it is
+80 test images across 4 students rather than 60 across 3. Neither number is
+comparable to the other, and the §3 caveats in `walkthrough.md` apply to both
+equally — same-session split, no impostors, small N. This row exists to record
+what the current tree actually reproduces, so that a figure quoted from an
+older document can be recognised as belonging to an older model.
+
+⚠️ **Not a linear extrapolation.** Training reads every image and augments it,
+and the model is one histogram per training image, so the cost grows with the
+roster — but 17 s at four students is one point, not a curve. Re-measure
+before quoting a figure for a class-sized roster.
+
+Reproduce with `python train_model.py`, which now also reports a **partial**
+retrain through its exit status (3, `EXIT_INCOMPLETE`) rather than exiting 0
+with the skipped students named only in prose.
+
+---
+
+## 4a. Impostor distances, and the confirmation bar *(Phase 4)*
+
+Measured 2026-08-11 against the deployed model, prompted by a live run in which
+a genuine student sat at "Verifying 20/20 100% (56.1)" indefinitely and was
+never recorded.
+
+**The cause was two thresholds on one scale.** A frame's prediction is voted
+into the window at or under `RECOGNITION_THRESHOLD` (58.0); the window average
+then had to beat `TrackConfig.confirmation_confidence` (52.0) to lock the
+identity. Anything settling between them produced a full, unanimous window that
+could never confirm — silently, with nothing logged. This is `lessons.md` L2
+again: a second threshold on a metric whose scale was set elsewhere.
+
+Before changing it, the question "what does that 6-point band actually protect
+against?" was measured rather than argued:
+
+| population | n | min | median | max | ≤ 52.0 | ≤ 58.0 |
+|---|---:|---:|---:|---:|---:|---:|
+| Genuine — dataset crops | 60 | 18.7 | 29.8 | **34.9** | 100 % | 100 % |
+| Impostor — Georgia Tech, 50 unenrolled subjects | 750 | **62.2** | 75.9 | 95.9 | **0 %** | **0 %** |
+
+Per-subject **mean** distance is the quantity the confirmation bar actually
+compares against, and across the 50 impostor subjects the lowest is **69.9**
+(closest five: s37 69.9, s23 71.3, s19 71.5, s24 71.8, s36 71.9).
+
+**Nothing in either population lies between 52.0 and 58.0.** Moving the bar to
+58.0 therefore costs zero measured false acceptances and still leaves 4.2 of
+headroom to the single closest impostor frame. `confirmation_confidence` is now
+derived from `RECOGNITION_THRESHOLD` rather than restated, so the two cannot
+drift apart again, and `tests/test_vision_tracking.py` fails if a gap reopens.
+
+⚠️ **Three limits on this, and they matter.**
+
+1. **This is not a false-acceptance rate.** The Georgia Tech images are stills
+   from a different capture condition. They establish that unenrolled faces
+   score far above the operating point on *this* model; they do not establish
+   FAR under this system's own camera. That is Phase 6.
+2. **The genuine column is same-session and therefore optimistic** — the §3
+   leakage caveat in `walkthrough.md`. Its own evidence is the live 56.1 that
+   started this: real conditions put a genuine match 21 points worse than the
+   worst same-session crop, which is exactly why the band was reachable in a
+   room and not in the evaluator.
+3. **This does not calibrate anything.** It justifies closing a gap, not the
+   value 58.0, which remains the measured-working number the DET curve in
+   Phase 6 is meant to replace.
+
+Reproduce with the impostor set at `gt_db/` (gitignored, and carrying its own
+usage terms — check them before publishing any figure derived from it).
+
 ---
 
 ## 5. Code size
 
+Measured 2026-08-16, after Phase 5. The Phase 3 figures are kept in the right
+column because the trend is the point.
+
 | module | lines | note |
 |---|---:|---|
-| `app.py` | 1749 | still one file; blueprints are Phase 5 (MA-1) |
-| `recognize_face.py` | 1247 | 1817 at the start of Phase 3 |
-| `vision/` | 1741 | 8 modules, no hardware, no database |
-| `infra/` | 604 | camera, database pool, background jobs |
+| `app.py` | **161** | 1,749 at Phase 3; 2,890 before the split. A factory call and `__main__` |
+| `web/` | 2,265 | 8 blueprints — HTTP only |
+| `repositories/` | 884 | every SQL statement; each takes a cursor, none opens one |
+| `services/` | 371 | enrolment slot, training job, session lifecycle, reporting |
+| `recognize_face.py` | 1,399 | 1,817 at the start of Phase 3 |
+| `vision/` | 2,604 | no hardware, no database |
+| `infra/` | 1,516 | camera, database pool, background jobs, uploads, dataset store, migrations |
+| `security/` | 714 | access control, bcrypt, path validation, throttling |
+| `static/js/` | 980 | **0 before Phase 5** — every line of this was inline in a template (US-8) |
+| `capture_dataset.py` | **deleted** | 1,586 lines, all logic at module scope (MA-2) |
 
-`vision/` and `infra/` are both cheap to import and testable with fakes, which
-is what moved 219 tests out of the slow suite.
+`vision/`, `infra/`, `repositories/` and `services/` are all cheap to import and
+testable with fakes, which is what keeps a 1,101-test suite at ~80 s.
+
+⚠️ **`web/` is larger than the `app.py` it replaced (2,265 against 2,890 for
+routes alone), and that is expected rather than a regression.** The split adds
+eight module docstrings and eight import blocks. What changed is not the total
+but where a given kind of change lands: a SQL edit touches `repositories/`, a
+status-code edit touches `web/`, and neither can any longer be made by accident
+while editing the other.
 
 ---
 
@@ -187,3 +294,4 @@ figures need the pre-PE-6 `CameraReader`, which is one `git show` away
 - **Database throughput.** The pool was introduced for exception safety
   (PE-7); no load test was run, and a single-process Flask development server
   serving a handful of concurrent requests would not show anything useful.
+- ~~**Training cost.**~~ Measured 2026-08-29 - see §4b.

@@ -1,0 +1,149 @@
+{% extends "base.html" %}
+
+{% block title %}Correct Attendance{% endblock %}
+
+{% block content %}
+    <h1>Correct Attendance</h1>
+
+    <!-- ================= THE RECORD ================= -->
+    <div class="form-container">
+
+        <table class="subject-table">
+
+            <tbody>
+                <tr>
+                    <th scope="row">Student</th>
+                    <td>{{ record.student_name }} ({{ record.student_id }})</td>
+                </tr>
+                <tr>
+                    <th scope="row">Subject</th>
+                    <td>
+                        {{ record.subject_code }} - {{ record.subject_name }}
+                        {% if record.section %}
+                            (Section {{ record.section }})
+                        {% endif %}
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">Date</th>
+                    <td>{{ record.attendance_date }}</td>
+                </tr>
+                <tr>
+                    <th scope="row">Time In</th>
+                    {#
+                        NULL on an Absent row - see migration 007. Correcting
+                        an Absent to Present deliberately leaves it NULL too,
+                        rather than inventing an arrival time; the audit row
+                        below is where the truth about the change lives.
+                    #}
+                    <td>{{ record.time_in if record.time_in is not none else "—" }}</td>
+                </tr>
+                <tr>
+                    <th scope="row">Current Status</th>
+                    <td>
+                        {#
+                            The status word is written out as text, not
+                            conveyed by the colour class alone (US-6). A
+                            correction screen is the worst possible place to
+                            make an operator infer a value from a shade.
+                        #}
+                        {% if record.status == "Present" %}
+                            <span class="status-present">Present</span>
+                        {% elif record.status == "Absent" %}
+                            <span class="status-absent">Absent</span>
+                        {% else %}
+                            <span class="status-late">{{ record.status }}</span>
+                        {% endif %}
+                    </td>
+                </tr>
+            </tbody>
+
+        </table>
+
+        <br>
+
+        <!-- ================= THE CORRECTION ================= -->
+        <form method="POST"
+              action="{{ url_for('sessions.correct_attendance', attendance_id=record.id) }}">
+
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+            <label for="status">Change status to</label>
+            <select id="status" name="status" required>
+                {% for status in statuses %}
+                    <option value="{{ status }}"
+                            {% if status == record.status %}selected{% endif %}>
+                        {{ status }}
+                    </option>
+                {% endfor %}
+            </select>
+
+            <label for="reason">Reason for the correction</label>
+            <input
+                type="text"
+                id="reason"
+                name="reason"
+                maxlength="255"
+                required
+                placeholder="e.g. Present in class; the camera did not recognise them"
+                aria-describedby="reason-help">
+
+            <p id="reason-help" class="form-help">
+                This is kept permanently with the record, along with your
+                username and the time. Attendance is a biometric
+                determination, so every change a person makes to one is
+                recorded.
+            </p>
+
+            <button type="submit">Apply Correction</button>
+
+        </form>
+
+        <br>
+
+        <!-- ================= WHAT HAS BEEN CHANGED BEFORE ================= -->
+        <h2>Correction history</h2>
+
+        {% if history %}
+
+            <table class="subject-table">
+
+                <thead>
+                    <tr>
+                        <th>When</th>
+                        <th>By</th>
+                        <th>From</th>
+                        <th>To</th>
+                        <th>Reason</th>
+                    </tr>
+                </thead>
+
+                <tbody>
+                    {% for entry in history %}
+                    <tr>
+                        <td>{{ entry.changed_at }}</td>
+                        <td>{{ entry.changed_by }}</td>
+                        <td>{{ entry.old_status }}</td>
+                        <td>{{ entry.new_status }}</td>
+                        <td>{{ entry.reason }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+
+            </table>
+
+        {% else %}
+
+            <p class="no-records">
+                This record has never been corrected. It is exactly what the
+                system recorded.
+            </p>
+
+        {% endif %}
+
+        <br>
+
+        <a href="{{ url_for('reports.reports') }}" class="back-btn">← Back to Reports</a>
+
+    </div>
+{% endblock %}

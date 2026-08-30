@@ -1,26 +1,14 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Subject Management</title>
+{% extends "base.html" %}
 
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
-</head>
+{% block title %}Subject Management{% endblock %}
 
-<body>
-
-{% include 'sidebar.html' %}
-
-<!-- ================= MAIN CONTENT ================= -->
-<div class="main-content">
-
+{% block content %}
     <h1>Subject Management</h1>
 
     <!-- ================= ADD SUBJECT FORM ================= -->
     <div class="form-container">
 
-        <form action="{{ url_for('add_subject') }}" method="POST">
+        <form action="{{ url_for('subjects.add_subject') }}" method="POST">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
 
@@ -128,7 +116,13 @@
             <td>{{ subject.time_out }}</td>
 
             <td>
-                <a href="{{ url_for('edit_subject', id=subject.id) }}">Edit</a> |
+                {#
+                    FS-3. Only students on a subject's class list are counted
+                    when its session ends, so this link is how a subject stops
+                    having an empty register.
+                #}
+                <a href="{{ url_for('subjects.subject_enrolments', subject_id=subject.id) }}">Class List</a> |
+                <a href="{{ url_for('subjects.edit_subject', id=subject.id) }}">Edit</a> |
 
                 <!--
                     SE-6. This was a GET link, so an <img src> or a link
@@ -136,10 +130,10 @@
                     now.
                 -->
                 <form
-                    action="{{ url_for('delete_subject', id=subject.id) }}"
+                    action="{{ url_for('subjects.delete_subject', id=subject.id) }}"
                     method="POST"
                     style="display:inline;"
-                    onsubmit="return confirm('Delete this subject?');"
+                    data-confirm="Delete this subject?"
                 >
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
@@ -154,8 +148,4 @@
         {% endfor %}
 
     </table>
-
-</div>
-
-</body>
-</html>
+{% endblock %}
