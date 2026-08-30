@@ -318,22 +318,30 @@ as admin      → action = {label: "Open Class List", url: "/subject_enrolments/
 as instructor → action = null, "Ask an administrator to add students…"
 ```
 
-### ⚠️ Consequence for the demo machine
+### Measured live against the dev database
 
-Driven live against the dev database, **attendance can no longer be started at
-all** — every subject on it has an empty class list:
+⚠️ **An earlier draft of this section said attendance could no longer be
+started at all, because every subject had an empty class list. That was true
+when measured and is no longer** — the user populated CS401 the same evening.
+Re-measured after they said so:
 
 ```
-CS401   (id 1): success = False
-test123 (id 3): success = False
-open_session reached : []          attendance_sessions: 2 before, 2 after
+CS401   (id 1, 3 students) -> STARTS   (session opened and closed again)
+test123 (id 3, 0 students) -> REFUSED
+attendance_sessions: still open = 0
 ```
 
-That is the gate working. It is also a **demo blocker until `enrolments` is
-populated**. B3 has changed shape rather than gone away: it used to be a
-session that silently recorded nothing, and it is now a session that will not
-start. **Populating the class lists is the first thing to do on the demo
-machine**, ahead of everything in §7.
+So the gate does what it is for: the demo subject runs, and only the subject
+that could record nobody is refused. **The lesson is about the reading, not the
+gate** — a class-list count is operator state that changes between one command
+and the next, so a figure taken from it is true of a moment, not of the system.
+Quote it with the time attached or re-run `python scripts/preflight.py`, which
+answers it live.
+
+B3 has changed shape rather than gone away: an unenrolled roster used to be a
+session that silently recorded nothing, and is now a session that will not
+start. That is still worth checking before a demo, but it is no longer a
+blocker on this database.
 
 ---
 
@@ -419,11 +427,13 @@ is 6e's §7 item, still open, one stage further along.
 - **The 70–95 px dead band** — §5. The user's decision, and the one with a
   deadline attached to it.
 - **The overlay during unreadable frames** — §5, needs a camera.
-- ⚠️ **Populate `enrolments` before anything else.** §4a turned B3 from a
-  session that silently recorded nothing into a session that will not start,
-  and **every subject in the dev database has an empty class list today**, so
-  attendance cannot be started there at all. This is now the first thing to do
-  on the demo machine, ahead of the camera work below. Still the other team's
-  (§5 of `handover-phase-6e.md`); `python scripts/preflight.py` checks it.
+- **Check `enrolments` before a demo**, with `python scripts/preflight.py`
+  rather than from memory. §4a turned B3 from a session that silently recorded
+  nothing into one that will not start, so an unenrolled subject is now loud
+  instead of silent. As of 2026-08-30 CS401 has 3 students and starts;
+  `test123` has none and is refused, which is the gate working. ⚠️ **This
+  count is operator state and changes between commands** — an earlier draft of
+  §4a quoted it as "every subject is empty", which was true when measured and
+  was stale within the hour.
 - Everything still open from 6c: **LBPH is linear in stored images** — §7 Q1 is
   the user's.

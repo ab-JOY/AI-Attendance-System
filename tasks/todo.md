@@ -965,16 +965,15 @@ test.
 **Landed 2026-08-30.** 14 tests added (1358 → 1372), `ruff` clean,
 `node --check` clean. Both queries run against real MariaDB and agree.
 
-⚠️ **Driven live against the dev database, attendance now cannot be started at
-all**, because every subject on it has an empty class list:
+Driven live against the dev database, the gate refuses only what it should:
 
 ```
-CS401   (id 1): success = False   test123 (id 3): success = False
-open_session reached : []
-attendance_sessions  : 2 before, 2 after
+CS401   (id 1, 3 students) -> STARTS
+test123 (id 3, 0 students) -> REFUSED
 ```
 
-That is the gate working, and it is also **a demo blocker until `enrolments` is
-populated** — which is B3, still open and still the other team's (§5 of
-`handover-phase-6e.md`). It has changed shape: it used to be a session that
-silently recorded nothing; it is now a session that will not start.
+⚠️ **An earlier version of this note said every subject was empty and
+attendance could not be started at all.** That was true when measured and stale
+within the hour — the user populated CS401 the same evening. A class-list count
+is operator state; quote it with a time attached, or re-run
+`python scripts/preflight.py`, which answers it live.
