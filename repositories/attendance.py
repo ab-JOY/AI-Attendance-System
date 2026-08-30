@@ -342,6 +342,36 @@ def recognised_today(cursor, subject_id, student_ids):
     return cursor.fetchall()
 
 
+def recorded_today(cursor, subject_id):
+    """
+    `{student_id: status}` for everyone already recorded for this subject today.
+
+    Seeds a starting recognition session (FS-18), so a student the register
+    already holds is not asked to pass the liveness challenge a second time for
+    a mark they have. Deliberately the whole register for the subject rather
+    than a filtered list: the question here is the opposite of
+    `recognised_today()`'s. That one asks what *this camera run* has done and
+    must not see an earlier session's rows; this one exists precisely to see
+    them.
+
+    ⚠️ **Keyed on `subject_id` and `CURDATE()`, matching the UNIQUE index that
+    suppresses duplicate writes** (RE-3). If this query and that index ever
+    disagree about what "already recorded" means, a student is either asked to
+    verify twice or skipped when they should not be.
+    """
+    cursor.execute(
+        """
+        SELECT student_id, status
+        FROM attendance
+        WHERE subject_id = %s
+        AND attendance_date = CURDATE()
+        """,
+        (subject_id,),
+    )
+
+    return {row["student_id"]: row["status"] for row in cursor.fetchall()}
+
+
 # ---------------------------------------------------------------------------
 # Corrections (FS-10)
 # ---------------------------------------------------------------------------

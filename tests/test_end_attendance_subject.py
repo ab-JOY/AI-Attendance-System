@@ -110,13 +110,18 @@ def recorder(monkeypatch):
     def close_session(_cursor, session_row_id):
         log.closed_sessions.append(session_row_id)
 
-    def for_selection(_cursor):
+    # B3: the attendance page's picker carries a class-list size now, so the
+    # stub follows `_all_subjects()` to the function it actually calls. The
+    # list is empty either way - nothing in this file is about the dropdown.
+    def for_selection_with_class_list_size(_cursor):
         return []
 
     monkeypatch.setattr(sessions_module, "db_cursor", fake_cursor)
     monkeypatch.setattr(sessions_module.subjects_repo, "code_of", code_of)
     monkeypatch.setattr(
-        sessions_module.subjects_repo, "for_selection", for_selection
+        sessions_module.subjects_repo,
+        "for_selection_with_class_list_size",
+        for_selection_with_class_list_size,
     )
     monkeypatch.setattr(
         sessions_module.attendance_repo, "register_for", register_for

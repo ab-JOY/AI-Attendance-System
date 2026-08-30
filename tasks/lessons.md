@@ -1460,3 +1460,78 @@ behaviour, so the suite defended it all the way through.
   folder name and still refuses a trailing dot; a name is not and does not.
   That is stated in both places and pinned by a test, because the next reader's
   first instinct will be to make them match.
+
+---
+
+## L31 - A falsy return with no terminal state is a per-frame loop
+
+**2026-08-30, the "verification repeats" report (FS-17).**
+
+`save_attendance()` returns the written status or a falsy `NotRecorded`, and
+the caller latched success only:
+
+```python
+recorded = save_attendance(locked_id, subject)
+if recorded:
+    state.attendance_saved = True    # the ONLY thing that ends the attempt
+    ...
+return locked_id, locked_name, recorded.value, state   # falsy: nothing latched
+```
+
+The precondition that got us here - `identity_reconfirmed` - stayed true, so
+the next frame did it again. **193 database writes attempted in 200 frames**,
+two round trips and a log line each, for an answer that could not change.
+
+The falsy-enum design (US-10) is good and is not what failed. What failed is
+that **the caller had a state for "done, succeeded" and no state for "done,
+failed"** - so the only way to leave the loop was to succeed at something that
+was never going to succeed.
+
+The cost was not confined to the loop, either. `predict_identity()` skipped its
+LBPH predict on `attendance_saved`, so the one track that could never finish
+was the one that kept paying 98-400 ms per frame. **A missing terminal state
+does not just spin; it spins holding whatever the terminal state was there to
+release.**
+
+**How to apply:** when a call can fail permanently, ask what the caller's state
+machine does on that branch *on the next iteration*. If the answer is "the
+same thing", there is a missing state. Then separate the failures by whether
+retrying can change the answer - "not in this class" cannot, "the database is
+down" can - and give the two different treatment: latch the first, back the
+second off. Treating them alike is how a one-frame outage would have marked a
+student absent, and it is the same mistake in the other direction. See also
+[[l27-a-counter-nobody-reads-is-not-instrumentation]]: the per-frame retry was
+visible in `logs/app.log` for nine days as 124 identical WARNING lines, and
+nobody read them as a loop.
+
+---
+
+## L32 - "Absence of evidence" has to be split at every stage, not just the one where it was found
+
+**Same session (SE-18), and this is R1's lesson arriving a second time.**
+
+Phase 6c found that `process_confirmed_track()` treated *a different enrolled
+student* and *no usable prediction* as the same evidence. Phase 6e split them -
+for the identity counters and for the challenge - and left
+`note_identity_mismatch()` in the unreadable branch, which zeroed the
+post-liveness re-check. So the defect survived, one stage further along: the
+challenge could now be passed on unreadable frames, and then the re-check after
+it still demanded 8 **consecutive** readable ones. A single refused crop undid
+it. At a 70% readable-frame rate that is 11.4 s of standing still; at 50%,
+106 s.
+
+The deferral was a reasonable call - 6e wanted one behavioural change at a time
+so a regression could be attributed. What it did not do is **write down the
+remaining stages as a list**. It named the second half in prose, and the third
+(that a run of unreadable frames also destroys a *passed* challenge) was not
+named at all.
+
+**How to apply:** when you split a conflated signal, enumerate every consumer
+of it in the same sitting, even if you only change one. Write the list into the
+handover as stages rather than as a sentence. And when the safety argument for
+a change is written in a comment - here, *"note_identity_mismatch() above keeps
+that counter at zero"* - check whether that argument is still true after the
+next stage lands. It was not, and the property it claimed to protect was
+actually held by something else entirely (where the counter is incremented, not
+where it is reset). **A correct comment about the wrong mechanism will get the
+bug restored by the next careful reader.**

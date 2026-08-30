@@ -40,6 +40,7 @@ from recognize_face import (
 # collision rather than a latent one.
 from recognize_face import session as recognition_session
 from repositories import attendance as attendance_repo
+from repositories import enrolments as enrolments_repo
 from repositories import subjects as subjects_repo
 from security.access import authenticated, json_api
 from services import attendance as attendance_service
@@ -65,8 +66,104 @@ MAX_CORRECTION_REASON = 255
 
 
 def _all_subjects():
+    """
+    The subject pickers, each carrying how many students are on its class list.
+
+    The count is what lets the dropdown mark an offering on which a session
+    would record nobody (FS-3/B3) *before* one is chosen, rather than after a
+    student has been refused in front of the camera.
+    """
     with db_cursor(dictionary=True) as cursor:
-        return subjects_repo.for_selection(cursor)
+        return subjects_repo.for_selection_with_class_list_size(cursor)
+
+
+# Why a session on a subject with an empty class list is refused (B3). Module
+# scope so the route and its test cannot drift about the wording, the same way
+# SKIPPED_MARKER is shared in train_model.
+#
+# ⚠️ **This is a refusal, not a warning, and that was the user's call on
+# 2026-08-30.** It was built as a warning first, on the reasoning that an empty
+# class list is a roster nobody has filled in yet and blocking would obstruct
+# whoever is setting the class up. The user overruled it, and the reasoning
+# holds: FS-3 means *every* face is refused with "Not in this class" and
+# `/end-attendance` writes a register of nobody, so the session cannot produce
+# a single useful row. Letting it start spends the operator's time, the
+# students' time and a camera slot on an outcome that is knowable in one query
+# before any of it is committed.
+EMPTY_CLASS_LIST_REFUSAL = (
+    "Nobody is on this subject's class list, so this session could not record "
+    "anyone - every face would be refused with \"Not in this class\"."
+)
+
+# The remedy, which is a different sentence depending on who is reading it.
+#
+# ⚠️ **The Class List screen is `@role_required('admin')`.** Telling an
+# instructor to "add students under Subjects → Class List" sends them to a 403
+# for a screen they will never be allowed to open, which reads as the system
+# being broken rather than as their not being the person who fixes this. They
+# are told who is instead, and they get no button.
+EMPTY_CLASS_LIST_REMEDY_ADMIN = (
+    " Add students under Subjects → Class List, then start the session again."
+)
+
+EMPTY_CLASS_LIST_REMEDY_OTHER = (
+    " Ask an administrator to add students to this class list, then start the "
+    "session again."
+)
+
+
+def _class_list_is_empty(subject_id):
+    """
+    True when nobody is enrolled on this offering, as far as we can tell.
+
+    ⚠️ **False on a database error, deliberately** — see the caller. This is a
+    gate, and a gate that closes when it cannot see is worse than the thing it
+    guards against: a momentary blip would become a class unable to take
+    attendance at all.
+    """
+    try:
+        with db_cursor(dictionary=True) as cursor:
+            return enrolments_repo.count_for_subject(cursor, subject_id) == 0
+
+    except mysql.connector.Error:
+        logger.exception(
+            "Could not check the class list for subject_id %s; allowing the "
+            "start rather than refusing on an answer we do not have.",
+            subject_id,
+        )
+        return False
+
+
+def _class_list_action(subject_id):
+    """
+    The "Open Class List" button for the empty-class-list dialog, or None.
+
+    None when the signed-in user is not an admin: `subjects.subject_enrolments`
+    is `@role_required('admin')`, so offering the button to anyone else sends
+    them to a 403 and turns a fixable roster problem into what looks like a
+    broken system.
+    """
+    if session.get('role') != 'admin':
+        return None
+
+    return {
+        "label": "Open Class List",
+        "url": url_for('subjects.subject_enrolments', subject_id=subject_id),
+    }
+
+
+def _running_subject_id():
+    """
+    The subject of the session running right now, or None.
+
+    What the End form's dropdown is locked to (R3/FS-16). The register a
+    session writes is decided by the *session*, never by that control, so
+    while one is running there is exactly one answer the control may carry and
+    the operator should not be invited to pick a different one.
+    """
+    active = recognition_session.subject
+
+    return getattr(active, "subject_id", None)
 
 
 @sessions_bp.route('/attendance')
@@ -77,7 +174,11 @@ def attendance():
     # table, so a typo silently created a session no report could find. It is a
     # dropdown now, which is also what makes subject_id available: a typed code
     # cannot identify an offering, because two sections share one code.
-    return render_template('attendance.html', subjects=_all_subjects())
+    return render_template(
+        'attendance.html',
+        subjects=_all_subjects(),
+        running_subject_id=_running_subject_id(),
+    )
 
 
 @sessions_bp.route('/start-attendance', methods=['POST'])
@@ -94,6 +195,46 @@ def start_attendance():
         })
 
     subject_id = int(subject_id)
+
+    # B3. Checked **first**, before a session row exists and before the camera
+    # is touched, so a refusal costs nothing and leaves nothing behind. The
+    # other two refusal paths below have to undo an `attendance_sessions` row
+    # they already opened; this one never opens it.
+    #
+    # ⚠️ A failed check does **not** refuse. The gate is only as good as the
+    # answer, and "the database did not respond" is not an answer - refusing on
+    # it would turn a momentary blip into a class that cannot take attendance,
+    # which is the failure this gate exists to be cheaper than. `open_session()`
+    # is the next line and needs the same database, so a genuine outage still
+    # stops the session, with its own message.
+    if _class_list_is_empty(subject_id):
+        logger.warning(
+            "Refused to start attendance for subject_id %s: its class list is "
+            "empty, so no face could have been recorded.",
+            subject_id,
+        )
+
+        action = _class_list_action(subject_id)
+
+        return jsonify({
+            "success": False,
+            "message": EMPTY_CLASS_LIST_REFUSAL + (
+                EMPTY_CLASS_LIST_REMEDY_ADMIN if action
+                else EMPTY_CLASS_LIST_REMEDY_OTHER
+            ),
+            # The way out of the refusal, built here rather than in the
+            # browser. US-8: a URL assembled in JavaScript is a route reference
+            # that does not move with the route, and this one is
+            # parameterised - `/subject_enrolments/<id>` - so the alternative
+            # is a template string with an id spliced into it.
+            #
+            # ⚠️ **None for anyone who is not an admin**, because
+            # `subject_enrolments` is `@role_required('admin')` and a button
+            # that leads to 403 is worse than no button: it turns "add students
+            # to this class" into "the system is broken" for an instructor who
+            # cannot do anything about either. The dialog says who can instead.
+            "action": action,
+        })
 
     subject_row, session_row_id = attendance_service.open_session(
         subject_id, session.get('user')
@@ -143,7 +284,11 @@ def start_attendance():
             "message": "An attendance session is already running."
         })
 
-    return jsonify({"success": True, "session_id": session_row_id})
+    return jsonify({
+        "success": True,
+        "session_id": session_row_id,
+        "subject_id": subject_id,
+    })
 
 
 @sessions_bp.route('/stop_camera', methods=['POST'])
@@ -360,6 +505,10 @@ def end_attendance():
         return render_template(
             "attendance.html",
             subjects=_all_subjects(),
+            # Always None here in practice - the session has just been stopped -
+            # but computed rather than hardcoded, so the control unlocks because
+            # nothing is running rather than because this branch says so.
+            running_subject_id=_running_subject_id(),
             session_results=session_results,
             total_students=len(session_results),
             total_present=total_present,

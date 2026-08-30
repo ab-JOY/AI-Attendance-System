@@ -11,6 +11,7 @@ from config.settings import settings
 from face_preprocessing import align_face, preprocess_for_lbph
 from infra.camera import CameraReader
 from infra.db import db_cursor
+from repositories import attendance as attendance_repo
 from security.paths import UnsafeStudentPathError, validate_student_id
 from vision.geometry import get_face_box
 from vision.landmarks import LEFT_EYE_OUTER, NOSE_TIP, RIGHT_EYE_OUTER
@@ -471,6 +472,28 @@ def configure_camera(capture):
         capture.read()
 
 
+def already_recorded_today(subject):
+    """
+    `{student_id: status}` the register already holds for this subject (FS-18).
+
+    The `already_recorded` hook. It raises nothing on purpose: `_seed_recognized`
+    catches anyway, but the failure it would be catching - the database being
+    down at the moment a class starts - is worth a message that names what was
+    lost rather than a traceback about a cursor.
+    """
+    try:
+        with db_cursor(dictionary=True) as cursor:
+            return attendance_repo.recorded_today(cursor, subject.subject_id)
+
+    except mysql.connector.Error:
+        logger.exception(
+            "Could not read today's register for %s. Students already marked "
+            "will be asked to verify again; nothing will be double-recorded.",
+            subject.subject_code,
+        )
+        return {}
+
+
 session = RecognitionSession(
     hooks=SessionHooks(
         open_camera=open_best_camera,
@@ -479,6 +502,7 @@ session = RecognitionSession(
         make_detector=make_detector,
         make_reader=lambda capture: CameraReader(capture),
         configure_camera=configure_camera,
+        already_recorded=already_recorded_today,
     ),
     config=TRACK_CONFIG,
 )
@@ -662,6 +686,24 @@ class NotRecorded(Enum):
 
     def __bool__(self):
         return False
+
+
+# Refusals no number of further frames can change (FS-17).
+#
+# Both are statements about the **database**: this student is not in this
+# class, or the model holds a face the `students` table does not. The camera
+# cannot influence either, so a track that gets one is finished asking. ERROR
+# is deliberately absent - an unreachable database has not refused anything,
+# and the write is retried on a backoff.
+#
+# ⚠️ Membership, not a boolean on the enum. `NotRecorded` is falsy by design so
+# that callers can test the result of `save_attendance()` for truth without
+# knowing the reasons exist (US-10); adding an `is_permanent` property would
+# put the same decision in two places, and this set is the one the frame loop
+# reads.
+PERMANENT_REFUSALS = frozenset(
+    {NotRecorded.NOT_IN_CLASS, NotRecorded.UNKNOWN_STUDENT}
+)
 
 
 def save_attendance(student_id, subject):
@@ -944,8 +986,27 @@ def process_confirmed_track(
         state.unreadable_frames += 1
 
         if state.liveness is not None:
-            state.liveness.note_identity_mismatch()
-
+            # ⚠️ **note_identity_mismatch() is NOT called here** (SE-18).
+            #
+            # It was, and it zeroed post_match_count, so the re-check after a
+            # passed challenge needed 8 *consecutive* readable frames. That is
+            # R1's mistake one stage later: the same "no usable match" that is
+            # not evidence of a track switch is not evidence against the
+            # re-check either. Expected wait at the 4.8 fps in logs/app.log,
+            # by readable-frame rate: 2.1 s at 95%, 11.4 s at 70%, 106 s at
+            # 50% - and the rate falls with the camera, because align_face()
+            # upscales a small box to 200x200 before the blur gate measures
+            # it. See tasks/todo.md §9.
+            #
+            # ⚠️ **This does not let an unreadable frame confirm anybody.**
+            # post_match_count only ever *advances* in note_identity_match(),
+            # which is reached solely from the readable path below. Dropping
+            # the reset stops these frames destroying progress; it gives them
+            # no power to make any. A contradiction - LBPH reading a
+            # *different* enrolled student - still resets the counter, in the
+            # branch above, which is the frame shape a face swap actually
+            # produces.
+            #
             # ⚠️ **The challenge advances here, on a frame with no identity.**
             #
             # The paragraph above stopped the sequence being *redrawn* on
@@ -969,10 +1030,19 @@ def process_confirmed_track(
             #
             # ⚠️ This does not recognise anybody. Completing the sequence sets
             # `passed`; attendance additionally needs post_match_frames of
-            # *real* matches, and note_identity_mismatch() above keeps that
-            # counter at zero for every frame that reaches this branch. The
-            # challenge proves a live person moved on cue; the re-check proves
-            # it was still this student. Those stay separate.
+            # *real* matches, and post_match_count is incremented in exactly
+            # one place - note_identity_match(), on the readable path below -
+            # which no frame reaching this branch can get to. The challenge
+            # proves a live person moved on cue; the re-check proves it was
+            # still this student. Those stay separate.
+            #
+            # ⚠️ **That sentence used to end "and note_identity_mismatch()
+            # above keeps that counter at zero", which was true and is no
+            # longer** (SE-18). The reset is gone; the separation is not, and
+            # it never rested on the reset. It rests on where the counter is
+            # incremented, which is why an unreadable frame leaving progress
+            # alone is safe while an unreadable frame *making* progress would
+            # not be.
             state.liveness.update(current_yaw)
 
         if (
@@ -1016,6 +1086,24 @@ def process_confirmed_track(
             state
         )
 
+    # A refusal the register will give again for as long as this track lives
+    # (FS-17). "Not in this class" and "Not enrolled" are facts about the
+    # database, not about the picture, so re-asking cannot change the answer -
+    # but nothing latched them, `identity_reconfirmed` stayed True, and the
+    # write was reattempted on every frame: 193 attempts in 200 frames, two
+    # round trips and a WARNING line each, plus a full LBPH predict, because
+    # predict_identity() skipped recognition only on `attendance_saved`. One
+    # student missing from `enrolments` therefore taxed every other face in
+    # shot at 98-400 ms a frame. The operator's remedy is a roster edit, and
+    # the message says so until the track ends.
+    if state.attendance_refused is not None:
+        return (
+            locked_id,
+            locked_name,
+            state.attendance_refused,
+            state
+        )
+
     if state.liveness is None:
         state.liveness = create_liveness_state()
 
@@ -1045,14 +1133,14 @@ def process_confirmed_track(
 
     state.liveness.note_identity_match()
 
-    if state.liveness.identity_reconfirmed:
+    if state.liveness.identity_reconfirmed and state.may_attempt_attendance():
         # ⚠️ No status argument. Passing "Present" here is what made FS-8
         # unreachable in production - see save_attendance(). The schedule
         # decides, and what it decided is what goes on the overlay.
         recorded = save_attendance(locked_id, subject)
 
         if recorded:
-            context.recognized.add(locked_id)
+            context.recognized[locked_id] = recorded
             state.attendance_saved = True
             state.attendance_status = recorded
 
@@ -1064,11 +1152,37 @@ def process_confirmed_track(
             )
 
         # `recorded` is a NotRecorded here - falsy, and carrying which of the
-        # three things went wrong (US-10).
+        # three things went wrong (US-10). Two of the three are permanent and
+        # one is not, and FS-17 is what it cost to treat them alike.
+        if recorded in PERMANENT_REFUSALS:
+            state.refuse_attendance(recorded.value)
+
+            logger.warning(
+                "Attendance permanently refused for %s: %s. Not retrying on "
+                "this track - the remedy is a roster edit, not another frame.",
+                locked_id,
+                recorded.value,
+            )
+        else:
+            # The database was unreachable. That is not an answer, so it is
+            # retried - but paced, rather than hammering a failed database
+            # once per frame per face.
+            state.defer_attendance_retry(TRACK_CONFIG.attendance_retry_frames)
+
         return (
             locked_id,
             locked_name,
             recorded.value,
+            state
+        )
+
+    if state.liveness.identity_reconfirmed:
+        # Inside the retry backoff after a database failure. The challenge is
+        # done; there is nothing for the student to do but wait.
+        return (
+            locked_id,
+            locked_name,
+            NotRecorded.ERROR.value,
             state
         )
 
@@ -1282,7 +1396,13 @@ def predict_identity(context, frame, face_landmarks, state, track_id):
     # again - the identity is locked and the row is written. Skipping the
     # predict here is what keeps a full classroom from paying for 314M float
     # operations per already-marked face per frame (PE-3).
-    skip_recognition = state.confirmed and state.attendance_saved
+    #
+    # ⚠️ `attendance_settled`, not `attendance_saved` (FS-17). A track the
+    # register has *permanently refused* is equally finished - there is nothing
+    # left to ask - but it kept paying the predict on every frame, which is how
+    # one student missing from `enrolments` slowed the stream for the whole
+    # room. This is PE-3 reopened at the one face it was written to exempt.
+    skip_recognition = state.confirmed and state.attendance_settled
 
     try:
         aligned_face = align_face(frame, face_landmarks)
@@ -1389,8 +1509,19 @@ def resolve_track_identity(
 
     # Only an unconfirmed track may inherit an identity that already
     # completed attendance. A confirmed track above can never be overwritten.
+    #
+    # Since FS-18 `context.recognized` maps id -> the status the register
+    # holds, and is seeded from today's rows at session start rather than being
+    # empty until this process happens to write one. That is what makes this
+    # branch reachable across a restart: before it, stopping and starting
+    # attendance put a student who was already Present through the whole
+    # 20-frame window and a fresh liveness challenge, for a duplicate write.
     if candidate_id is not None and candidate_id in context.recognized:
-        state.adopt_completed_identity(candidate_id, candidate_name)
+        state.adopt_completed_identity(
+            candidate_id,
+            candidate_name,
+            context.recognized.get(candidate_id),
+        )
         claimed_student_ids.add(candidate_id)
         return candidate_id, candidate_name, state.recorded_status, state
 
@@ -1424,10 +1555,15 @@ def resolve_confirmed_track(
     locked_id = state.student_id
     locked_name = state.student_name
 
-    if state.attendance_saved:
+    if state.attendance_settled:
         if locked_id:
             claimed_student_ids.add(locked_id)
-        return locked_id, locked_name, state.recorded_status, state
+
+        # A refused track still claims its identity for this frame, so no other
+        # box can pick the same student up and start the whole sequence again.
+        status = state.attendance_refused or state.recorded_status
+
+        return locked_id, locked_name, status, state
 
     if locked_id in claimed_student_ids:
         return locked_id, locked_name, "Duplicate identity blocked", state
