@@ -30,17 +30,58 @@ import pytest
 
 import infra.db
 from infra.db import db_connection, db_cursor
-from tests.conftest import PROJECT_ROOT
+from tests.conftest import project_python_files
 
-# Modules that talk to the database. `setup_db.py` and
-# `scripts/migrate_passwords.py` are deliberately excluded: they are one-shot
-# administrative scripts that run before or outside the application, create the
-# schema, and have no pool to draw from.
-POOLED_MODULES = ("app.py", "recognize_face.py")
+# Every first-party module *except* the four that legitimately connect outside
+# the pool. Each exclusion is a decision rather than an oversight:
+#
+#   setup_db.py                  - creates the database itself, so it must
+#                                  connect with no database selected.
+#   scripts/migrate_passwords.py - a one-shot data migration run outside the
+#                                  application.
+#   scripts/migrate.py           - the migration CLI (PO-5).
+#   infra/migrations.py          - the runner. It has to be able to point at a
+#                                  database the pool is not configured for (a
+#                                  scratch schema in the integration tests), and
+#                                  it must not depend on a pool whose schema
+#                                  assumptions it is in the middle of changing.
+#
+# ⚠️ **This used to be the literal tuple `("app.py", "recognize_face.py")`,
+# with a comment admitting the gap: "a new service module that hand-rolls a
+# connection would pass. Add it here when you write one."** Phase 5 then wrote
+# twenty new modules and moved every SQL statement out of app.py - so the ban
+# would have been scanning a file with no database access left in it while
+# eight blueprints and seven repositories went unchecked. Derived now, so
+# writing a module is enough to be covered by it.
+#   infra/db.py                  - *is* the pool and the context manager. It
+#                                  closes connections because that is its job.
+#   eval_accuracy.py             - builds a throwaway **SQLite** scratch file
+#                                  to score predictions against. Nothing to do
+#                                  with the MySQL pool.
+#
+# ⚠️ The last two were found by widening the sweep, not by being remembered.
+# That is the point of deriving the list.
+UNPOOLED_BY_DESIGN = {
+    "setup_db.py",
+    "migrate_passwords.py",
+    "migrate.py",
+    "migrations.py",
+    "db.py",
+    "eval_accuracy.py",
+}
 
 
-def parse(module_name):
-    path = PROJECT_ROOT / module_name
+def pooled_modules():
+    return [
+        path for path in project_python_files()
+        if path.name not in UNPOOLED_BY_DESIGN
+    ]
+
+
+POOLED_MODULES = pooled_modules()
+
+
+def parse(path):
     return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 
 
@@ -49,8 +90,10 @@ def parse(module_name):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("module_name", POOLED_MODULES)
-def test_no_module_opens_its_own_connection(module_name):
+@pytest.mark.parametrize(
+    "path", POOLED_MODULES, ids=lambda path: path.name
+)
+def test_no_module_opens_its_own_connection(path):
     """
     `mysql.connector.connect(...)` bypasses the pool entirely.
 
@@ -59,7 +102,7 @@ def test_no_module_opens_its_own_connection(module_name):
     """
     offenders = []
 
-    for node in ast.walk(parse(module_name)):
+    for node in ast.walk(parse(path)):
         if not isinstance(node, ast.Call):
             continue
 
@@ -74,14 +117,16 @@ def test_no_module_opens_its_own_connection(module_name):
             offenders.append(node.lineno)
 
     assert not offenders, (
-        f"{module_name} calls mysql.connector.connect() at line(s) "
+        f"{path.name} calls mysql.connector.connect() at line(s) "
         f"{offenders}. Use db_cursor() from infra/db.py - a connection opened "
         f"by hand is outside the pool and outside the guaranteed close (PE-7)."
     )
 
 
-@pytest.mark.parametrize("module_name", POOLED_MODULES)
-def test_no_module_defines_its_own_connection_helper(module_name):
+@pytest.mark.parametrize(
+    "path", POOLED_MODULES, ids=lambda path: path.name
+)
+def test_no_module_defines_its_own_connection_helper(path):
     """
     `get_db_connection()` was the shape of the bug, not just its name.
 
@@ -91,20 +136,22 @@ def test_no_module_defines_its_own_connection_helper(module_name):
     """
     defined = [
         node.name
-        for node in ast.walk(parse(module_name))
+        for node in ast.walk(parse(path))
         if isinstance(node, ast.FunctionDef)
         and node.name in ("get_db_connection", "get_connection")
     ]
 
     assert not defined, (
-        f"{module_name} defines {defined}. Connections come from "
+        f"{path.name} defines {defined}. Connections come from "
         f"infra/db.py's db_cursor()/db_connection(), which close on both "
         f"paths (PE-7)."
     )
 
 
-@pytest.mark.parametrize("module_name", POOLED_MODULES)
-def test_no_module_closes_a_connection_by_hand(module_name):
+@pytest.mark.parametrize(
+    "path", POOLED_MODULES, ids=lambda path: path.name
+)
+def test_no_module_closes_a_connection_by_hand(path):
     """
     A hand-written `conn.close()` means something is being managed by hand,
     and every one of those was a chance to miss an exception path. The context
@@ -113,7 +160,7 @@ def test_no_module_closes_a_connection_by_hand(module_name):
     """
     offenders = []
 
-    for node in ast.walk(parse(module_name)):
+    for node in ast.walk(parse(path)):
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -124,9 +171,61 @@ def test_no_module_closes_a_connection_by_hand(module_name):
             offenders.append(node.lineno)
 
     assert not offenders, (
-        f"{module_name} closes a connection by hand at line(s) {offenders}. "
+        f"{path.name} closes a connection by hand at line(s) {offenders}. "
         f"db_cursor() and db_connection() already close on both the success "
         f"and the exception path (PE-7)."
+    )
+
+
+REPOSITORY_MODULES = [
+    path for path in project_python_files() if path.parent.name == "repositories"
+]
+
+
+@pytest.mark.parametrize(
+    "path", REPOSITORY_MODULES, ids=lambda path: path.name
+)
+def test_no_repository_opens_its_own_cursor(path):
+    """
+    A repository takes a cursor. It never opens one.
+
+    ⚠️ **This is the rule the whole `repositories/` package rests on, and it is
+    about transactions rather than tidiness.** `db_cursor()` is one transaction
+    per `with` block. A repository that opened its own would put each statement
+    in its own transaction, so a caller needing two writes to commit together -
+    the absent register (FS-4), the correction and its audit row (FS-10) -
+    could not express that at all. Both properties would disappear with no
+    visible change at any call site, which is the silent-regression shape this
+    project keeps producing.
+
+    The caller decides the boundary because the caller is the only thing that
+    knows what "together" means.
+    """
+    offenders = [
+        f"line {node.lineno}"
+        for node in ast.walk(parse(path))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in ("db_cursor", "db_connection")
+    ]
+
+    assert not offenders, (
+        f"repositories/{path.name} opens its own cursor at {offenders}. A "
+        "repository takes one, so the caller controls the transaction "
+        "boundary - see the note in repositories/__init__.py."
+    )
+
+
+def test_the_repository_package_is_actually_being_scanned():
+    """
+    Guards the sweep above against measuring nothing.
+
+    If `repositories/` were renamed or the discovery in conftest stopped
+    covering it, the parametrised ban would silently have no cases and pass.
+    """
+    assert len(REPOSITORY_MODULES) >= 5, (
+        f"Only {len(REPOSITORY_MODULES)} repository modules found. The ban "
+        "above is probably scanning nothing."
     )
 
 
@@ -138,8 +237,8 @@ def test_every_db_cursor_use_is_a_with_statement():
     """
     offenders = []
 
-    for module_name in POOLED_MODULES:
-        tree = parse(module_name)
+    for path in POOLED_MODULES:
+        tree = parse(path)
 
         managed = {
             item.context_expr
@@ -155,7 +254,7 @@ def test_every_db_cursor_use_is_a_with_statement():
                 and node.func.id in ("db_cursor", "db_connection")
                 and node not in managed
             ):
-                offenders.append(f"{module_name}:{node.lineno}")
+                offenders.append(f"{path.name}:{node.lineno}")
 
     assert not offenders, (
         f"db_cursor()/db_connection() used outside a `with` at {offenders}."

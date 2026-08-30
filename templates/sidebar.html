@@ -1,39 +1,85 @@
-<div class="sidebar">
+{#
+    The navigation, shared by every signed-in page.
 
-    <h2>AI Attendance</h2>
+    Three things changed in Phase 5 and each is a finding:
 
-    <div class="user-info">
-        <h3>{{ session['user'] }}</h3>
-        <p>{{ session['role']|upper }}</p>
+    US-6 - it was a bare <div> of links with no landmark and no indication of
+    where you are. It is a <nav> with an accessible name now, and the current
+    page carries aria-current so a screen reader announces it rather than
+    leaving the user to count.
+
+    US-7 - at narrow widths the whole list used to push the page down. The
+    toggle below collapses it, and static/js/app.js flips `nav-open`.
+
+    ⚠️ The links are `url_for` rather than hardcoded paths. They were literals
+    like href="/dashboard", which survived the blueprint split by luck: nothing
+    would have failed if a URL had moved, the link would simply have 404ed.
+#}
+<nav class="sidebar" aria-label="Main">
+
+    <div class="sidebar-header">
+
+        <h2>AI Attendance</h2>
+
+        <button
+            type="button"
+            class="nav-toggle"
+            data-nav-toggle
+            aria-expanded="false"
+            aria-controls="sidebar-links">
+            <span class="nav-toggle-bars" aria-hidden="true"></span>
+            Menu
+        </button>
+
     </div>
 
-    <ul>
+    <div class="user-info">
+        <p class="user-name">{{ session['user'] }}</p>
+        <p class="user-role">{{ session['role']|upper }}</p>
+    </div>
+
+    <ul id="sidebar-links">
+
+        {#
+            `request.endpoint` rather than the path, so a page reached by any
+            of its URLs still marks itself.
+        #}
+        {% set here = request.endpoint %}
+
+        {% macro link(endpoint, label) %}
+            <li>
+                <a href="{{ url_for(endpoint) }}"
+                   {% if here == endpoint %}aria-current="page"{% endif %}>
+                    {{ label }}
+                </a>
+            </li>
+        {% endmacro %}
 
         {% if session['role'] == 'admin' %}
 
-            <li><a href="/dashboard">Dashboard</a></li>
+            {{ link('dashboard.dashboard', 'Dashboard') }}
 
-            <li><a href="/students">Students</a></li>
-            <li><a href="/manage_students">Manage Students</a></li>
+            {{ link('students.students', 'Students') }}
+            {{ link('students.manage_students', 'Manage Students') }}
 
-            <li><a href="/instructors">Instructors</a></li>
-            <li><a href="/manage_instructors">Manage Instructors</a></li>
+            {{ link('instructors.instructors', 'Instructors') }}
+            {{ link('instructors.manage_instructors', 'Manage Instructors') }}
 
-            <li><a href="/subjects">Subjects</a></li>
-            <li><a href="/attendance">Attendance</a></li>
-            <li><a href="/reports">Reports</a></li>
-            <li><a href="/settings">Settings</a></li>
+            {{ link('subjects.subjects', 'Subjects') }}
+            {{ link('sessions.attendance', 'Attendance') }}
+            {{ link('reports.reports', 'Reports') }}
+            {{ link('account.settings', 'Settings') }}
 
         {% elif session['role'] == 'instructor' %}
 
-            <li><a href="/dashboard">Dashboard</a></li>
-            <li><a href="/attendance">Attendance</a></li>
-            <li><a href="/reports">Reports</a></li>
+            {{ link('dashboard.dashboard', 'Dashboard') }}
+            {{ link('sessions.attendance', 'Attendance') }}
+            {{ link('reports.reports', 'Reports') }}
 
         {% endif %}
 
-        <li><a href="/logout">Logout</a></li>
+        {{ link('auth.logout', 'Logout') }}
 
     </ul>
 
-</div>
+</nav>

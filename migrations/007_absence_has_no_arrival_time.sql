@@ -1,0 +1,46 @@
+-- =====================================================
+-- 007 - an absence has no arrival time (R4, FS-4/FS-10)
+--
+-- `insert_absences()` writes the Absent rows when a session ends, and it
+-- reused the Present row's column list rather than thinking about what an
+-- Absent row means:
+--
+--     VALUES (%s, %s, %s, CURDATE(), NOW(), 'Absent')
+--
+-- So every absentee got `time_in = NOW()` - the moment the operator pressed
+-- End, identical across the whole cohort. Reports and the Excel export showed
+-- an arrival time for students who never arrived.
+--
+-- That contradicts the principle already written two hundred lines below it in
+-- `repositories/attendance.py::set_status()`, which is why a *correction* from
+-- Absent to Present deliberately leaves `time_in` alone: "a fabricated
+-- timestamp in a biometric register is worse than an obviously untouched
+-- field". The rule was written for corrections and never applied to the write
+-- that creates the rows corrections operate on.
+--
+-- ⚠️ THIS MIGRATION IS THE FIX. The code change alone is not.
+--
+-- `attendance.time_in` is TIME NOT NULL (migration 001), and this server's
+-- sql_mode is NO_ZERO_IN_DATE,NO_ZERO_DATE,NO_ENGINE_SUBSTITUTION - no
+-- STRICT_TRANS_TABLES. Inserting NULL into that column does not fail here; it
+-- is silently coerced to 00:00:00. Writing NULL without this migration would
+-- therefore have swapped a fabricated end-of-class time for a fabricated
+-- midnight, on an INSERT reporting success, and every absentee would appear to
+-- have arrived at exactly 00:00:00.
+--
+-- This is tasks/lessons.md L11 in its own right: on this server a column
+-- constraint is not a guard, and NULL is not refused - it is converted. The
+-- schema has to permit the value before the code can mean it.
+--
+-- Safe to replay: MODIFY to the same definition is a no-op rebuild, and no row
+-- is read or written by this file.
+--
+-- Not reversible in the ordinary sense, and it does not need to be: existing
+-- rows keep whatever `time_in` they already hold. This widens what the column
+-- accepts, it does not rewrite history. The absences already recorded with a
+-- fabricated NOW() stay as they are - correcting them would be inventing a
+-- different fiction, and `attendance_audit` is where a deliberate change to a
+-- record belongs.
+-- =====================================================
+
+ALTER TABLE attendance MODIFY time_in TIME NULL

@@ -103,25 +103,23 @@ def evaluate_recognition_accuracy():
     )
     recognizer.read(TRAINER_FILE)
 
-    # Load labels
-    # Two separate maps on purpose: label_map holds student IDs (used to
-    # score a prediction) and label_folders holds dataset folder names
-    # (used to locate the images). Collapsing them into one dict made this
-    # evaluator silently score zero images, because the student ID was
-    # being joined onto DATASET_DIR as if it were a folder name.
+    # Load labels.
+    #
+    # `labels.txt` is `{label},{student_id}` and the dataset folder is named
+    # for that same ID (todo.md §7.5), so one map does both jobs now. It was
+    # deliberately two - label_map for IDs, label_folders for folder names -
+    # because under the old `{id}_{name}` scheme collapsing them made this
+    # evaluator join a student ID onto DATASET_DIR as if it were a folder and
+    # silently score zero images (lessons.md L3). That failure is no longer
+    # reachable: the two strings are the same string.
     label_map = {}
-    label_folders = {}
     with open(LABELS_FILE, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             parts = line.split(",", 1)
-            label = int(parts[0])
-            folder_name = parts[1]
-            student_id = folder_name.split("_", 1)[0]
-            label_map[label] = student_id
-            label_folders[label] = folder_name
+            label_map[int(parts[0])] = parts[1].strip()
 
     print(f"Loaded {len(label_map)} identities from labels.txt.")
 
@@ -135,10 +133,10 @@ def evaluate_recognition_accuracy():
     # never measure a threshold that production does not use (lessons.md L3).
     RECOGNITION_THRESHOLD = settings.recognition_threshold
 
-    for label, folder_name in sorted(label_folders.items()):
-        folder_path = os.path.join(DATASET_DIR, folder_name)
+    for label, student_id in sorted(label_map.items()):
+        folder_path = os.path.join(DATASET_DIR, student_id)
         if not os.path.isdir(folder_path):
-            print(f"[WARN] dataset folder missing, skipping: {folder_name}")
+            print(f"[WARN] dataset folder missing, skipping: {student_id}")
             continue
 
         expected_student_id = label_map[label]
@@ -173,7 +171,7 @@ def evaluate_recognition_accuracy():
 
         accuracy_pct = (student_correct / student_total * 100) if student_total > 0 else 0
         print(
-            f"Student: {folder_name:40s} | "
+            f"Student: {student_id:40s} | "
             f"Accuracy: {accuracy_pct:6.2f}% ({student_correct}/{student_total})"
         )
 

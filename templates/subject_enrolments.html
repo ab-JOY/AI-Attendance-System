@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+
+{% block title %}Class List — {{ subject.subject_code }}{% endblock %}
+
+{% block content %}
+    <h1>Class List</h1>
+
+    <p>
+        <strong>{{ subject.subject_code }}</strong> —
+        {{ subject.subject_name }}
+        {% if subject.section %}
+            (section {{ subject.section }}{% if subject.course %}, {{ subject.course }}{% endif %})
+        {% endif %}
+        {% if subject.time_in %}
+            · starts {{ subject.time_in }}
+        {% endif %}
+    </p>
+
+    <p style="color:#555;">
+        Only the students listed here are counted when this subject's session
+        ends. A student who is not on this list is never marked present or
+        absent for it, however well the camera recognises them.
+    </p>
+
+    <h2>Enrolled ({{ enrolled|length }})</h2>
+
+    {% if enrolled %}
+        <table class="subject-table">
+            <tr>
+                <th>Student ID</th>
+                <th>Name</th>
+                <th>Program</th>
+                <th>Year</th>
+                <th>Section</th>
+                <th>Action</th>
+            </tr>
+
+            {% for student in enrolled %}
+                <tr>
+                    <td>{{ student.student_id }}</td>
+                    <td>{{ student.name }}</td>
+                    <td>{{ student.program }}</td>
+                    <td>{{ student.year_level }}</td>
+                    <td>{{ student.section }}</td>
+                    <td>
+                        <form
+                            action="{{ url_for('subjects.unenrol_student') }}"
+                            method="POST"
+                            style="display:inline;"
+                            data-confirm="Remove this student from the class list?"
+                        >
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <input type="hidden" name="subject_id" value="{{ subject.id }}">
+                            <input type="hidden" name="student_id" value="{{ student.student_id }}">
+
+                            <button type="submit">Remove</button>
+                        </form>
+                    </td>
+                </tr>
+            {% endfor %}
+        </table>
+    {% else %}
+        <p role="status">
+            Nobody is enrolled in this subject yet, so ending a session for it
+            would record no attendance at all. Add students below.
+        </p>
+    {% endif %}
+
+    <h2 style="margin-top:36px;">Add a student</h2>
+
+    {% if available %}
+        <table class="subject-table">
+            <tr>
+                <th>Student ID</th>
+                <th>Name</th>
+                <th>Program</th>
+                <th>Year</th>
+                <th>Section</th>
+                <th>Action</th>
+            </tr>
+
+            {% for student in available %}
+                <tr>
+                    <td>{{ student.student_id }}</td>
+                    <td>{{ student.name }}</td>
+                    <td>{{ student.program }}</td>
+                    <td>{{ student.year_level }}</td>
+                    <td>{{ student.section }}</td>
+                    <td>
+                        <form
+                            action="{{ url_for('subjects.enrol_student') }}"
+                            method="POST"
+                            style="display:inline;"
+                        >
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <input type="hidden" name="subject_id" value="{{ subject.id }}">
+                            <input type="hidden" name="student_id" value="{{ student.student_id }}">
+
+                            <button type="submit">Add</button>
+                        </form>
+                    </td>
+                </tr>
+            {% endfor %}
+        </table>
+    {% else %}
+        <p role="status">Every student is already enrolled in this subject.</p>
+    {% endif %}
+
+    <p style="margin-top:24px;">
+        <a href="{{ url_for('subjects.subjects') }}">Back to subjects</a>
+    </p>
+{% endblock %}

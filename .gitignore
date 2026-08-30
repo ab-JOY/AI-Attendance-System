@@ -8,8 +8,15 @@
 #
 # trainer/ holds LBPH histograms derived from those images - a derived
 # biometric template, and treated the same way here.
+#
+# dataset_staging/ holds the same thing at an earlier moment. Browser
+# enrolment writes the hundred images there and only moves them into dataset/
+# once the capture is complete, so that a cancelled or abandoned enrolment
+# leaves nothing behind (FS-9). A partial capture is every bit as much a face
+# as a finished one, and git history is just as permanent for it.
 # =====================================================
 dataset/
+dataset_staging/
 trainer/
 
 # =====================================================
@@ -80,3 +87,11 @@ Thumbs.db
 # =====================================================
 ./gt_db
 gt_db/
+# =====================================================
+# BUILD OUTPUT
+# =====================================================
+# setuptools copies the whole source tree into build/lib on `pip install .`,
+# so committing it would duplicate every module and go stale the moment one
+# of them changes.
+build/
+dist/

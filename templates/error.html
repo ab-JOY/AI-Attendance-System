@@ -1,42 +1,39 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ status_code }} — AI Attendance System</title>
+{% extends "base.html" %}
 
-    <link rel="stylesheet"
-          href="{{ url_for('static', filename='css/style.css') }}">
-</head>
+{% block title %}{{ status_code }} — AI Attendance System{% endblock %}
 
-<body>
+{#
+    The sidebar is only useful to somebody who is signed in. An anonymous
+    visitor hitting a 404 gets the login link below instead, which is the only
+    place they can go - overriding `chrome` is what makes that possible.
+#}
+{% block chrome %}
 
-{% if session['user'] %}
-    {% include 'sidebar.html' %}
-{% endif %}
+    {% if session['user'] %}
+        {% include 'sidebar.html' %}
+    {% endif %}
 
-<div class="main-content">
+    <main class="main-content" id="main">
 
-    <!--
-        SE-10 / US-1. Every failure used to render the driver's exception
-        text on a blank page with no navigation - a schema disclosure and a
-        dead end at once. The detail is in logs/app.log; what belongs here
-        is a status, a plain description and a way out.
-    -->
+        {#
+            SE-10 / US-1. Every failure used to render the driver's exception
+            text on a blank page with no navigation - a schema disclosure and a
+            dead end at once. The detail is in logs/app.log; what belongs here
+            is a status, a plain description and a way out.
+        #}
 
-    <h1>{{ status_code }}</h1>
+        <h1>{{ status_code }}</h1>
 
-    <p role="alert">{{ message }}</p>
+        <p role="alert">{{ message }}</p>
 
-    <p>
-        {% if session['user'] %}
-            <a href="{{ url_for('dashboard') }}">Back to the dashboard</a>
-        {% else %}
-            <a href="{{ url_for('home') }}">Back to the login page</a>
-        {% endif %}
-    </p>
+        <p>
+            {% if session['user'] %}
+                <a href="{{ url_for('dashboard.dashboard') }}">Back to the dashboard</a>
+            {% else %}
+                <a href="{{ url_for('auth.home') }}">Back to the login page</a>
+            {% endif %}
+        </p>
 
-</div>
+    </main>
 
-</body>
-</html>
+{% endblock %}

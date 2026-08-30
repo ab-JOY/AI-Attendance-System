@@ -1,27 +1,34 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Attendance System Login</title>
+{% extends "base.html" %}
 
-    <link rel="stylesheet"
-          href="{{ url_for('static', filename='css/style.css') }}">
-</head>
+{% block title %}AI Attendance System Login{% endblock %}
 
-<body class="login-page">
+{% block body_class %}login-page{% endblock %}
 
-    <div class="login-container">
+{#
+    No sidebar and no <main> wrapper: there is nothing to navigate to yet.
+    Overriding `chrome` rather than `content` is what lets this page keep its
+    own shape while still inheriting the head, the stylesheet and app.js.
+#}
+{% block chrome %}
+
+    <main class="login-container" id="main">
 
         <h1>AI-Based Facial Recognition Attendance System</h1>
 
-        <h3>Login</h3>
+        <h2>Login</h2>
 
+        {#
+            The login error is rendered by the route rather than flashed: a
+            flash survives a redirect, and a failed login re-renders this page
+            with a 401 instead of redirecting. role="alert" because unlike a
+            confirmation this one *should* interrupt - the operator is waiting
+            on it.
+        #}
         {% if error %}
-            <p class="error-message">{{ error }}</p>
+            <p class="error-message" role="alert">{{ error }}</p>
         {% endif %}
 
-        <form action="{{ url_for('login') }}" method="POST">
+        <form action="{{ url_for('auth.login') }}" method="POST">
 
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
@@ -30,6 +37,10 @@
             <select
                 id="roleSelect"
                 name="role"
+                data-placeholder-for="user_id"
+                data-placeholder-admin="Username"
+                data-placeholder-instructor="Instructor ID"
+                data-placeholder-default="Username"
                 required>
                 <option value="">Select User Type</option>
                 <option value="admin">Administrator</option>
@@ -43,6 +54,7 @@
                 id="user_id"
                 name="user_id"
                 placeholder="Username"
+                autocomplete="username"
                 required>
 
             <!-- PASSWORD -->
@@ -52,6 +64,7 @@
                 id="password"
                 name="password"
                 placeholder="Password"
+                autocomplete="current-password"
                 required>
 
             <button type="submit">
@@ -60,28 +73,6 @@
 
         </form>
 
-    </div>
+    </main>
 
-<script>
-
-const roleSelect = document.getElementById("roleSelect");
-const userField = document.getElementById("user_id");
-
-roleSelect.addEventListener("change", function() {
-
-    if (this.value === "admin") {
-        userField.placeholder = "Username";
-    }
-    else if (this.value === "instructor") {
-        userField.placeholder = "Instructor ID";
-    }
-    else {
-        userField.placeholder = "Username";
-    }
-
-});
-
-</script>
-
-</body>
-</html>
+{% endblock %}

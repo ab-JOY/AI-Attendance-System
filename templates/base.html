@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>{% block title %}AI Attendance System{% endblock %}</title>
+
+    {#
+        CSRFProtect rejects any POST without a token, including the fetch()
+        calls in static/js/. They read the token from here and send it as an
+        X-CSRFToken header, so it belongs in the shared head rather than in
+        whichever page happened to need it first.
+    #}
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='css/style.css') }}">
+
+    {% block head %}{% endblock %}
+</head>
+
+<body class="{% block body_class %}{% endblock %}">
+
+{#
+    US-6. A keyboard user starting at the top of the page would otherwise tab
+    through the whole sidebar on every screen before reaching anything on it.
+#}
+<a class="skip-link" href="#main">Skip to main content</a>
+
+{% block chrome %}
+    {% include 'sidebar.html' %}
+
+    <main class="main-content" id="main">
+
+        {#
+            US-1/US-2. Every outcome used to be silent or a dead-end error
+            page: deleting a student, saving an edit and enrolling somebody
+            all just redirected, so the operator could not tell a success from
+            a form that had quietly done nothing.
+
+            role="status" with aria-live="polite" so a screen reader announces
+            the message when it appears, without interrupting whatever is being
+            read. `polite` rather than `assertive` deliberately - these are
+            confirmations, not alarms.
+        #}
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div class="flashes" role="status" aria-live="polite">
+                    {% for category, message in messages %}
+                        <p class="flash flash-{{ category }}">
+                            {#
+                                US-6: the category is carried by a word as well
+                                as by a colour, so the message does not depend
+                                on being able to tell green from red.
+                            #}
+                            <span class="flash-label">
+                                {{- {'success': 'Done',
+                                      'error': 'Problem',
+                                      'warning': 'Warning'}.get(category, 'Note') -}}
+                            </span>
+                            {{ message }}
+                        </p>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+
+        {% block content %}{% endblock %}
+
+    </main>
+{% endblock %}
+
+{#
+    US-8. static/js/script.js was an empty committed file and every line of
+    JavaScript lived inline in a template. app.js is loaded on every page: it
+    carries the delegated confirm handler (US-5), the sidebar toggle (US-7) and
+    the submit-once busy states (US-2).
+#}
+<script src="{{ url_for('static', filename='js/app.js') }}" defer></script>
+
+{% block scripts %}{% endblock %}
+
+</body>
+</html>

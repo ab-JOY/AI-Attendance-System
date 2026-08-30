@@ -1,27 +1,26 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Student Management</title>
+{% extends "base.html" %}
 
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
-</head>
+{% block title %}Student Management{% endblock %}
 
-<body>
-
-{% include 'sidebar.html' %}
-
-<!-- ================= MAIN CONTENT ================= -->
-<div class="main-content">
-
+{% block content %}
     <h1>Student Management</h1>
 
     <!-- ================= REGISTER STUDENT ================= -->
     <div class="form-container">
 
-        <form action="{{ url_for('capture_face') }}" method="POST">
+        {#
+            Posts to /enrol, which renders the browser capture page. It used
+            to post to /capture_face, which spawned an OpenCV window on the
+            *server desktop* and held this request open until somebody there
+            pressed ESC (CO-3).
+
+            Nothing is written by that request: the student row is inserted
+            only once all 100 images are safely on disk, so abandoning this
+            page costs nothing (FS-9).
+        #}
+        <form action="{{ url_for('enrolment.enrol') }}" method="POST">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="mode" value="new">
 
 
             <label for="student_id">Student ID</label>
@@ -90,6 +89,49 @@
                 placeholder="Enter Section"
                 required>
 
+            {#
+                US-10. Registering a student used to write the `students` row
+                and nothing else, so the relation the camera actually checks -
+                `enrolments` - was only ever created on a different screen this
+                form never mentioned. The ordinary path therefore ended in
+                "Not Enrolled" for a student who had just been enrolled.
+
+                ⚠️ This does not replace Subjects → Class List. A student's
+                classes change every term, and this form is only ever seen
+                once. It is the first class list, not the only way to have one.
+
+                Nothing is written when this is submitted: the ids ride along
+                with the capture and are applied with the student row at the
+                end, in one transaction (FS-9).
+            #}
+            <label for="subject_ids">
+                Classes
+                <span class="hint">
+                    optional — hold Ctrl (or ⌘) to choose more than one
+                </span>
+            </label>
+            <select
+                id="subject_ids"
+                name="subject_ids"
+                multiple
+                size="5"
+                aria-describedby="subject_ids_help">
+
+                {% for subject in subjects %}
+                    <option value="{{ subject.id }}">
+                        {{ subject.subject_code }} - {{ subject.subject_name }}
+                        {% if subject.section %}({{ subject.section }}){% endif %}
+                    </option>
+                {% endfor %}
+
+            </select>
+
+            <p id="subject_ids_help" class="hint">
+                A student who is in no class is recognised by the camera but
+                cannot have attendance recorded. This can be set later from
+                Subjects → Class List.
+            </p>
+
             <button type="submit">
                 Register Student & Capture Face
             </button>
@@ -116,6 +158,7 @@
             <th>Program</th>
             <th>Year</th>
             <th>Section</th>
+            <th>Classes</th>
             <th>Actions</th>
         </tr>
 
@@ -130,9 +173,27 @@
             <td>{{ student.year_level }}</td>
             <td>{{ student.section }}</td>
 
+            {#
+                US-10, the other half: a student can fall out of every class
+                after enrolment - unenrolled, or a new term - which no message
+                at enrolment time can catch. The state has to be legible here
+                rather than discovered at the kiosk.
+
+                US-6: the warning is a word, not a colour.
+            #}
+            <td>
+                {% if student.classes %}
+                    {{ student.classes }}
+                {% else %}
+                    <span class="warning-text">
+                        None — attendance cannot be recorded
+                    </span>
+                {% endif %}
+            </td>
+
             <td>
 
-                <a href="{{ url_for('edit_student', student_id=student.student_id) }}">
+                <a href="{{ url_for('students.edit_student', student_id=student.student_id) }}">
                     Edit
                 </a>
 
@@ -146,12 +207,12 @@
                 -->
                 <form
                     action="{{ url_for(
-                        'delete_student',
+                        'students.delete_student',
                         student_id=student.student_id
                     ) }}"
                     method="POST"
                     style="display:inline;"
-                    onsubmit="return confirm('Delete this student?');"
+                    data-confirm="Delete this student?"
                 >
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
@@ -168,8 +229,8 @@
         {% endfor %}
 
     </table>
+{% endblock %}
 
-</div>
-
-</body>
-</html>
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/training.js') }}" defer></script>
+{% endblock %}

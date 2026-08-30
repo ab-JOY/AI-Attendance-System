@@ -1,18 +1,8 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Attendance Dashboard</title>
+{% extends "base.html" %}
 
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
-</head>
-<body>
+{% block title %}AI Attendance Dashboard{% endblock %}
 
-{% include 'sidebar.html' %}
-
-<div class="main-content">
-
+{% block content %}
     {% if session['role'] == 'admin' %}
         <h1>Admin Dashboard</h1>
     {% else %}
@@ -23,22 +13,22 @@
 
         <div class="card">
             <h2>Total Students</h2>
-            <p>0</p>
+            <p>{{ counts.students }}</p>
         </div>
 
         <div class="card">
             <h2>Total Subjects</h2>
-            <p>0</p>
+            <p>{{ counts.subjects }}</p>
         </div>
 
         <div class="card">
             <h2>Today's Attendance</h2>
-            <p>0</p>
+            <p>{{ counts.attendance_today }}</p>
         </div>
 
         <div class="card">
             <h2>Active Sessions</h2>
-            <p>0</p>
+            <p>{{ counts.active_sessions }}</p>
         </div>
 
     </div>
@@ -66,8 +56,4 @@
         {% endif %}
 
     </div>
-
-</div>
-
-</body>
-</html>
+{% endblock %}

@@ -62,10 +62,24 @@ def csrf_exempt_client(flask_app):
 
 
 def sign_in_as(client, role, **extra):
-    """Fabricate a session without touching the database."""
+    """
+    Fabricate a session without touching the database.
+
+    A real login also stores *which* account signed in - `admin_id` or
+    `instructor_id` - and the account screens need it: keying the password
+    change on a literal `1` was R8, so a session with no key is now a 403
+    rather than a silent write to row 1. Callers can override either through
+    `extra`.
+    """
     with client.session_transaction() as session:
         session["user"] = f"test-{role}"
         session["role"] = role
+
+        if role == "admin":
+            session["admin_id"] = 1
+        elif role == "instructor":
+            session["instructor_id"] = "SEC-TEST-NOONE"
+
         session.update(extra)
 
 
@@ -117,16 +131,28 @@ PROTECTED_GET_ROUTES = [
     "/reports",
     "/export_excel",
     "/settings",
+    "/subject_enrolments/1",
     "/change_password",
     "/video_feed",
+    "/enrol/status",
+    # FS-10. A numeric id has no obviously-fake form the way SEC-TEST-NOBODY
+    # does - the exact gap lessons.md L6 calls out after /delete_subject/1
+    # turned out to name a real row - so this is a value no auto_increment
+    # sequence in this project will reach.
+    "/attendance/999999999/correct",
 ]
 
 PROTECTED_POST_ROUTES = [
-    "/capture_face",
+    "/enrol_student",
+    "/unenrol_student",
+    "/enrol",
+    "/enrol/start",
+    "/enrol/frame",
+    "/enrol/finish",
+    "/enrol/cancel",
     "/search_student",
     "/delete_student/SEC-TEST-NOBODY",
     "/update_student/SEC-TEST-NOBODY",
-    "/recapture_face",
     "/train_model",
     "/add_subject",
     "/update_subject/1",
@@ -139,6 +165,7 @@ PROTECTED_POST_ROUTES = [
     "/stop_camera",
     "/end-attendance",
     "/change_password",
+    "/attendance/999999999/correct",
 ]
 
 
@@ -182,6 +209,7 @@ def test_video_feed_does_not_stream_to_anonymous_callers(client):
 # check, so a logged-in instructor could call them directly.
 ADMIN_ONLY_GET_ROUTES = [
     "/students",
+    "/subject_enrolments/1",
     "/manage_students",
     "/edit_student/SEC-TEST-NOBODY",
     "/subjects",
@@ -193,11 +221,16 @@ ADMIN_ONLY_GET_ROUTES = [
 ]
 
 ADMIN_ONLY_POST_ROUTES = [
-    "/capture_face",
+    "/enrol_student",
+    "/unenrol_student",
+    "/enrol",
+    "/enrol/start",
+    "/enrol/frame",
+    "/enrol/finish",
+    "/enrol/cancel",
     "/search_student",
     "/delete_student/SEC-TEST-NOBODY",
     "/update_student/SEC-TEST-NOBODY",
-    "/recapture_face",
     "/train_model",
     "/add_subject",
     "/update_subject/1",

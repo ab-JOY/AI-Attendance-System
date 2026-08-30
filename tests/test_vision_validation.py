@@ -33,7 +33,7 @@ import ast
 
 import pytest
 
-from tests.conftest import PROJECT_ROOT
+from tests.conftest import PROJECT_ROOT, project_python_files
 from vision.geometry import (
     box_area,
     box_center,
@@ -60,8 +60,12 @@ from vision.validation import (
     ENROLMENT_PROFILE,
     RECOGNITION_PROFILE,
     FaceGeometryProfile,
+    frontality_reason,
+    is_frontal,
+    is_structurally_a_face,
     is_valid_face_candidate,
     rejection_reason,
+    structure_rejection_reason,
 )
 
 FRAME_WIDTH = 1280
@@ -213,6 +217,96 @@ def test_turned_head_separates_the_profiles():
     assert verdict(turned, RECOGNITION_PROFILE) == "face is not frontal enough"
 
 
+def test_a_turned_head_is_still_structurally_a_face():
+    """
+    ⚠️ **The split that lets a student pass the liveness challenge.**
+
+    `test_turned_head_separates_the_profiles` above pins the property that a
+    turned head is not *recognisable*. This pins the property that it is still
+    **a face** - which is a different question, and conflating the two is what
+    broke liveness.
+
+    `recognize_face._stream_frames()` calls its gate before
+    `tracker.assign()`, and a refused frame hits a bare `continue`. So while
+    frontality lived inside the one gate, a student obeying "Turn LEFT" was
+    not merely un-recognised: their frame was dropped, their box vanished,
+    their track's `last_seen` was never refreshed, and `expire_old_tracks()`
+    deleted the track 1.5 s later. They turned back to "Verifying 0/20",
+    re-confirmed, drew a fresh random challenge, and repeated indefinitely.
+
+    So `structure_rejection_reason()` must accept exactly what
+    `rejection_reason()` refuses *for frontality reasons only*.
+    """
+    turned = build_face(nose_offset=0.30)
+    box = get_face_box(turned, FRAME_WIDTH, FRAME_HEIGHT)
+
+    # The whole gate still refuses it - recognition is unchanged.
+    assert verdict(turned, RECOGNITION_PROFILE) == "face is not frontal enough"
+
+    # ... but it is a face, and must keep being tracked and drawn.
+    assert (
+        structure_rejection_reason(
+            turned, FRAME_WIDTH, FRAME_HEIGHT, box, RECOGNITION_PROFILE
+        )
+        is None
+    )
+    assert is_structurally_a_face(
+        turned, FRAME_WIDTH, FRAME_HEIGHT, box, RECOGNITION_PROFILE
+    )
+    assert not is_frontal(
+        turned, FRAME_WIDTH, FRAME_HEIGHT, box, RECOGNITION_PROFILE
+    )
+
+
+@pytest.mark.parametrize("profile", ALL_PROFILES, ids=lambda p: p.name)
+@pytest.mark.parametrize(
+    "nose_offset", [0.0, 0.10, 0.20, 0.27, 0.29, 0.35, -0.30, -0.45]
+)
+def test_the_split_reassembles_into_the_original_gate(profile, nose_offset):
+    """
+    structure + frontality == the gate that existed before they were split.
+
+    The guard against the split quietly changing what recognition accepts.
+    Every threshold in `RECOGNITION_PROFILE` is uncalibrated (Phase 6 derives
+    them), so a behaviour change here would be invisible until it showed up as
+    an accuracy number nobody could explain - lessons.md L7: when a refactor
+    "should be" equivalent, prove it.
+    """
+    mesh = build_face(nose_offset=nose_offset)
+    box = get_face_box(mesh, FRAME_WIDTH, FRAME_HEIGHT)
+
+    whole = rejection_reason(mesh, FRAME_WIDTH, FRAME_HEIGHT, box, profile)
+    structure = structure_rejection_reason(
+        mesh, FRAME_WIDTH, FRAME_HEIGHT, box, profile
+    )
+    frontality = frontality_reason(
+        mesh, FRAME_WIDTH, FRAME_HEIGHT, box, profile
+    )
+
+    assert whole == (structure or frontality)
+
+
+def test_enrolment_applies_no_frontality_check_at_all():
+    """
+    `ENROLMENT_PROFILE` sets both frontality fields to None, so the new
+    function is a no-op for it however far the head is turned. This is what
+    makes the split safe rather than a relaxation: the checks that remain in
+    `structure_rejection_reason()` are the ones enrolment has always used
+    alone to identify a face, across 50 deliberately off-axis images per
+    student.
+    """
+    for nose_offset in (0.0, 0.30, 0.45, -0.45):
+        mesh = build_face(nose_offset=nose_offset)
+        box = get_face_box(mesh, FRAME_WIDTH, FRAME_HEIGHT)
+
+        assert (
+            frontality_reason(
+                mesh, FRAME_WIDTH, FRAME_HEIGHT, box, ENROLMENT_PROFILE
+            )
+            is None
+        )
+
+
 def test_profiles_declare_their_divergence_explicitly():
     """
     Every check one profile applies and the other does not is a `None` field.
@@ -285,6 +379,100 @@ def test_implausible_aspect_ratio_is_rejected():
 def test_impossible_eye_separation_is_rejected(profile, eye_half_width):
     mesh = build_face(eye_half_width=eye_half_width)
     assert verdict(mesh, profile) == "eye separation out of range"
+
+
+# Measured live on 2026-08-21: a real operator, a real 1920x1080 camera, all
+# nine enrolment stages, 2,709 frames, through the production detector and the
+# production canonicalisation. `eye_distance` is outer-corner to outer-corner
+# over the FaceMesh box width - ENROLMENT_PROFILE's own definition.
+#
+# ⚠️ **The LEFT and RIGHT rows carry the right numbers under unreliable
+# labels.** The probe showed an un-mirrored preview and said only "TURN
+# SLIGHTLY LEFT", so the operator turned the wrong way on roughly half the LEFT
+# frames and said so afterwards. Mislabelling which turn a frame was does not
+# change the set of frames measured, and the ceiling is a maximum over all of
+# them - set by DOWN and CLOSE, which nobody was confused about. The turned
+# stages only ever probe the FLOOR, and the evidence there is that a real turn
+# in either direction reaches 0.403 against a 0.18 floor.
+#
+# What it does cost is sampling: genuine left turns are under-represented, so
+# the LEFT row is a weaker estimate than n=264 suggests. Do not read the
+# per-stage minima as a left/right asymmetry. See
+# tasks/audit-face-detector.md §1.5.
+#
+# (stage, frames, minimum, median, maximum)
+MEASURED_ENROLMENT_EYE_OF_WIDTH = (
+    ("STRAIGHT", 165, 0.686, 0.699, 0.718),
+    ("LEFT", 264, 0.538, 0.585, 0.707),
+    ("RIGHT", 326, 0.403, 0.534, 0.710),
+    ("UP", 327, 0.682, 0.692, 0.716),
+    ("DOWN", 326, 0.689, 0.718, 0.739),
+    ("SMILE", 327, 0.691, 0.698, 0.710),
+    ("CLOSE", 321, 0.697, 0.722, 0.738),
+    ("MEDIUM", 326, 0.690, 0.701, 0.716),
+    ("FAR", 327, 0.659, 0.673, 0.703),
+)
+
+
+@pytest.mark.parametrize(
+    ("stage", "frames", "lowest", "median", "highest"),
+    MEASURED_ENROLMENT_EYE_OF_WIDTH,
+    ids=[row[0] for row in MEASURED_ENROLMENT_EYE_OF_WIDTH],
+)
+def test_the_eye_band_admits_every_measured_enrolment_pose(
+    stage, frames, lowest, median, highest
+):
+    """
+    ⚠️ **The regression this exists to prevent, and the defect it replaces.**
+
+    `eye_distance_of_width` was `(0.18, 0.70)` while the quantity it bounds
+    ran 0.403-0.739 with a median of 0.697. A ceiling on the median of its own
+    distribution is not a gate - landmark jitter decides it - and it admitted
+    **61.7%** of frames from an operator doing everything correctly. The
+    refusal then surfaced as "No face detected.", which is why three UAT
+    rounds went looking at the detector.
+
+    The parametrisation is by stage on purpose: the *turned* stages are the
+    ones that probe the floor, because a turn shortens the projected eye span.
+    A future change that fixes the ceiling by moving the floor would pass a
+    frontal-only check and fail here on LEFT and RIGHT.
+
+    ⚠️ One subject. This asserts the band covers what has actually been
+    measured; it is not a claim that 0.403-0.739 is the population.
+    """
+    low, high = ENROLMENT_PROFILE.eye_distance_of_width
+
+    assert low < lowest, (
+        f"{stage}: the floor {low} refuses a measured frame at {lowest} "
+        f"(n={frames})"
+    )
+    assert high > highest, (
+        f"{stage}: the ceiling {high} refuses a measured frame at {highest} "
+        f"(n={frames}). This is the 0.70 defect returning."
+    )
+    assert not low <= median <= low + (high - low) * 0.05, (
+        f"{stage}: the median {median} sits at the very bottom of the band"
+    )
+
+
+def test_the_eye_band_keeps_real_margin_around_the_measured_extremes():
+    """
+    Admitting the measured frames is not enough - 0.75 would have done that
+    with 0.011 to spare, which is the same "threshold on the edge of its own
+    data" shape one decimal place further out.
+    """
+    low, high = ENROLMENT_PROFILE.eye_distance_of_width
+
+    highest = max(row[4] for row in MEASURED_ENROLMENT_EYE_OF_WIDTH)
+    lowest = min(row[2] for row in MEASURED_ENROLMENT_EYE_OF_WIDTH)
+
+    assert high - highest >= 0.05, (
+        f"only {high - highest:.3f} of headroom above the measured maximum "
+        f"{highest}; a differently-shaped face has nowhere to land"
+    )
+    assert lowest - low >= 0.05, (
+        f"only {lowest - low:.3f} of margin below the measured minimum"
+    )
 
 
 @pytest.mark.parametrize("profile", ALL_PROFILES, ids=lambda p: p.name)
@@ -392,17 +580,40 @@ def test_box_area_of_an_inverted_box_is_zero():
 
 GATE_FUNCTIONS = ("is_valid_face_candidate", "get_face_box")
 
+# ⚠️ These three used to name `recognize_face.py` and `capture_dataset.py`
+# explicitly, because those were the two files that carried the divergent
+# copies. Phase 5 deleted the second one, which would have left a two-module
+# ban covering one module - and nothing at all covering the files this phase
+# adds. They now sweep every first-party module except the owner, so a
+# reintroduced copy is caught wherever somebody puts it.
+#
+# The two gate functions have two owners, not one: `get_face_box` is the
+# geometry primitive and lives in vision/geometry.py, `is_valid_face_candidate`
+# is the decision built on it and lives in vision/validation.py.
+GATE_OWNERS = {
+    "get_face_box": "geometry.py",
+    "is_valid_face_candidate": "validation.py",
+}
 
-@pytest.mark.parametrize("module_name", ["recognize_face.py", "capture_dataset.py"])
-def test_modules_do_not_redefine_the_gate(module_name):
-    """
-    Neither module may define its own copy again.
 
-    This is what keeps MA-4 closed. Both modules import from `vision/`; a
-    local `def is_valid_face_candidate` would shadow the import and silently
-    restore the divergence, exactly as lessons.md L5 describes for `settings`.
+def _modules_that_must_not_own_the_gate():
+    owners = set(GATE_OWNERS.values())
+    return [path for path in project_python_files() if path.name not in owners]
+
+
+@pytest.mark.parametrize(
+    "path",
+    _modules_that_must_not_own_the_gate(),
+    ids=lambda path: path.name,
+)
+def test_no_module_redefines_the_gate(path):
     """
-    path = PROJECT_ROOT / module_name
+    Only vision/validation.py may define the geometry gate.
+
+    This is what keeps MA-4 closed. A local `def is_valid_face_candidate`
+    would shadow the import and silently restore the divergence, exactly as
+    lessons.md L5 describes for `settings`.
+    """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 
     defined = {
@@ -412,12 +623,12 @@ def test_modules_do_not_redefine_the_gate(module_name):
     }
 
     assert not defined, (
-        f"{module_name} defines {sorted(defined)} locally. The face-geometry "
+        f"{path.name} defines {sorted(defined)} locally. The face-geometry "
         f"gate lives in vision/validation.py (MA-4); import it instead."
     )
 
 
-@pytest.mark.parametrize("module_name", ["recognize_face.py", "capture_dataset.py"])
+@pytest.mark.parametrize("module_name", ["recognize_face.py"])
 def test_modules_import_the_shared_gate(module_name):
     source = (PROJECT_ROOT / module_name).read_text(encoding="utf-8")
     assert "vision.validation" in source, (
@@ -429,10 +640,10 @@ def test_landmark_indices_are_written_down_once():
     """
     A MediaPipe mesh index may only appear in vision/landmarks.py.
 
-    Both modules used to carry their own block of these numbers. They matched
+    Two modules used to carry their own block of these numbers. They matched
     by luck, and a mesh index typed twice is a mesh index that can drift once.
     """
-    for module_name in ("recognize_face.py", "capture_dataset.py"):
+    for module_name in ("recognize_face.py",):
         path = PROJECT_ROOT / module_name
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 

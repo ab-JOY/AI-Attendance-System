@@ -245,6 +245,63 @@ def get_available_cameras(max_tested=5):
     return available
 
 
+def describe_available_cameras(max_tested=5):
+    """
+    Every usable camera, with enough about it for a person to choose.
+
+    `get_available_cameras()` answers with bare indices, which is all
+    `open_best_camera()` ever needed - it picks for itself. A human picking
+    needs to tell one device from another, and on this deployment "0" and "1"
+    say nothing: the operator reported that the app "defaults to the laptop
+    cam" precisely because there was no way to see that a second camera
+    existed, let alone which one was which.
+
+    So this returns, per device: the index, the resolution it reports, whether
+    it is currently the saved default, and whether it looked **frozen** - a
+    still image or a stopped virtual camera. That last flag is the one worth
+    surfacing. `open_best_camera()` already refuses to *save* a frozen device
+    as the preference, and a picker that let somebody choose one without
+    saying so would undo that quietly.
+
+    ⚠️ **This opens every index in turn, so it cannot run while a session
+    holds the camera** - the caller must check. It is also slow: a device
+    another application is holding blocks for as long as SLOW_PROBE_SECONDS
+    warns about, measured at 14.9 s.
+    """
+    saved_index = get_saved_camera_index()
+    cameras = []
+
+    for index in range(max_tested):
+        cap, statistics = open_and_probe(index)
+
+        if cap is None:
+            continue
+
+        try:
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        finally:
+            cap.release()
+
+        cameras.append(
+            {
+                "index": index,
+                "width": width,
+                "height": height,
+                "frozen": bool(statistics.get("frozen")),
+                "is_saved_default": index == saved_index,
+            }
+        )
+
+    logger.info(
+        "Camera scan found %d usable device(s) of %d checked",
+        len(cameras),
+        max_tested,
+    )
+
+    return cameras
+
+
 def open_camera_by_index(index):
     """
     Open one camera index, or None if it will not give us a picture.

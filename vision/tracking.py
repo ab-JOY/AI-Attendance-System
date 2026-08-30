@@ -57,8 +57,32 @@ class TrackConfig:
 
     # --- losing one ---
     max_weak_frames_before_clear: int = 3
+
+    # ⚠️ These two count **contradictions only** - frames where LBPH read a
+    # *different* enrolled student on a track whose identity is locked. That
+    # is evidence of a track switch, which is what they exist to stop, and
+    # five frames of it is rightly fatal.
+    #
+    # They used to count "no usable prediction" as well, and that is what made
+    # the liveness challenge unpassable: motion blur across a requested head
+    # turn, or a crop the quality gate refused, is not evidence about identity
+    # at all. At 7-15 fps two frames is 0.13 s and five is 0.33-0.7 s, so a
+    # student doing exactly what the screen asked lost the sequence and then
+    # the identity. See process_confirmed_track().
     max_confirmed_mismatch_frames: int = 5
     liveness_reset_mismatch_frames: int = 2
+
+    # How many consecutive frames a confirmed track may go **unread** - no
+    # usable prediction either way - before the identity is dropped. Generous
+    # because absence of evidence is not evidence: at 7-15 fps this is roughly
+    # 1.7-3.5 s, long enough to cover a turn, a blink of bad exposure or
+    # someone walking past, and short enough that a track which has genuinely
+    # lost its face does not sit locked forever.
+    #
+    # It does **not** restart the challenge. Reshuffling on frames the
+    # challenge itself caused is what put a fresh random sequence on screen
+    # while the student was still performing the previous one.
+    max_unreadable_frames_before_clear: int = 25
 
 
 DEFAULT_TRACK_CONFIG = TrackConfig()
@@ -88,15 +112,18 @@ class TrackState:
 
     __slots__ = (
         "attendance_saved",
+        "attendance_status",
         "confirmed",
         "consecutive_count",
         "consecutive_id",
         "config",
         "history",
+        "last_blocker",
         "liveness",
         "mismatch_frames",
         "student_id",
         "student_name",
+        "unreadable_frames",
         "valid_face_frames",
         "weak_frames",
     )
@@ -114,17 +141,50 @@ class TrackState:
         self.consecutive_id: str | None = None
         self.consecutive_count = 0
         self.weak_frames = 0
+        # Frames on a confirmed track that read a *different* student.
         self.mismatch_frames = 0
+        # Frames on a confirmed track that read nothing usable at all. Counted
+        # apart from mismatch_frames because the two are different evidence -
+        # see TrackConfig above.
+        self.unreadable_frames = 0
+        # The blocker reported last frame, so a caller can log a stuck track
+        # once when it becomes stuck rather than at the frame rate.
+        self.last_blocker: str | None = None
         self.student_id: str | None = None
         self.student_name: str | None = None
         self.confirmed = False
         self.attendance_saved = False
+        # What the register actually recorded for this track: "Present",
+        # "Late", or None when nothing has been written yet or the status is
+        # not known to this process. See `recorded_status` below.
+        self.attendance_status: str | None = None
         self.liveness: Any = None
 
     # -- lifecycle ------------------------------------------------------
 
     def note_valid_frame(self) -> None:
         self.valid_face_frames += 1
+
+    @property
+    def recorded_status(self) -> str:
+        """
+        What to put on the overlay for a track that has been recorded.
+
+        ⚠️ **The overlay used to say "Present" unconditionally**, which was
+        true only because `save_attendance()` was called with a hardcoded
+        "Present" and could never write anything else (FS-8, reopened). Now
+        that the schedule decides, a Late student must read Late on the screen
+        as well as in the register - two screens disagreeing about one session
+        is FS-7, and it is what /reports and the export would be checked
+        against.
+
+        Falls back to "Present" when the status is unknown, which is exactly
+        the `adopt_completed_identity()` case: a student who stepped out of
+        frame and back in is inheriting a mark this track did not make and
+        cannot see. That is the pre-existing behaviour rather than a new
+        claim - the register, not the overlay, is the record.
+        """
+        return self.attendance_status or "Present"
 
     @property
     def is_provisional(self) -> bool:
@@ -214,27 +274,65 @@ class TrackState:
             dominant_count=dominant_count,
         )
 
+    def confirmation_blocker(
+        self,
+        verdict: HistoryVerdict,
+        claimed_student_ids: set[str],
+    ) -> str | None:
+        """
+        Which condition is stopping this track confirming, or None if none is.
+
+        `can_confirm()` is this function's boolean face, the same way
+        `is_valid_face_candidate()` is `rejection_reason()`'s in
+        vision/validation.py. Naming the blocker rather than returning a bare
+        False is what turns "the camera will not pick me up" into something
+        diagnosable - and this system has now produced that exact complaint
+        twice for two different reasons.
+
+        The one that motivated it: with the confirmation bar set below the
+        recognition threshold, a genuine unanimous window sat at
+        "Verifying 20/20 100%" indefinitely with nothing written to any log.
+        The band is closed in recognize_face.py, but a future calibration may
+        legitimately reopen a gap, and when it does the operator and the log
+        must both be told rather than left watching a yellow box.
+        """
+        if verdict.history_count < self.config.prediction_history_size:
+            return "window"
+
+        if verdict.agreement_ratio < self.config.min_label_agreement:
+            return "agreement"
+
+        if verdict.average_confidence > self.config.confirmation_confidence:
+            return "distance"
+
+        if (
+            self.consecutive_id != verdict.dominant_id
+            or self.consecutive_count
+            < self.config.min_consecutive_identity_frames
+        ):
+            return "consecutive"
+
+        if verdict.dominant_id in claimed_student_ids:
+            return "claimed"
+
+        return None
+
     def can_confirm(
         self,
         verdict: HistoryVerdict,
         claimed_student_ids: set[str],
     ) -> bool:
         """
-        Four independent conditions, all required.
+        Five independent conditions, all required.
 
         A full window of votes, overwhelming agreement within it, a good
         average distance, and a run of consecutive frames on the same
         identity - plus nobody else in this frame having already claimed it.
+
+        Expressed through `confirmation_blocker()` so the boolean and the
+        explanation cannot disagree about what the rules are.
         """
-        return (
-            verdict.history_count >= self.config.prediction_history_size
-            and verdict.agreement_ratio >= self.config.min_label_agreement
-            and verdict.average_confidence <= self.config.confirmation_confidence
-            and self.consecutive_id == verdict.dominant_id
-            and self.consecutive_count
-            >= self.config.min_consecutive_identity_frames
-            and verdict.dominant_id not in claimed_student_ids
-        )
+        return self.confirmation_blocker(verdict, claimed_student_ids) is None
 
     def confirm(self, student_id: str, student_name: str, liveness: Any) -> None:
         """Lock an identity to this track and start the liveness challenge."""
@@ -242,7 +340,9 @@ class TrackState:
         self.student_name = student_name
         self.confirmed = True
         self.attendance_saved = False
+        self.attendance_status = None
         self.mismatch_frames = 0
+        self.unreadable_frames = 0
         self.liveness = liveness
 
     def adopt_completed_identity(self, student_id: str, student_name: str) -> None:
@@ -252,12 +352,18 @@ class TrackState:
         Only an unconfirmed track may do this. It is what stops a student who
         stepped out of frame and back in from being asked to pass liveness
         again for a mark they already have.
+
+        ⚠️ `attendance_status` is deliberately left alone: the mark was made by
+        a track this one never saw, so its status is not known here.
+        `recorded_status` reads that as "Present", which is what the overlay
+        showed before any of this existed.
         """
         self.student_id = student_id
         self.student_name = student_name
         self.confirmed = True
         self.attendance_saved = True
         self.mismatch_frames = 0
+        self.unreadable_frames = 0
         self.history.clear()
 
 

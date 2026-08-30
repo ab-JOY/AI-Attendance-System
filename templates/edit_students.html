@@ -1,25 +1,13 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Edit Student</title>
+{% extends "base.html" %}
 
-    <link rel="stylesheet"
-          href="{{ url_for('static', filename='css/style.css') }}">
-</head>
+{% block title %}Edit Student{% endblock %}
 
-<body>
-
-{% include 'sidebar.html' %}
-
-<div class="main-content">
-
+{% block content %}
     <h1>Edit Student</h1>
 
     <div class="form-container">
 
-        <form action="{{ url_for('update_student', student_id=student.student_id) }}"
+        <form action="{{ url_for('students.update_student', student_id=student.student_id) }}"
               method="POST">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
@@ -151,15 +139,11 @@
 
         <br>
 
-        <a href="{{ url_for('manage_students') }}">
+        <a href="{{ url_for('students.manage_students') }}">
             <button type="button">
                 Back to Manage Students
             </button>
         </a>
 
     </div>
-
-</div>
-
-</body>
-</html>
+{% endblock %}

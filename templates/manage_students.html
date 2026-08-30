@@ -1,28 +1,8 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
+{% extends "base.html" %}
 
-    <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1.0"
-    >
+{% block title %}Manage Students{% endblock %}
 
-    <title>Manage Students</title>
-
-    <link
-        rel="stylesheet"
-        href="{{ url_for('static', filename='css/style.css') }}"
-    >
-</head>
-
-<body>
-
-{% include 'sidebar.html' %}
-
-<!-- ================= MAIN CONTENT ================= -->
-<div class="main-content">
-
+{% block content %}
     <h1>Manage Students</h1>
 
     <!-- ================= SEARCH ================= -->
@@ -30,7 +10,7 @@
 
         <form
             method="POST"
-            action="{{ url_for('search_student') }}"
+            action="{{ url_for('students.search_student') }}"
         >
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
@@ -69,6 +49,7 @@
                 <th>Program</th>
                 <th>Year Level</th>
                 <th>Section</th>
+                <th>Classes</th>
                 <th>Actions</th>
             </tr>
 
@@ -106,12 +87,32 @@
                     {{ student.section }}
                 </td>
 
+                {#
+                    US-10. A student can be enrolled for recognition and be in
+                    no class at all - the model knows them, the register
+                    refuses them. Until this column existed the first anybody
+                    heard of it was "Not Enrolled" on the attendance overlay,
+                    with a student standing in front of the camera.
+
+                    This is the screen the enrolment flow redirects to, so it
+                    is also where the warning flashed by /enrol/finish lands.
+                #}
+                <td>
+                    {% if student.classes %}
+                        {{ student.classes }}
+                    {% else %}
+                        <span class="warning-text">
+                            None — attendance cannot be recorded
+                        </span>
+                    {% endif %}
+                </td>
+
                 <td>
 
                     <!-- EDIT STUDENT -->
                     <a
                         href="{{ url_for(
-                            'edit_student',
+                            'students.edit_student',
                             student_id=student.student_id
                         ) }}"
                         class="action-btn"
@@ -124,14 +125,21 @@
                     <!-- DELETE STUDENT -->
                     <form
                         action="{{ url_for(
-                            'delete_student',
+                            'students.delete_student',
                             student_id=student.student_id
                         ) }}"
                         method="POST"
                         style="display:inline;"
-                        onsubmit="return confirm(
-                            'Are you sure you want to permanently delete {{ student.name }}?'
-                        );"
+                        {#
+                            US-5. This was `onsubmit="return confirm('… {{ student.name }} …')"`.
+                            Jinja escapes an apostrophe to &#39;, the browser
+                            decodes it back before the JavaScript is parsed, and
+                            a student named O'Brien therefore produced a syntax
+                            error - so the handler never compiled and the delete
+                            submitted with **no confirmation at all**. An
+                            attribute value is text; static/js/app.js reads it.
+                        #}
+                        data-confirm="Permanently delete {{ student.name }}?"
                     >
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
@@ -148,15 +156,22 @@
                     <br><br>
 
                     <!-- RECAPTURE FACE -->
+                    {#
+                        Posts to /enrol in recapture mode. The old route
+                        deleted this student's images and *then* opened a
+                        capture window on the server desktop, so any failure
+                        left them with no dataset at all (FS-15). The new
+                        flow keeps the existing images until a complete
+                        replacement is on disk.
+                    #}
                     <form
-                        action="{{ url_for('recapture_face') }}"
+                        action="{{ url_for('enrolment.enrol') }}"
                         method="POST"
                         style="display:inline;"
-                        onsubmit="return confirm(
-                            'Recapture face for {{ student.name }}?'
-                        );"
+                        data-confirm="Recapture the face of {{ student.name }}? Their current images are kept until the new capture is complete."
                     >
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <input type="hidden" name="mode" value="recapture">
 
 
                         <input
@@ -184,7 +199,8 @@
 
             <tr>
 
-                <td colspan="7">
+                <!-- 8 columns since the Classes column was added (US-10). -->
+                <td colspan="8">
                     No students found.
                 </td>
 
@@ -195,8 +211,8 @@
         </tbody>
 
     </table>
+{% endblock %}
 
-</div>
-
-</body>
-</html>
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/training.js') }}" defer></script>
+{% endblock %}

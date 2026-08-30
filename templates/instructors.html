@@ -1,45 +1,13 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Instructor Registration</title>
+{% extends "base.html" %}
 
-    <link rel="stylesheet"
-          href="{{ url_for('static', filename='css/style.css') }}">
-</head>
-<body>
+{% block title %}Instructor Registration{% endblock %}
 
-<!-- ================= SIDEBAR ================= -->
-<div class="sidebar">
-
-    <h2>AI Attendance</h2>
-
-    <ul>
-        <li><a href="/dashboard">Dashboard</a></li>
-        <li><a href="/students">Students</a></li>
-        <li><a href="/manage_students">Manage Students</a></li>
-
-        <li><a href="/instructors">Instructors</a></li>
-        <li><a href="/manage_instructors">Manage Instructors</a></li>
-
-        <li><a href="/subjects">Subjects</a></li>
-        <li><a href="/attendance">Attendance</a></li>
-        <li><a href="/reports">Reports</a></li>
-        <li><a href="/settings">Settings</a></li>
-        <li><a href="/logout">Logout</a></li>
-    </ul>
-
-</div>
-
-<!-- ================= MAIN CONTENT ================= -->
-<div class="main-content">
-
+{% block content %}
     <h1>Instructor Registration</h1>
 
     <div class="form-container">
 
-        <form action="{{ url_for('add_instructor') }}"
+        <form action="{{ url_for('instructors.add_instructor') }}"
               method="POST">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
@@ -105,8 +73,4 @@
         {% endif %}
 
     </table>
-
-</div>
-
-</body>
-</html>
+{% endblock %}

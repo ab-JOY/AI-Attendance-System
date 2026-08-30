@@ -170,7 +170,39 @@ ENROLMENT_PROFILE = FaceGeometryProfile(
     aspect_ratio=(0.55, 1.15),
     left_eye_landmarks=LEFT_EYE_SINGLE,
     right_eye_landmarks=RIGHT_EYE_SINGLE,
-    eye_distance_of_width=(0.18, 0.70),
+    # ⚠️ **The ceiling was 0.70 until 2026-08-21, and it sat on the median of
+    # its own distribution.** Measured live over 2,709 frames of a real
+    # operator holding all nine enrolment stages in front of a real camera:
+    #
+    #   stage      n    eye/width  min     p50     max    over 0.70
+    #   STRAIGHT  165              0.686   0.699   0.718     39%
+    #   LEFT      264              0.538   0.585   0.707      2%
+    #   RIGHT     326              0.403   0.534   0.710      1%
+    #   UP        327              0.682   0.692   0.716     13%
+    #   DOWN      326              0.689   0.718   0.739     95%
+    #   SMILE     327              0.691   0.698   0.710     32%
+    #   CLOSE     321              0.697   0.722   0.738     98%
+    #   MEDIUM    326              0.690   0.701   0.716     59%
+    #   FAR       327              0.659   0.673   0.703      0%
+    #   ALL      2709              0.403   0.697   0.739
+    #
+    # A ceiling of 0.70 admitted **61.7%** of frames from a person doing
+    # everything right, and which side of it a frame landed on was decided by
+    # landmark jitter - so enrolment presented as intermittent rather than
+    # broken, and the refusal was reported as "No face detected."
+    #
+    # This is expected geometry, not an unusual face: the mesh covers the face
+    # oval and not the ears, so the OUTER eye corners span about 0.70 of it.
+    # The measured maximum is 0.739; 0.80 clears it by ~8% so a different face
+    # shape has somewhere to land, while still refusing a mesh fit whose
+    # "eyes" are most of the box. 0.75 would also admit 100% of the frames
+    # above and was rejected for having only 0.011 of margin.
+    #
+    # ⚠️ **The floor was never the problem and has not moved.** The turned
+    # stages are what probe it - a turn shortens the projected eye span - and
+    # LEFT/RIGHT bottom out at 0.403 against a 0.18 floor. One subject; see
+    # tasks/audit-face-detector.md §3 for what that does and does not license.
+    eye_distance_of_width=(0.18, 0.80),
     min_eye_distance_px=8.0,
     max_eye_roll_of_eye_distance=None,
     max_eye_roll_of_face_height=0.25,
@@ -189,7 +221,7 @@ ENROLMENT_PROFILE = FaceGeometryProfile(
 )
 
 
-def rejection_reason(
+def structure_rejection_reason(
     face_landmarks: LandmarkList,
     frame_width: int,
     frame_height: int,
@@ -197,11 +229,17 @@ def rejection_reason(
     profile: FaceGeometryProfile,
 ) -> str | None:
     """
-    Why `profile` refuses this face, or `None` if it accepts it.
+    Why `profile` refuses this as **a face**, ignoring which way it is facing.
 
-    `is_valid_face_candidate()` is this function's boolean face. Keeping the
-    reason available costs nothing and turns "the camera will not pick me up"
-    into something diagnosable at DEBUG level.
+    Every check except the two frontality ones, which are
+    `frontality_reason()`. Splitting them is what lets recognition keep
+    *tracking* a head that has turned - see that function's docstring for the
+    defect this closes.
+
+    Enrolment is the evidence that the split is sound: `ENROLMENT_PROFILE`
+    applies none of the frontality checks and still identifies faces reliably
+    enough to collect 50 deliberately off-axis images per student. What is
+    left here is sufficient to answer "is this a face".
     """
     x1, y1, x2, y2 = box
     face_width = x2 - x1
@@ -262,7 +300,9 @@ def rejection_reason(
     ):
         return "head roll too large"
 
-    eye_center_x = (left_eye[0] + right_eye[0]) / 2.0
+    # Only the y coordinate is structural. The eye centre's x is what
+    # frontality measures the nose against, and that lives in
+    # frontality_reason() now.
     eye_center_y = (left_eye[1] + right_eye[1]) / 2.0
 
     if profile.eye_level_band_of_box is not None:
@@ -277,7 +317,6 @@ def rejection_reason(
     upper_lip = landmark_pixel(face_landmarks, UPPER_LIP, frame_width, frame_height)
     lower_lip = landmark_pixel(face_landmarks, LOWER_LIP, frame_width, frame_height)
 
-    mouth_center_x = (left_mouth[0] + right_mouth[0]) / 2.0
     mouth_center_y = (upper_lip[1] + lower_lip[1]) / 2.0
     mouth_width = abs(right_mouth[0] - left_mouth[0])
 
@@ -308,20 +347,115 @@ def rejection_reason(
     if not above <= nose[1] <= below:
         return "nose is not between the eyes and the mouth"
 
+    return None
+
+
+def frontality_reason(
+    face_landmarks: LandmarkList,
+    frame_width: int,
+    frame_height: int,
+    box: FaceBox,
+    profile: FaceGeometryProfile,
+) -> str | None:
+    """
+    Why this face is not frontal enough for `profile`, or None if it is.
+
+    ⚠️ **This used to be the last two checks of `rejection_reason()`, and
+    living there is what made the liveness challenge unpassable.**
+
+    `recognize_face._stream_frames()` calls the geometry gate *before*
+    `tracker.assign()`, and a rejected frame hits a bare `continue`. So while
+    these two checks decided whether a face was **seen at all**, a student
+    obeying "Turn LEFT" was dropped the moment their nose passed
+    0.28 x face-width: no box drawn, no liveness progress, no mismatch
+    counted, and - the part that actually breaks it - **no refresh of the
+    track's `last_seen`**, so `expire_old_tracks()` deleted the track 1.5 s
+    later. The student turned back to find themselves at "Verifying 0/20"
+    again, re-confirmed, drew a fresh random challenge, and repeated.
+
+    Measured: the challenge demands >= 0.10 face-widths of turn
+    (`LivenessConfig.turn_of_face_width`) while this ceiling sits at about
+    0.32 in the same units - the two measure yaw from different landmarks, and
+    the gate reads about 0.87x the liveness value. That is a real window, but
+    the student is told only "Turn LEFT" with no upper bound and no feedback,
+    and enrolment - which says "TURN **SLIGHTLY** LEFT" and produced the
+    training data - already reaches 80% of this ceiling.
+
+    So frontality moved from "may I see you" to **"may I decide about you"**.
+    It now gates confirmation and nothing else: an attendance mark still
+    requires a frontal face, which is the property `RECOGNITION_PROFILE`'s
+    comment describes and the one worth keeping. Tracking, drawing and the
+    liveness challenge no longer apply it.
+    """
+    x1, _y1, x2, _y2 = box
+    face_width = x2 - x1
+
+    if (
+        profile.max_nose_offset_of_width is None
+        and profile.max_mouth_offset_of_width is None
+    ):
+        return None
+
+    left_eye = average_landmark_pixel(
+        face_landmarks, profile.left_eye_landmarks, frame_width, frame_height
+    )
+    right_eye = average_landmark_pixel(
+        face_landmarks, profile.right_eye_landmarks, frame_width, frame_height
+    )
+
+    eye_center_x = (left_eye[0] + right_eye[0]) / 2.0
+
+    nose = landmark_pixel(face_landmarks, NOSE_TIP, frame_width, frame_height)
+
     if (
         profile.max_nose_offset_of_width is not None
         and abs(nose[0] - eye_center_x) > face_width * profile.max_nose_offset_of_width
     ):
         return "face is not frontal enough"
 
-    if (
-        profile.max_mouth_offset_of_width is not None
-        and abs(mouth_center_x - eye_center_x)
-        > face_width * profile.max_mouth_offset_of_width
-    ):
-        return "mouth is not aligned with the eyes"
+    if profile.max_mouth_offset_of_width is not None:
+        left_mouth = landmark_pixel(
+            face_landmarks, LEFT_MOUTH, frame_width, frame_height
+        )
+        right_mouth = landmark_pixel(
+            face_landmarks, RIGHT_MOUTH, frame_width, frame_height
+        )
+        mouth_center_x = (left_mouth[0] + right_mouth[0]) / 2.0
+
+        if (
+            abs(mouth_center_x - eye_center_x)
+            > face_width * profile.max_mouth_offset_of_width
+        ):
+            return "mouth is not aligned with the eyes"
 
     return None
+
+
+def rejection_reason(
+    face_landmarks: LandmarkList,
+    frame_width: int,
+    frame_height: int,
+    box: FaceBox,
+    profile: FaceGeometryProfile,
+) -> str | None:
+    """
+    Why `profile` refuses this face, or `None` if it accepts it.
+
+    Structure first, then frontality - the same sequence of checks, returning
+    the same reasons, that this function ran before the two were separated.
+    Kept whole because "is this a face I am willing to act on?" is still a
+    question worth asking in one call, and because every existing caller and
+    test means exactly that by it.
+
+    `is_valid_face_candidate()` is this function's boolean face. Keeping the
+    reason available costs nothing and turns "the camera will not pick me up"
+    into something diagnosable at DEBUG level.
+    """
+    return structure_rejection_reason(
+        face_landmarks, frame_width, frame_height, box, profile
+    ) or frontality_reason(
+        face_landmarks, frame_width, frame_height, box, profile
+    )
 
 
 def is_valid_face_candidate(
@@ -334,5 +468,35 @@ def is_valid_face_candidate(
     """True if `profile` accepts this face as a real, usable face."""
     return (
         rejection_reason(face_landmarks, frame_width, frame_height, box, profile)
+        is None
+    )
+
+
+def is_structurally_a_face(
+    face_landmarks: LandmarkList,
+    frame_width: int,
+    frame_height: int,
+    box: FaceBox,
+    profile: FaceGeometryProfile,
+) -> bool:
+    """True if this is a face, whichever way it is turned."""
+    return (
+        structure_rejection_reason(
+            face_landmarks, frame_width, frame_height, box, profile
+        )
+        is None
+    )
+
+
+def is_frontal(
+    face_landmarks: LandmarkList,
+    frame_width: int,
+    frame_height: int,
+    box: FaceBox,
+    profile: FaceGeometryProfile,
+) -> bool:
+    """True if this face is square-on enough for `profile` to decide about."""
+    return (
+        frontality_reason(face_landmarks, frame_width, frame_height, box, profile)
         is None
     )

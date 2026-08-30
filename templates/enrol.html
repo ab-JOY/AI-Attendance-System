@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+
+{% block title %}Face Capture{% endblock %}
+
+{% block content %}
+
+    {#
+        Everything static/js/enrol.js needs, as data attributes (US-8). These
+        were eleven `{{ ... }}` interpolations inside the script itself, which
+        is the construction that makes US-5 possible: a value rendered into a
+        JavaScript string literal is a value that can end the literal early.
+
+        ⚠️ **`data-record` is single-quoted, and that is load-bearing.** This
+        comment used to end "an attribute value needs no guarding at all",
+        which is false and cost the enrolment page entirely. `tojson` escapes
+        `<`, `>`, `&` and `'` - it does NOT escape `"`, because it is built to
+        be safe inside a script element or a *single*-quoted attribute. In a
+        double-quoted one the first `"` of the JSON closes the attribute, so
+        `getAttribute("data-record")` returned the single character `{`,
+        `JSON.parse` threw at enrol.js line 34, and the whole IIFE died before
+        reaching `openCamera(null)` on its last line. The page then sat on
+        every placeholder the server had rendered - "Preparing the camera...",
+        "Waiting for camera permission..." - with no error anywhere, because
+        the failure was in the browser and the log is on the server.
+
+        It only bit *new* enrolments: recapture passes `record = {}`, which
+        contains no quote. Add Student passes four keys and never opened a
+        camera.
+
+        US-5 is the same lesson one context over, and the guard is the same
+        one: a value that carries data belongs in an attribute *value*, quoted
+        so that nothing in it can be read as markup. `tests/test_templates.py`
+        parses this rather than grepping it - the prose above contains the
+        string it would search for (lessons.md L12).
+    #}
+    <div
+        data-enrol-page
+        data-student-id="{{ student_id }}"
+        data-student-name="{{ student_name }}"
+        data-record='{{ record | tojson }}'
+        data-total="{{ total }}"
+        data-min-native-width="{{ min_native_width }}"
+        data-start-url="{{ url_for('enrolment.enrol_start') }}"
+        data-frame-url="{{ url_for('enrolment.enrol_frame') }}"
+        data-finish-url="{{ url_for('enrolment.enrol_finish') }}"
+        data-cancel-url="{{ url_for('enrolment.enrol_cancel') }}"
+        data-done-url="{{ url_for('students.manage_students') }}"
+        hidden></div>
+
+    <h1>
+        {% if mode == 'recapture' %}Recapture Face{% else %}Face Capture{% endif %}
+    </h1>
+
+    <p>
+        <strong>{{ student_name }}</strong> &mdash; {{ student_id }}
+    </p>
+
+    <div class="capture-wrapper">
+
+        <div>
+            <div class="capture-stage">
+                <video id="preview" playsinline muted autoplay></video>
+                <canvas id="overlay" class="capture-overlay"></canvas>
+            </div>
+
+            <p class="capture-instruction" id="instruction">Preparing the camera…</p>
+
+            <p class="capture-message"
+               id="message"
+               role="status"
+               aria-live="polite"
+               data-tone="wait">
+                Allow camera access when your browser asks.
+            </p>
+
+            {#
+                ⚠️ **Which left?** `get_head_pose()` decides from
+                `nose.x - eye_centre.x` on the *un-mirrored* uploaded frame, so
+                LEFT is the subject's own left — but that is only obvious to
+                the person posing if the picture in front of them behaves like
+                a mirror.
+
+                `enrol.js` has always assumed it does: `drawBox()` mirrors the
+                face rectangle "to match the preview, which is flipped".
+                Nothing flipped it — `#preview` had no CSS at all — so the
+                subject saw themselves as others see them, and turning left
+                made the picture appear to turn right. That is half of "capture
+                direction is ambiguous"; `transform:scaleX(-1)` in style.css is
+                the other half of the fix.
+
+                This line costs nothing and closes the question outright.
+            #}
+            <p class="capture-hint">
+                The picture above is a mirror, as if you were looking into one.
+                Left and right mean <strong>your</strong> left and right.
+            </p>
+
+            <div class="progress-track">
+                <div class="progress-fill" id="progress-fill"></div>
+            </div>
+
+            <p id="progress-text">0 of {{ total }} images</p>
+
+            {#
+                The camera picker exists because this machine has three
+                cameras and two of them do not produce a picture - a built-in
+                that returns black, and a virtual camera that returns a still.
+                Without a way to choose, the browser picks its default and the
+                operator has no way to tell a broken camera from broken
+                software. The tester is on a different machine again.
+            #}
+            {#
+                The inline `style=` attributes that used to be on these three
+                elements are gone. They were not a shortcut - they were the
+                symptom: nothing on this page had a stylesheet rule, so the
+                only way to make anything look deliberate was to write the
+                declaration on the tag. `.camera-picker` and `.camera-detail`
+                are in style.css now, with the rest of the page.
+            #}
+            <div class="form-container camera-picker">
+                <label for="camera-select">Camera</label>
+                <select id="camera-select" disabled>
+                    <option value="">Waiting for camera permission…</option>
+                </select>
+
+                <p id="camera-detail" class="camera-detail"></p>
+
+                <button type="button" id="retry-button">
+                    Reopen camera
+                </button>
+            </div>
+
+            <div class="session-controls">
+                <button type="button" id="start-button" disabled>Start capture</button>
+                <button type="button" id="cancel-button" class="stop-btn" disabled>
+                    Cancel
+                </button>
+            </div>
+        </div>
+
+        <div class="form-container stage-panel">
+            <h2>Stages</h2>
+
+            <p class="capture-hint">
+                Follow the prompt above the list. Settle into each pose and
+                hold it — the counter fills on its own, and breaking the pose
+                starts that stage's hold again. Nothing is saved until all
+                {{ total }} images are captured.
+            </p>
+
+            <ul class="stage-list" id="stage-list">
+                {% for stage in plan %}
+                    <li data-stage="{{ stage.name }}" data-state="todo">
+                        <span>{{ stage.instruction|title }}</span>
+                        <span>{{ stage.images }}</span>
+                    </li>
+                {% endfor %}
+            </ul>
+        </div>
+
+    </div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/enrol.js') }}" defer></script>
+{% endblock %}

@@ -1,16 +1,24 @@
 """
-One-click MySQL database setup for the AI Attendance System.
+One-click database setup for the AI Attendance System.
 
-Creates the configured database, all required tables, and the default admin
-user. Connection details come from config/settings.py (see .env.example), so
-this script and the application can no longer disagree about which server or
-database they are talking to.
+Creates the configured database, applies every schema migration, and seeds the
+default admin user. Connection details come from config/settings.py (see
+.env.example), so this script and the application can no longer disagree about
+which server or database they are talking to.
 
     python setup_db.py
 
-Known limitation, unchanged here: this file and database/schema.sql both
-define the schema and must be kept in sync by hand (PO-5). Replacing both
-with migrations is Phase 4 work.
+**PO-5 is closed here.** This file used to restate all five CREATE TABLE
+blocks, so the schema was defined twice - once here and once in
+database/schema.sql - and the two had to be kept in step by hand. Both are gone;
+`migrations/` is the single source of schema truth, and this script now does
+only the two things a migration cannot: create the database it will run
+against, and seed a credential whose hash has to be generated in Python.
+
+`column_exists()` and `ensure_column()` survive because
+scripts/migrate_passwords.py imports them, and because they remain the right
+tool for a data migration that has to inspect the schema. They are no longer
+used to *define* it.
 """
 
 import logging
@@ -20,6 +28,7 @@ import mysql.connector
 
 from config.logging_config import configure_logging
 from config.settings import settings
+from infra.migrations import MigrationError, apply_all
 from security.passwords import hash_password
 
 logger = logging.getLogger(__name__)
@@ -80,6 +89,16 @@ def ensure_column(cursor, database, table, column, definition):
 
 
 def setup_database(host=None, user=None, password=None, database=None):
+    """
+    Create the database, bring the schema up to date, seed the admin account.
+
+    ⚠️ `host`, `user` and `password` override only the *bootstrap* connection
+    made here, the one that issues CREATE DATABASE. The migration step opens
+    its own connection from config/settings.py. Nothing in the repository
+    passes these arguments, and pointing them somewhere the configuration does
+    not agree with would migrate one server while creating a database on
+    another. `database` is safe to pass: it is forwarded to the runner.
+    """
     host = host if host is not None else settings.db_host
     user = user if user is not None else settings.db_user
     password = password if password is not None else settings.db_password
@@ -120,91 +139,27 @@ def setup_database(host=None, user=None, password=None, database=None):
 
         cursor.execute(f"USE `{database}`")
 
-        # 1. Admin Table
-        #
-        # `password` holds a bcrypt hash, never a plaintext password (SE-1),
-        # and is never compared in SQL (SE-15). See security/passwords.py.
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS admin (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            username VARCHAR(100) NOT NULL UNIQUE,
-            password VARCHAR(255) NOT NULL,
-            must_change_password TINYINT(1) NOT NULL DEFAULT 0
-        )
-        """)
-        logger.info("Table 'admin' verified")
+    except mysql.connector.Error:
+        logger.exception("Could not create or select the database")
+        cursor.close()
+        conn.close()
+        return False
 
-        # 2. Instructors Table
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS instructors (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            instructor_id VARCHAR(100) NOT NULL UNIQUE,
-            fullname VARCHAR(255) NOT NULL,
-            password VARCHAR(255) NOT NULL,
-            must_change_password TINYINT(1) NOT NULL DEFAULT 0
-        )
-        """)
-        logger.info("Table 'instructors' verified")
+    # Schema. Every table and every column comes from migrations/ now - this
+    # script no longer restates any of it (PO-5).
+    #
+    # The migration runner opens its own connection, because it needs the
+    # database selected from the start and this one was opened without it.
+    try:
+        applied = apply_all(database=database)
+        logger.info("Schema is current; %d migration(s) applied", len(applied))
+    except MigrationError:
+        logger.exception("Schema migration failed; the database is not ready")
+        cursor.close()
+        conn.close()
+        return False
 
-        # 3. Students Table
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS students (
-            student_id VARCHAR(100) PRIMARY KEY,
-            name VARCHAR(255) NOT NULL,
-            college_department VARCHAR(255),
-            program VARCHAR(255),
-            year_level INT,
-            section VARCHAR(100)
-        )
-        """)
-        logger.info("Table 'students' verified")
-
-        # 4. Subjects Table
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS subjects (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            subject_code VARCHAR(100) NOT NULL,
-            subject_name VARCHAR(255) NOT NULL,
-            instructor VARCHAR(255),
-            day VARCHAR(100),
-            course VARCHAR(100),
-            section VARCHAR(100),
-            time_in VARCHAR(50),
-            time_out VARCHAR(50)
-        )
-        """)
-        logger.info("Table 'subjects' verified")
-
-        # 5. Attendance Table
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS attendance (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            student_id VARCHAR(100) NOT NULL,
-            student_name VARCHAR(255) NOT NULL,
-            subject_code VARCHAR(100) NOT NULL,
-            attendance_date DATE NOT NULL,
-            time_in TIME NOT NULL,
-            status VARCHAR(50) NOT NULL,
-            INDEX idx_student (student_id),
-            INDEX idx_date_subject (attendance_date, subject_code)
-        )
-        """)
-        logger.info("Table 'attendance' verified")
-
-        # Columns added after the first release. The CREATE TABLE statements
-        # above do nothing on a database that already exists, so these have
-        # to be applied separately.
-        for table in ("admin", "instructors"):
-            ensure_column(
-                cursor,
-                database,
-                table,
-                "must_change_password",
-                "TINYINT(1) NOT NULL DEFAULT 0",
-            )
-
-        conn.commit()
-
+    try:
         # Seed Default Admin
         #
         # The credential is still admin/admin and is still public knowledge -

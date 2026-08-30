@@ -61,12 +61,12 @@ def test_a_second_stream_is_refused_with_409(client, flask_app, monkeypatch):
     identity votes toward a single attendance decision - and whichever
     generator exited first released the shared camera under the other (RE-10).
     """
-    import app as app_module
+    import web.sessions as sessions_module
 
     def already_open():
         raise SessionBusy("the camera stream is already open in another window")
 
-    monkeypatch.setattr(app_module, "open_video_stream", already_open)
+    monkeypatch.setattr(sessions_module, "open_video_stream", already_open)
 
     sign_in(client)
     response = client.get("/video_feed")
@@ -81,12 +81,12 @@ def test_streaming_without_a_session_is_refused_with_409(client, monkeypatch):
     server error. It used to hand back an empty stream, which shows a broken
     image icon and explains nothing.
     """
-    import app as app_module
+    import web.sessions as sessions_module
 
     def not_running():
         raise SessionNotRunning("no attendance session is running")
 
-    monkeypatch.setattr(app_module, "open_video_stream", not_running)
+    monkeypatch.setattr(sessions_module, "open_video_stream", not_running)
 
     sign_in(client)
     response = client.get("/video_feed")
@@ -99,10 +99,10 @@ def test_a_refusal_is_a_readable_page_not_a_raw_error(client, monkeypatch):
     US-1 and SE-10: failures render the error template, and never leak the
     exception text. The message names the fix - close the other window.
     """
-    import app as app_module
+    import web.sessions as sessions_module
 
     monkeypatch.setattr(
-        app_module,
+        sessions_module,
         "open_video_stream",
         lambda: (_ for _ in ()).throw(SessionBusy("internal detail")),
     )
@@ -117,12 +117,12 @@ def test_a_refusal_is_a_readable_page_not_a_raw_error(client, monkeypatch):
 
 def test_a_granted_stream_is_served_as_mjpeg(client, monkeypatch):
     """The success path still produces the multipart response an <img> needs."""
-    import app as app_module
+    import web.sessions as sessions_module
 
     def one_frame():
         yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n\xff\xd8\xff\xd9\r\n"
 
-    monkeypatch.setattr(app_module, "open_video_stream", one_frame)
+    monkeypatch.setattr(sessions_module, "open_video_stream", one_frame)
 
     sign_in(client)
     response = client.get("/video_feed")

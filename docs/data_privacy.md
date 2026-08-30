@@ -16,9 +16,9 @@ the rest.
 
 | Data | Where it lives | Why it is needed |
 |---|---|---|
-| Face images (100 per student) | `dataset/{student_id}_{name}/` | Training data for the LBPH recogniser |
+| Face images (100 per student) | `dataset/{student_id}/` | Training data for the LBPH recogniser |
 | Biometric template (LBPH histograms) | `trainer/trainer.yml` | Derived from the images; used to recognise a face at attendance time |
-| Label map | `trainer/labels.txt` | Maps a model label to a student ID and name |
+| Label map | `trainer/labels.txt` | Maps a model label to a student ID; the name is read from `students` |
 | Student ID, name, department, programme, year, section | MySQL `students` | Identifies who an attendance record belongs to |
 | Attendance events (student, subject, date, time, status) | MySQL `attendance` | The purpose of the system |
 | Administrator and instructor credentials | MySQL `admin`, `instructors` | Access control |
@@ -77,12 +77,20 @@ the enrolment form. State how long the impostor images are kept and delete
 them when the evaluation is finished; unlike enrolment data, they have no
 ongoing purpose at all.
 
+> **The form itself is [`consent_form.md`](consent_form.md)** — Form A for
+> enrolment, Form B for evaluation participants (worded for that purpose, as
+> the section above requires), and Form C for withdrawal, which carries the
+> §5 erasure procedure as a checklist so the steps after "delete the student"
+> cannot be forgotten.
+>
 > **Current status: not implemented in software.** There is no consent field
 > in the `students` table and no consent screen in the enrolment flow. Until
-> there is, consent must be collected and filed **on paper** before any
-> `/capture_face` request is made, and the file retained for as long as the
-> data is. Adding a consent record to the schema belongs with the Phase 4
-> data-model work.
+> there is, consent must be collected and filed **on paper before any capture
+> is started** — that is the *Face Capture* page, `/enrol`; `/capture_face` and
+> the server-side capture window it named were deleted in Phase 5 — and the
+> file retained for as long as the data is. Adding a consent record to the
+> schema was scoped to the Phase 4 data-model work and **was not done**; it
+> remains open.
 
 ---
 
@@ -130,12 +138,12 @@ the `attendance` table and survives deletion.
 
 ## 5. Erasure, and how to actually do it
 
-A student may withdraw consent at any time. Erasure then has **three** parts,
+A student may withdraw consent at any time. Erasure then has **four** parts,
 and missing the third leaves their biometric template in service:
 
 1. **Delete the student** through *Manage Students → Delete*. This removes
    the row from `students`, deletes their attendance records, and removes
-   `dataset/{student_id}_{name}/`.
+   `dataset/{student_id}/`.
 2. **Retrain the model.** *Students → Train Model*, or `python -c "from
    train_model import train_model; train_model()"`. Until this runs,
    `trainer/trainer.yml` still contains the histograms computed from their
@@ -145,8 +153,55 @@ and missing the third leaves their biometric template in service:
    retrain can be reverted. That backup still contains the erased student.
    Either delete the `.bak` pair, or retrain twice so the backup is itself
    post-erasure.
+4. **Check `dataset/_migrated_duplicates/`.** If it exists,
+   `scripts/rename_dataset_folders.py` moved one or more leftover
+   `{student_id}_{name}` folders there rather than deleting them. *Manage
+   Students → Delete* removes `dataset/{student_id}/` and knows nothing about
+   this directory, so a quarantined copy of the student's images survives an
+   otherwise complete erasure. Delete
+   `dataset/_migrated_duplicates/{student_id}_*` by hand. The whole directory
+   can be deleted once you no longer need the migration to be reversible;
+   nothing reads from it.
 
-Verify by confirming the student no longer appears in `trainer/labels.txt`.
+Verify by confirming the student no longer appears in `trainer/labels.txt`,
+and that no directory under `dataset/` still carries their ID.
+
+### Step 3 is automatic where the machine retrains on every release
+
+Steps 2 and 3 are the two that get missed, because both are invisible from the
+UI: the student disappears from every screen the moment step 1 runs, while
+their biometric template is still in service. Step 3 is worse than step 2,
+because it asks the operator to retrain *twice* for a reason that only makes
+sense if you know how the backup rotation works.
+
+**On a deployment that retrains as part of every version update, both happen on
+their own.** Each release rewrites `trainer.yml` from `dataset/`, and rotates
+the previous model into `trainer.yml.bak`; the release after that rotates the
+pre-erasure generation out entirely. So an erasure performed between two
+releases is fully propagated by the second one, with no operator action and
+nothing to remember.
+
+⚠️ **This is a property of that deployment practice, not of the software.** A
+machine that is retrained by hand has exactly the four-step procedure above,
+and this note must not be read as saying otherwise. Two things still have to be
+true for it to hold, and both are worth checking rather than assuming:
+
+- **Step 1 must still be done through the UI**, because that is what removes
+  `dataset/{student_id}/`. A retrain rebuilds the model from whatever is on
+  disk — if the images are still there, every release faithfully puts the
+  student back into the model.
+- **Two releases must actually have happened** since the erasure. One clears
+  the model; the second clears the backup.
+
+`scripts/preflight.py` reports the first of these: a trained identity with no
+row in `students` is exactly the shape of a deletion whose images were left
+behind, and it fails the check.
+
+**Where the current dataset stands.** The faces enrolled today are the project
+team's own, so the consent question in §2 is answered directly by the people
+who wrote this. That does not narrow anything above — the procedure exists for
+the students this system is intended to be used on, and §2 applies unchanged
+the moment anyone outside the team is enrolled.
 
 ---
 
@@ -266,7 +321,7 @@ Stated plainly, because an evaluation that omits these is not credible.
 
 Before enrolling any student:
 
-- [ ] Signed consent on file (parent or guardian if under 18)
+- [ ] Signed consent on file — [`consent_form.md`](consent_form.md) Form A (parent or guardian if under 18)
 - [ ] The student has been told they may refuse, and how to withdraw later
 - [ ] Full-disk encryption is enabled on the host machine
 - [ ] The default `admin`/`admin` credential has been changed
@@ -277,4 +332,5 @@ When a student leaves, or withdraws consent:
 - [ ] Student deleted through *Manage Students*
 - [ ] Model retrained
 - [ ] `.bak` model pair deleted or superseded
+- [ ] `dataset/_migrated_duplicates/` checked for a copy of their folder
 - [ ] Confirmed the student no longer appears in `trainer/labels.txt`
