@@ -1,9 +1,4 @@
-/**
- * Student Registration Screen.
- * Captures personal and academic info, then navigates to FaceCapture.
- */
-
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   StyleSheet,
@@ -11,12 +6,43 @@ import {
   KeyboardAvoidingView,
   Platform,
   ScrollView,
+  Modal,
+  TouchableOpacity,
 } from 'react-native';
 import { useAuth } from '../context/AuthContext';
+import client from '../api/client';
 import Input from '../components/Input';
 import Button from '../components/Button';
 import Header from '../components/Header';
-import { colors, spacing, typography } from '../theme/colors';
+import { colors, spacing, typography, borderRadius } from '../theme/colors';
+
+const Dropdown = ({ value, options, onSelect, placeholder }) => {
+  const [visible, setVisible] = useState(false);
+  return (
+    <View style={styles.dropdownContainer}>
+      <TouchableOpacity onPress={() => setVisible(true)} style={styles.dropdownButton}>
+        <Text style={value ? styles.dropdownText : styles.dropdownPlaceholder}>{value || placeholder}</Text>
+      </TouchableOpacity>
+      <Modal visible={visible} transparent animationType="fade">
+        <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setVisible(false)}>
+          <View style={styles.modalContent}>
+             <Text style={styles.modalTitle}>{placeholder}</Text>
+             <ScrollView>
+               {options.map(opt => (
+                  <TouchableOpacity key={opt} onPress={() => { onSelect(opt); setVisible(false); }} style={styles.modalOption}>
+                     <Text style={styles.modalOptionText}>{opt}</Text>
+                  </TouchableOpacity>
+               ))}
+               {options.length === 0 && (
+                 <Text style={{textAlign: 'center', margin: 10, color: colors.textSecondary}}>No options available</Text>
+               )}
+             </ScrollView>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+    </View>
+  );
+};
 
 export default function StudentRegistrationScreen({ navigation }) {
   const { register } = useAuth();
@@ -34,7 +60,6 @@ export default function StudentRegistrationScreen({ navigation }) {
   });
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-
   const updateForm = (key, value) => {
     setFormData((prev) => ({ ...prev, [key]: value }));
   };
@@ -44,9 +69,11 @@ export default function StudentRegistrationScreen({ navigation }) {
       !formData.student_id ||
       !formData.first_name ||
       !formData.last_name ||
-      !formData.password
+      !formData.password ||
+      !formData.college_department ||
+      !formData.program
     ) {
-      setError('Student number, first name, last name, and password are required.');
+      setError('Student number, first name, last name, password, college, and program are required.');
       return;
     }
 
@@ -63,12 +90,40 @@ export default function StudentRegistrationScreen({ navigation }) {
     setIsLoading(false);
 
     if (result.success) {
-      // Registration successful, token saved. Now proceed to face capture.
       navigation.replace('FaceCapture', { studentId: formData.student_id, studentName: formData.first_name + ' ' + formData.last_name });
     } else {
       setError(result.message || 'Registration failed');
     }
   };
+
+  const [colleges, setColleges] = useState([
+    'College of Computing',
+    'College of Engineering',
+    'College of Business',
+    'College of Education',
+  ]);
+  const [programs, setPrograms] = useState([
+    'BSCS',
+    'BSIT',
+    'BSIS',
+    'BSEd',
+  ]);
+
+  useEffect(() => {
+    // Fetch dynamic colleges and programs from DB
+    client.get('/api/colleges_programs')
+      .then(res => {
+        if (res.data.success) {
+          if (res.data.colleges && res.data.colleges.length > 0) {
+            setColleges(res.data.colleges);
+          }
+          if (res.data.programs && res.data.programs.length > 0) {
+            setPrograms(res.data.programs);
+          }
+        }
+      })
+      .catch(err => console.warn('Could not fetch options:', err));
+  }, []);
 
   return (
     <KeyboardAvoidingView
@@ -115,15 +170,17 @@ export default function StudentRegistrationScreen({ navigation }) {
         />
 
         <Text style={styles.sectionTitle}>Academic Information</Text>
-        <Input
-          placeholder="College"
+        <Dropdown
+          placeholder="Select College"
           value={formData.college_department}
-          onChangeText={(val) => updateForm('college_department', val)}
+          options={colleges}
+          onSelect={(val) => updateForm('college_department', val)}
         />
-        <Input
-          placeholder="Program"
+        <Dropdown
+          placeholder="Select Program"
           value={formData.program}
-          onChangeText={(val) => updateForm('program', val)}
+          options={programs}
+          onSelect={(val) => updateForm('program', val)}
         />
         <Input
           placeholder="Year Level"
@@ -173,5 +230,49 @@ const styles = StyleSheet.create({
     color: colors.error,
     textAlign: 'center',
     marginTop: spacing.md,
+  },
+  dropdownContainer: {
+    marginBottom: spacing.md,
+  },
+  dropdownButton: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+  },
+  dropdownText: {
+    ...typography.body,
+    color: colors.text,
+  },
+  dropdownPlaceholder: {
+    ...typography.body,
+    color: colors.textSecondary,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    padding: spacing.xl,
+  },
+  modalContent: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.lg,
+    maxHeight: '80%',
+    padding: spacing.lg,
+  },
+  modalTitle: {
+    ...typography.h3,
+    marginBottom: spacing.md,
+    textAlign: 'center',
+  },
+  modalOption: {
+    paddingVertical: spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  modalOptionText: {
+    ...typography.body,
+    textAlign: 'center',
   },
 });

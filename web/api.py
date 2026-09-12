@@ -255,6 +255,28 @@ def api_subjects():
     return jsonify({"success": True, "subjects": subjects})
 
 
+@api_bp.route("/colleges_programs", methods=["GET"])
+@public
+def api_colleges_programs():
+    """Return distinct lists of colleges and programs for the registration dropdowns."""
+    try:
+        with db_cursor(dictionary=True) as cursor:
+            cursor.execute("SELECT DISTINCT college_department FROM students WHERE college_department IS NOT NULL AND college_department != '' ORDER BY college_department")
+            colleges = [row['college_department'] for row in cursor.fetchall()]
+
+            cursor.execute("SELECT DISTINCT program FROM students WHERE program IS NOT NULL AND program != '' ORDER BY program")
+            programs = [row['program'] for row in cursor.fetchall()]
+
+            return jsonify({
+                "success": True,
+                "colleges": colleges,
+                "programs": programs
+            })
+    except mysql.connector.Error:
+        logger.exception("Could not fetch colleges and programs")
+        return jsonify({"success": False, "colleges": [], "programs": []}), 500
+
+
 # ---------------------------------------------------------------------------
 # STUDENTS
 # ---------------------------------------------------------------------------
@@ -486,7 +508,7 @@ def api_attendance_live():
     active = recognition_session.subject
 
     if not recognition_session.is_running or active is None:
-        return jsonify({"running": False, "students": []})
+        return jsonify({"success": True, "running": False, "students": []})
 
     student_ids = sorted(recognition_session.recognized_ids())
 
@@ -498,12 +520,14 @@ def api_attendance_live():
     except mysql.connector.Error:
         logger.exception("Could not read live recognized list")
         return jsonify({
+            "success": True,
             "running": True,
             "students": [],
             "recognised": len(student_ids),
         })
 
     return jsonify({
+        "success": True,
         "running": True,
         "subject_code": active.subject_code,
         "recognised": len(student_ids),
@@ -516,6 +540,83 @@ def api_attendance_live():
             }
             for row in rows
         ],
+    })
+
+
+@api_bp.route("/attendance/frame", methods=["POST"])
+@public
+@role_required_api("student")
+def api_attendance_frame():
+    """Verify a student's face for the active attendance session from the mobile app."""
+    from recognize_face import session as recognition_session
+    from recognize_face import align_face, preprocess_for_lbph, get_face_quality_issue, NotRecorded, save_attendance
+    import cv2
+
+    snapshot = recognition_session.snapshot()
+    if not snapshot.running or snapshot.subject is None:
+        return jsonify({"success": False, "message": "No active attendance session."}), 409
+
+    user = request.jwt_user
+    student_id = user.get("user_id")
+
+    # Has this student already been recorded?
+    if student_id in snapshot.recognized:
+        return jsonify({
+            "success": True,
+            "done": True,
+            "message": "You are already recorded for this session."
+        })
+
+    try:
+        if 'frame' in request.files:
+            file = request.files['frame']
+            frame = decode_frame(file.read(), file.mimetype)
+        else:
+            frame = decode_frame(request.get_data(), request.content_type)
+    except UploadRejected as error:
+        return jsonify({"success": False, "message": str(error)}), 400
+
+    # Detect face
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = snapshot.detector.process(rgb)
+
+    if not results.multi_face_landmarks:
+        return jsonify({"success": True, "done": False, "message": "No face detected."})
+
+    # For verification, we just take the first face found
+    landmarks = results.multi_face_landmarks[0]
+    
+    try:
+        aligned_face = align_face(frame, landmarks)
+        issue = get_face_quality_issue(aligned_face)
+        if issue:
+            return jsonify({"success": True, "done": False, "message": issue})
+
+        processed_face = preprocess_for_lbph(aligned_face)
+        label, confidence = snapshot.recognizer.predict(processed_face)
+    except Exception:
+        logger.exception("Mobile attendance recognition failed")
+        return jsonify({"success": False, "message": "Face processing failed."}), 500
+
+    if label == -1 or confidence > 70.0:  # Use a standard threshold
+        return jsonify({"success": True, "done": False, "message": "Face not recognized clearly. Try again."})
+
+    matched_student = snapshot.label_map.get(label)
+    if matched_student is None or matched_student.get("student_id") != student_id:
+        return jsonify({"success": True, "done": False, "message": "Face doesn't match your profile."})
+
+    # Verified! Save attendance
+    status = save_attendance(student_id, snapshot.subject)
+    if status in (NotRecorded.NOT_IN_CLASS, NotRecorded.UNKNOWN_STUDENT):
+        return jsonify({"success": False, "message": "You are not enrolled in this class."}), 403
+
+    # Mark as recognized in the in-memory session so the dashboard updates
+    recognition_session.mark_recognized(student_id, status)
+
+    return jsonify({
+        "success": True,
+        "done": True,
+        "message": f"Verified! Marked as {status}."
     })
 
 
@@ -540,18 +641,145 @@ def api_dashboard():
     except mysql.connector.Error:
         logger.exception("Dashboard query failed")
         return jsonify({"success": False, "message": "Could not load dashboard data."}), 500
-"""
+from web.enrolment import enrolment_slot
+from infra import dataset_store
+from infra.uploads import UploadRejected, decode_frame
+from security.paths import UnsafeStudentPathError, validate_student_id, validate_student_name
+from services.training import training_job
+from vision.enrolment import MAX_IMAGES, EnrolmentComplete
 
-    @api_bp.route('/enrol/start', methods=['POST'])
-    @api_bp.route('/enrol/frame', methods=['POST'])
-    @api_bp.route('/enrol/finish', methods=['POST'])
-    @api_bp.route('/enrol/cancel', methods=['POST'])
+def enrolment_json(message, status=400, **extra):
+    body = {"success": False, "message": message}
+    body.update(extra)
+    return jsonify(body), status
 
-    These enrolment endpoints mirror the web enrolment flow. For the mobile app,
-    the student's phone camera captures frames and sends them to the server for
-    the same quality checks that the browser enrolment uses.
+@api_bp.route('/enrol/start', methods=['POST'])
+@public
+@role_required_api('student', 'admin')
+def api_enrol_start():
+    payload = request.get_json(silent=True) or {}
+    user = request.jwt_user
 
-    Implementation is deferred to a follow-up — the existing web/enrolment.py
-    endpoints can be called directly from the mobile app once CSRF is handled,
-    or dedicated API versions can be added here.
-"""
+    if enrolment_slot.current() is not None:
+        return enrolment_json("Another enrolment is already in progress.", status=409)
+
+    try:
+        student_id = validate_student_id(payload.get('student_id'))
+        student_name = validate_student_name(payload.get('student_name'))
+    except UnsafeStudentPathError as error:
+        return enrolment_json(str(error))
+
+    # Security check: Students can only enrol themselves
+    if user.get('role') == 'student' and user.get('user_id') != student_id:
+        return enrolment_json("You can only enrol yourself.", status=403)
+
+    try:
+        capture_session = enrolment_slot.start(
+            student_id=student_id,
+            student_name=student_name,
+            started_by=user.get('user_id'),
+            record={},
+        )
+    except (UnsafeStudentPathError, OSError):
+        logger.exception("Could not open an enrolment staging folder")
+        return enrolment_json("Could not start the capture.", status=500)
+
+    if capture_session is None:
+        return enrolment_json("Another enrolment is already in progress.", status=409)
+
+    return jsonify({
+        "success": True,
+        "progress": capture_session.progress().as_dict(),
+    }), 201
+
+
+@api_bp.route('/enrol/frame', methods=['POST'])
+@public
+@role_required_api('student', 'admin')
+def api_enrol_frame():
+    capture_session = enrolment_slot.current()
+    if capture_session is None:
+        return enrolment_json("No capture is in progress.", status=409)
+
+    user = request.jwt_user
+    if user.get('role') == 'student' and capture_session.student_id != user.get('user_id'):
+        return enrolment_json("You can only submit frames for your own enrolment.", status=403)
+
+    try:
+        if 'frame' in request.files:
+            file = request.files['frame']
+            frame = decode_frame(file.read(), file.mimetype)
+        else:
+            frame = decode_frame(request.get_data(), request.content_type)
+    except UploadRejected as error:
+        return enrolment_json(str(error))
+
+    try:
+        verdict = capture_session.offer_frame(frame)
+    except EnrolmentComplete:
+        return jsonify({"success": True, "progress": capture_session.progress().as_dict()})
+    except Exception:
+        logger.exception("Enrolment frame error")
+        return enrolment_json("That frame could not be processed.", status=500)
+
+    return jsonify({"success": True, "progress": verdict.as_dict()})
+
+
+@api_bp.route('/enrol/finish', methods=['POST'])
+@public
+@role_required_api('student', 'admin')
+def api_enrol_finish():
+    capture_session = enrolment_slot.current()
+    if capture_session is None:
+        return enrolment_json("No capture is in progress.", status=409)
+
+    user = request.jwt_user
+    if user.get('role') == 'student' and capture_session.student_id != user.get('user_id'):
+        return enrolment_json("Forbidden.", status=403)
+
+    if not capture_session.done:
+        return enrolment_json(f"Only {capture_session.captured} of {MAX_IMAGES} captured.", status=409)
+
+    student_id = capture_session.student_id
+    student_name = capture_session.student_name
+
+    try:
+        dataset_store.promote(student_id, expected=MAX_IMAGES)
+    except (dataset_store.DatasetStoreError, UnsafeStudentPathError, OSError):
+        enrolment_slot.abandon()
+        return enrolment_json("Images could not be saved.", status=500)
+
+    # Note: For mobile registration, the student row is ALREADY created at /students/register.
+    # We do not need to insert it here like the web app does.
+    # However, if this is a recapture, we should update the name just in case.
+    try:
+        with db_cursor(dictionary=True, commit=True) as cursor:
+            students_repo.rename(cursor, student_id, student_name)
+    except mysql.connector.Error:
+        enrolment_slot.release()
+        return enrolment_json("Failed to update database.", status=500)
+
+    enrolment_slot.release()
+    training_job.start(started_by=user.get('user_id'))
+
+    return jsonify({
+        "success": True,
+        "message": "Enrolment complete. Model retraining started."
+    })
+
+
+@api_bp.route('/enrol/cancel', methods=['POST'])
+@public
+@role_required_api('student', 'admin')
+def api_enrol_cancel():
+    capture_session = enrolment_slot.current()
+    if capture_session is None:
+        return jsonify({"success": True, "message": "Nothing to cancel."})
+
+    user = request.jwt_user
+    if user.get('role') == 'student' and capture_session.student_id != user.get('user_id'):
+        return enrolment_json("Forbidden.", status=403)
+
+    enrolment_slot.abandon()
+    return jsonify({"success": True, "message": "Capture cancelled."})
+

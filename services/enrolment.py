@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import secrets
 
 import cv2
 
@@ -60,6 +61,20 @@ class EnrolmentSlot:
     def __init__(self, registry=None, idle_timeout_seconds=None):
         self._registry = registry if registry is not None else EnrolmentRegistry()
         self._idle_timeout = idle_timeout_seconds
+        self._pending_passwords = {}
+
+    def store_password(self, password_hash):
+        """Keep a password hash server-side until the capture starts."""
+        token = secrets.token_urlsafe(32)
+        self._pending_passwords[token] = password_hash
+        return token
+
+    def take_password(self, token):
+        """Consume a pending password hash, if the token is valid."""
+        if not token:
+            return None
+
+        return self._pending_passwords.pop(token, None)
 
     @property
     def idle_timeout_seconds(self):
@@ -93,7 +108,10 @@ class EnrolmentSlot:
 
         return session_in_progress
 
-    def start(self, *, student_id, student_name, started_by, record):
+    def start(
+        self, *, student_id, student_name, started_by, record,
+        password_hash=None
+    ):
         """
         Open a staging folder and a session. Returns it, or None if the slot
         is taken.
@@ -112,6 +130,7 @@ class EnrolmentSlot:
             hooks=hooks,
             started_by=started_by,
             record=record,
+            password_hash=password_hash,
         )
         capture_session.detector = detector
 

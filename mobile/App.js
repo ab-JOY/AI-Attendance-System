@@ -30,7 +30,10 @@ import { colors } from './src/theme/colors';
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
 
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
 function MainTabs() {
+  const insets = useSafeAreaInsets();
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
@@ -54,8 +57,8 @@ function MainTabs() {
         tabBarStyle: {
           backgroundColor: colors.background,
           borderTopColor: colors.border,
-          height: 60,
-          paddingBottom: 8,
+          height: 60 + insets.bottom,
+          paddingBottom: 8 + insets.bottom,
         },
         headerShown: false,
       })}
@@ -99,11 +102,15 @@ function NavigationWrapper() {
   );
 }
 
+import { SafeAreaProvider } from 'react-native-safe-area-context';
+
 export default function App() {
   return (
-    <AuthProvider>
-      <StatusBar style="dark" />
-      <NavigationWrapper />
-    </AuthProvider>
+    <SafeAreaProvider>
+      <AuthProvider>
+        <StatusBar style="dark" />
+        <NavigationWrapper />
+      </AuthProvider>
+    </SafeAreaProvider>
   );
 }

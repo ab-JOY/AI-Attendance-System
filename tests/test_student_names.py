@@ -33,6 +33,8 @@ import contextlib
 
 import pytest
 
+from security.passwords import verify_password
+
 # The forms the user reported, plus the two the allowlist has always had to
 # carry: `Peña` is why the check is `str.isalnum()` rather than an ASCII
 # pattern, and `O'Brien` is why the apostrophe is allowed (US-5).
@@ -197,6 +199,76 @@ def test_a_name_that_is_only_punctuation_is_still_refused(
     })
 
     assert response.status_code == 400
+
+
+def test_editing_a_student_hashes_a_new_password(client, monkeypatch):
+    import web.students as students_module
+
+    calls = []
+
+    @contextlib.contextmanager
+    def fake_cursor(*_args, **_kwargs):
+        yield object()
+
+    def update_details_and_password(*args):
+        calls.append(args)
+        return 1
+
+    monkeypatch.setattr(students_module, "db_cursor", fake_cursor)
+    monkeypatch.setattr(
+        students_module.students_repo,
+        "update_details_and_password",
+        update_details_and_password,
+    )
+
+    sign_in(client)
+
+    response = client.post(f"/update_student/{STUDENT}", data={
+        "name": "Updated Student",
+        "college_department": "College of Computing",
+        "program": "BSCS",
+        "year_level": "3",
+        "section": "B",
+        "password": "new-secret",
+    })
+
+    assert response.status_code == 302
+    assert len(calls) == 1
+    assert verify_password("new-secret", calls[0][-1]) is True
+    assert calls[0][-1] != "new-secret"
+
+
+def test_editing_a_student_rejects_a_short_password_without_updating(
+    client, monkeypatch
+):
+    import web.students as students_module
+
+    updates = []
+
+    @contextlib.contextmanager
+    def fake_cursor(*_args, **_kwargs):
+        yield object()
+
+    monkeypatch.setattr(students_module, "db_cursor", fake_cursor)
+    monkeypatch.setattr(
+        students_module.students_repo,
+        "update_details_and_password",
+        lambda *args: updates.append(args),
+    )
+
+    sign_in(client)
+
+    response = client.post(f"/update_student/{STUDENT}", data={
+        "name": "Updated Student",
+        "college_department": "College of Computing",
+        "program": "BSCS",
+        "year_level": "3",
+        "section": "B",
+        "password": "short",
+    })
+
+    assert response.status_code == 400
+    assert updates == []
 
 
 def test_a_path_separator_in_a_name_is_still_refused(client, no_database):

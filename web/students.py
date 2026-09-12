@@ -17,6 +17,7 @@ from infra.db import db_cursor
 from repositories import students as students_repo
 from repositories import subjects as subjects_repo
 from security.access import role_required
+from security.passwords import PasswordTooLongError, hash_password
 from security.paths import (
     UnsafeStudentPathError,
     student_dataset_path,
@@ -184,6 +185,7 @@ def update_student(student_id):
     program = request.form.get('program', '').strip()
     year_level = request.form.get('year_level', '').strip()
     section = request.form.get('section', '').strip()
+    password = request.form.get('password', '')
 
     # SE-3. The ID from the URL was previously trusted outright. The name no
     # longer becomes a path (todo.md §7.5) but is still validated, because it
@@ -209,6 +211,17 @@ def update_student(student_id):
     except (TypeError, ValueError):
         return error_page(400, "Year level must be a valid number.")
 
+    password_hash = None
+
+    if password:
+        if len(password) < 8:
+            return error_page(400, "Password must be at least 8 characters.")
+
+        try:
+            password_hash = hash_password(password)
+        except PasswordTooLongError as error:
+            return error_page(400, str(error))
+
     # ⚠️ **Seventy lines of folder renaming used to live here, and their
     # absence is the point of the §7.5 migration.**
     #
@@ -224,22 +237,38 @@ def update_student(student_id):
     # The folder is `dataset/{student_id}` now. A rename touches one row.
     try:
         with db_cursor(dictionary=True, commit=True) as cursor:
-            changed = students_repo.update_details(
-                cursor,
-                student_id,
-                name,
-                college_department,
-                program,
-                year_level,
-                section,
-            )
+            if password_hash is not None:
+                changed = students_repo.update_details_and_password(
+                    cursor,
+                    student_id,
+                    name,
+                    college_department,
+                    program,
+                    year_level,
+                    section,
+                    password_hash,
+                )
+            else:
+                changed = students_repo.update_details(
+                    cursor,
+                    student_id,
+                    name,
+                    college_department,
+                    program,
+                    year_level,
+                    section,
+                )
 
             if changed == 0 and not students_repo.exists(cursor, student_id):
                 # Either the student does not exist or nothing changed. Tell
                 # the two apart rather than reporting a 404 for a no-op edit.
                 return error_page(404, "That student record was not found.")
 
-        flash(f"{name}'s record was updated.", "success")
+        if password_hash is not None:
+            flash(f"{name}'s record and password were updated.", "success")
+        else:
+            flash(f"{name}'s record was updated. The password was left unchanged.",
+                  "success")
 
         return redirect(url_for('students.manage_students'))
 

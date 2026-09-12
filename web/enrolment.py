@@ -48,6 +48,7 @@ from repositories import enrolments as enrolments_repo
 from repositories import students as students_repo
 from repositories import subjects as subjects_repo
 from security.access import authenticated, json_api, role_required
+from security.passwords import PasswordTooLongError, hash_password
 from security.paths import (
     UnsafeStudentPathError,
     validate_student_id,
@@ -79,6 +80,7 @@ enrolment_slot = EnrolmentSlot()
 # plumbing through three layers. `enrol_finish()` pops it before the record
 # reaches `students_repo.insert()`, so it never has to be a column.
 SUBJECTS_KEY = "subject_ids"
+PASSWORD_TOKEN_KEY = "password_token"
 
 
 def _chosen_subject_ids(form):
@@ -121,6 +123,8 @@ def enrol():
         logger.warning("Rejected enrolment request: %s", error)
         return error_page(400, str(error))
 
+    password_token = None
+
     if mode == 'recapture':
         with db_cursor(dictionary=True) as cursor:
             student = students_repo.identity(cursor, student_id)
@@ -157,12 +161,26 @@ def enrol():
             SUBJECTS_KEY: _chosen_subject_ids(request.form),
         }
 
+        password = request.form.get('password', '')
+
+        if password:
+            if len(password) < 8:
+                return error_page(400, "Password must be at least 8 characters.")
+
+            try:
+                password_hash = hash_password(password)
+            except PasswordTooLongError as error:
+                return error_page(400, str(error))
+
+            password_token = enrolment_slot.store_password(password_hash)
+
     return render_template(
         'enrol.html',
         student_id=student_id,
         student_name=name,
         mode=mode,
         record=record,
+        password_token=password_token,
         plan=DEFAULT_PLAN.describe(),
         total=MAX_IMAGES,
         # Passed rather than repeated in the page: the server refuses frames
@@ -192,11 +210,22 @@ def enrol_start():
         return enrolment_json(str(error))
 
     try:
+        password_hash = enrolment_slot.take_password(
+            payload.get(PASSWORD_TOKEN_KEY)
+        )
+
+        start_arguments = {
+            "student_id": student_id,
+            "student_name": student_name,
+            "started_by": session.get('user'),
+            "record": payload.get('record') or {},
+        }
+
+        if password_hash is not None:
+            start_arguments["password_hash"] = password_hash
+
         capture_session = enrolment_slot.start(
-            student_id=student_id,
-            student_name=student_name,
-            started_by=session.get('user'),
-            record=payload.get('record') or {},
+            **start_arguments,
         )
     except (UnsafeStudentPathError, OSError):
         logger.exception("Could not open an enrolment staging folder")
@@ -293,6 +322,11 @@ def enrol_finish():
     # class list is a relation rather than a column on `students`.
     record = dict(capture_session.record)
     chosen_subject_ids = record.pop(SUBJECTS_KEY, []) or []
+
+    password_hash = getattr(capture_session, "password_hash", None)
+
+    if password_hash is not None:
+        record['password_hash'] = password_hash
 
     try:
         with db_cursor(dictionary=True, commit=True) as cursor:

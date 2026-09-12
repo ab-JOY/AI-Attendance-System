@@ -12,6 +12,9 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [token, setToken] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
+  // Pending registration token — stored but NOT activated until face capture completes
+  const [pendingToken, setPendingToken] = useState(null);
+  const [pendingUser, setPendingUser] = useState(null);
 
   // Restore token on app start
   useEffect(() => {
@@ -63,17 +66,30 @@ export function AuthProvider({ children }) {
       const { token: newToken, role, display_name } = response.data;
       const userData = { role, user_id: data.student_id, display_name };
 
+      // Store token on disk but do NOT activate it yet.
+      // The Auth Stack stays active so FaceCapture can run.
       await SecureStore.setItemAsync('auth_token', newToken);
       await SecureStore.setItemAsync('auth_user', JSON.stringify(userData));
+      setPendingToken(newToken);
+      setPendingUser(userData);
 
-      setToken(newToken);
-      setUser(userData);
-
-      return { success: true };
+      return { success: true, token: newToken };
     }
 
     return { success: false, message: response.data.message };
   };
+
+  const completeRegistration = () => {
+    // Called after face capture — activates the stored token and flips isAuthenticated.
+    if (pendingToken && pendingUser) {
+      setToken(pendingToken);
+      setUser(pendingUser);
+      setPendingToken(null);
+      setPendingUser(null);
+    }
+  };
+
+  const getPendingToken = () => pendingToken;
 
   const logout = async () => {
     await SecureStore.deleteItemAsync('auth_token');
@@ -91,6 +107,8 @@ export function AuthProvider({ children }) {
         isAuthenticated: !!token,
         login,
         register,
+        completeRegistration,
+        getPendingToken,
         logout,
       }}
     >

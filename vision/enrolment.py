@@ -294,6 +294,7 @@ class EnrolmentSession:
         plan: EnrolmentPlan = DEFAULT_PLAN,
         started_by: str | None = None,
         record: dict[str, Any] | None = None,
+        password_hash: str | None = None,
     ) -> None:
         self.student_id = student_id
         self.student_name = student_name
@@ -306,6 +307,7 @@ class EnrolmentSession:
         # place rather than before the capture starts (FS-9). `vision/` never
         # looks inside it and never learns a column name.
         self.record = record or {}
+        self.password_hash = password_hash
 
         self._hooks = hooks
         self._lock = threading.RLock()

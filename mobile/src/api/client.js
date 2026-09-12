@@ -10,7 +10,7 @@ import axios from 'axios';
 import * as SecureStore from 'expo-secure-store';
 
 // Defaults — overridden at runtime from SecureStore
-let BASE_URL = 'http://192.168.1.100:5000';
+let BASE_URL = 'http://192.168.1.51:5000';
 
 const client = axios.create({
   timeout: 15000,

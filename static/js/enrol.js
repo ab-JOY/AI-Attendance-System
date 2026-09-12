@@ -31,6 +31,7 @@
     var STUDENT_ID = page.getAttribute("data-student-id");
     var STUDENT_NAME = page.getAttribute("data-student-name");
     var RECORD = JSON.parse(page.getAttribute("data-record"));
+    var PASSWORD_TOKEN = page.getAttribute("data-password-token");
     var TOTAL = Number(page.getAttribute("data-total"));
 
     var START_URL = page.getAttribute("data-start-url");
@@ -269,7 +270,8 @@
             body: JSON.stringify({
                 student_id: STUDENT_ID,
                 student_name: STUDENT_NAME,
-                record: RECORD
+                record: RECORD,
+                password_token: PASSWORD_TOKEN
             })
         })
             .then(function (response) {

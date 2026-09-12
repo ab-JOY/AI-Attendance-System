@@ -131,6 +131,17 @@
                 value="{{ student.section }}"
                 required>
 
+            <!-- Student Password -->
+            <label for="password"><strong>New Password (Optional)</strong></label>
+
+            <input
+                type="password"
+                id="password"
+                name="password"
+                minlength="8"
+                autocomplete="new-password"
+                placeholder="Leave blank to keep the current password">
+
             <button type="submit">
                 Update Student
             </button>

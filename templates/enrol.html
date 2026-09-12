@@ -38,6 +38,7 @@
         data-student-id="{{ student_id }}"
         data-student-name="{{ student_name }}"
         data-record='{{ record | tojson }}'
+        data-password-token="{{ password_token or '' }}"
         data-total="{{ total }}"
         data-min-native-width="{{ min_native_width }}"
         data-start-url="{{ url_for('enrolment.enrol_start') }}"

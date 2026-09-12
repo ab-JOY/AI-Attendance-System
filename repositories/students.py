@@ -99,9 +99,10 @@ def insert(cursor, student_id, name, record):
             college_department,
             program,
             year_level,
-            section
+            section,
+            password
         )
-        VALUES (%s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         """,
         (
             student_id,
@@ -110,6 +111,7 @@ def insert(cursor, student_id, name, record):
             record.get('program', ''),
             record.get('year_level') or None,
             record.get('section', ''),
+            record.get('password_hash'),
         ),
     )
 
@@ -145,6 +147,32 @@ def update_details(cursor, student_id, name, college_department, program,
         program,
         year_level,
         section,
+        student_id
+    ))
+
+    return cursor.rowcount
+
+
+def update_details_and_password(cursor, student_id, name, college_department,
+                                program, year_level, section, password_hash):
+    """Update the editable fields and replace the student's password."""
+    cursor.execute("""
+        UPDATE students
+        SET
+            name = %s,
+            college_department = %s,
+            program = %s,
+            year_level = %s,
+            section = %s,
+            password = %s
+        WHERE student_id = %s
+    """, (
+        name,
+        college_department,
+        program,
+        year_level,
+        section,
+        password_hash,
         student_id
     ))
 
