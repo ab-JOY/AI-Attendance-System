@@ -155,7 +155,7 @@ if __name__ == '__main__':
     # Still the Flask development server - that is PO-4, and a WSGI server
     # belongs with a deployment decision rather than with this phase.
     app.run(
-        host="0.0.0.0" if ssl_context else "127.0.0.1",  # noqa: S104
+        host=app_config.flask_host,
         debug=app_config.flask_debug,
         ssl_context=ssl_context,
     )
