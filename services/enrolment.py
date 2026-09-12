@@ -23,6 +23,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import secrets
+import threading
 
 import cv2
 
@@ -40,9 +41,54 @@ from vision.enrolment import (
 logger = logging.getLogger(__name__)
 
 
+class DetectorClosed(RuntimeError):
+    """The capture was cancelled while this frame was being processed."""
+
+
+class _GuardedDetector:
+    """
+    A detector that cannot be closed while a frame is inside it.
+
+    ⚠️ **Two requests, one detector.** `abandon()` runs on the thread handling
+    `/enrol/cancel`; `detect()` runs on the thread handling `/enrol/frame`.
+    Nothing sequenced them, so a cancel arriving mid-frame closed the MediaPipe
+    graph underneath the frame that was using it and the request died with
+    `ValueError: _graph is None in SolutionBase` - a 500 and a traceback for
+    what is really "you cancelled it". Observed live: cancel at 18:33:03,189,
+    500 at 18:33:03,370 (logs/app.log).
+
+    The lock makes closing wait for the frame in flight, and a frame that
+    arrives after the close is refused with `DetectorClosed` so the route can
+    answer the same 409 it would have given had the cancel landed first.
+    """
+
+    def __init__(self, detector):
+        self._detector = detector
+        self._lock = threading.Lock()
+
+    def process(self, rgb):
+        with self._lock:
+            if self._detector is None:
+                raise DetectorClosed("This capture has been cancelled.")
+
+            return self._detector.process(rgb)
+
+    def close(self):
+        with self._lock:
+            if self._detector is None:
+                return
+
+            detector, self._detector = self._detector, None
+
+        # Outside the lock: close() is the slow part and nothing may use the
+        # detector once it has been taken out of the attribute above.
+        with contextlib.suppress(Exception):
+            detector.close()
+
+
 def _hooks_for(staging):
     """Wire a session to MediaPipe, the aligner and the staging folder."""
-    detector = make_enrolment_detector()
+    detector = _GuardedDetector(make_enrolment_detector())
 
     def detect(frame):
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)

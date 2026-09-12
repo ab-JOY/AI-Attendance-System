@@ -54,7 +54,7 @@ from security.paths import (
     validate_student_id,
     validate_student_name,
 )
-from services.enrolment import EnrolmentSlot
+from services.enrolment import DetectorClosed, EnrolmentSlot
 from services.training import training_job
 from vision.enrolment import DEFAULT_PLAN, MAX_IMAGES, EnrolmentComplete
 from vision.pose import MIN_NATIVE_FRAME_WIDTH
@@ -273,6 +273,10 @@ def enrol_frame():
             "success": True,
             "progress": capture_session.progress().as_dict(),
         })
+    except DetectorClosed:
+        # The capture was cancelled while this frame was in flight. That is the
+        # same answer as arriving one moment later, and not a server fault.
+        return enrolment_json("No capture is in progress.", status=409)
     except Exception:
         logger.exception("Enrolment frame could not be processed")
         return enrolment_json("That frame could not be processed.", status=500)

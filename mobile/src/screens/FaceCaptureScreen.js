@@ -14,11 +14,21 @@ import Header from '../components/Header';
 import { captureLandscapeFrame, frameFormData, FRAME_ASPECT } from '../utils/frame';
 import { colors, spacing, typography } from '../theme/colors';
 
+// ⚠️ A frame that fails on the phone never reaches the server, so the server
+// log cannot explain it. The capture loop used to swallow every such failure
+// as a "temporary network error" and retry forever: the screen sat at
+// 0 / 100 with no message, and the only trace was /api/enrol/start answering
+// 201 with no /api/enrol/frame ever following it. Failures are counted and
+// shown now, and the loop stops rather than retrying something that cannot
+// succeed.
+const MAX_CONSECUTIVE_FAILURES = 5;
+
 export default function FaceCaptureScreen({ navigation, route }) {
   const { studentId, studentName } = route.params;
   const { completeRegistration, getPendingToken } = useAuth();
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef(null);
+  const failures = useRef(0);
   
   const [isCapturing, setIsCapturing] = useState(false);
   const [progress, setProgress] = useState(null);
@@ -81,7 +91,12 @@ export default function FaceCaptureScreen({ navigation, route }) {
   };
 
   const captureFramesLoop = async () => {
-    if (!cameraRef.current) return;
+    if (!cameraRef.current) {
+      // The camera view may not have mounted yet. Wait for it rather than
+      // returning into silence, which looked exactly like a frozen capture.
+      setTimeout(captureFramesLoop, 300);
+      return;
+    }
 
     try {
       // Capture a frame, cropped to the 16:9 window the preview showed. The
@@ -102,8 +117,9 @@ export default function FaceCaptureScreen({ navigation, route }) {
       const response = await client.post('/api/enrol/frame', formData, config);
 
       if (response.data.success) {
+        failures.current = 0;
         setProgress(response.data.progress);
-        
+
         if (response.data.progress?.done) {
           finishCapture();
         } else {
@@ -111,11 +127,29 @@ export default function FaceCaptureScreen({ navigation, route }) {
           setTimeout(captureFramesLoop, 200); // 5 frames a second
         }
       } else {
+        // A refusal the server considered - "no face", "too close". The
+        // capture is working; this frame was not usable. Not a failure.
+        failures.current = 0;
         setError(response.data.message);
         setTimeout(captureFramesLoop, 500); // retry on failure (e.g. no face)
       }
     } catch (err) {
-      // Ignore temporary network errors during frame loop
+      // Either the phone could not produce the frame or the request did not
+      // complete. Both are invisible to the server, so say which one it was.
+      failures.current += 1;
+
+      const reason = err.response?.data?.message || err.message || String(err);
+
+      if (failures.current >= MAX_CONSECUTIVE_FAILURES) {
+        setError(
+          `Capture stopped after ${failures.current} failed frames: ${reason}`
+        );
+        setIsCapturing(false);
+        client.post('/api/enrol/cancel', {}, authHeaders()).catch(() => {});
+        return;
+      }
+
+      setError(`Frame ${failures.current} failed: ${reason} - retrying.`);
       setTimeout(captureFramesLoop, 500);
     }
   };

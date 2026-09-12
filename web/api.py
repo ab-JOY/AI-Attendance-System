@@ -642,6 +642,7 @@ def api_dashboard():
         logger.exception("Dashboard query failed")
         return jsonify({"success": False, "message": "Could not load dashboard data."}), 500
 from web.enrolment import enrolment_slot
+from services.enrolment import DetectorClosed
 from infra import dataset_store
 from infra.uploads import UploadRejected, decode_frame
 from security.paths import UnsafeStudentPathError, validate_student_id, validate_student_name
@@ -718,6 +719,10 @@ def api_enrol_frame():
         verdict = capture_session.offer_frame(frame)
     except EnrolmentComplete:
         return jsonify({"success": True, "progress": capture_session.progress().as_dict()})
+    except DetectorClosed:
+        # Cancelled while this frame was in flight - the same answer as
+        # arriving one moment later, not a server fault. See services/enrolment.
+        return enrolment_json("No capture is in progress.", status=409)
     except Exception:
         logger.exception("Enrolment frame error")
         return enrolment_json("That frame could not be processed.", status=500)
