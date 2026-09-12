@@ -84,6 +84,19 @@ class TrackConfig:
     # while the student was still performing the previous one.
     max_unreadable_frames_before_clear: int = 25
 
+    # --- retrying an attendance write that failed (FS-17) ---
+    #
+    # How long to wait before asking the database again after it was
+    # *unreachable*. A permanent refusal - not in this class, not a student -
+    # is latched instead and never retried, because nothing the camera can see
+    # will change the answer; only these transient failures come back here.
+    #
+    # 25 frames is ~5 s at the 4.8 fps measured in logs/app.log. Without it the
+    # write was attempted on every frame of every stuck track: 193 attempts in
+    # 200 frames, two round trips each, against a database that had just failed
+    # to answer one.
+    attendance_retry_frames: int = 25
+
 
 DEFAULT_TRACK_CONFIG = TrackConfig()
 
@@ -111,6 +124,8 @@ class TrackState:
     """
 
     __slots__ = (
+        "attendance_refused",
+        "attendance_retry_in",
         "attendance_saved",
         "attendance_status",
         "confirmed",
@@ -158,6 +173,15 @@ class TrackState:
         # "Late", or None when nothing has been written yet or the status is
         # not known to this process. See `recorded_status` below.
         self.attendance_status: str | None = None
+        # Why the register permanently refused this track, or None (FS-17).
+        # Set only for a refusal no retry can change - the student is not in
+        # this class, or the model knows a face the database does not. It is
+        # the message to draw, held opaquely: which refusals are permanent is
+        # decided in recognize_face.py, where NotRecorded lives.
+        self.attendance_refused: str | None = None
+        # Frames still to wait before retrying a write the database failed to
+        # answer. Counts down; 0 means "ask now".
+        self.attendance_retry_in = 0
         self.liveness: Any = None
 
     # -- lifecycle ------------------------------------------------------
@@ -185,6 +209,46 @@ class TrackState:
         claim - the register, not the overlay, is the record.
         """
         return self.attendance_status or "Present"
+
+    @property
+    def attendance_settled(self) -> bool:
+        """
+        True once this track will make no further attendance write (FS-17).
+
+        Either the row is written or the register has permanently refused it.
+        The two are opposite outcomes and identical in the only respect the
+        frame loop cares about: there is nothing left to ask, so the track
+        needs neither an LBPH predict nor a database round trip on any
+        subsequent frame.
+
+        ⚠️ A *transient* failure is deliberately not settled. The database
+        being unreachable is not an answer, and `attendance_retry_in` paces
+        the next attempt rather than abandoning it.
+        """
+        return self.attendance_saved or self.attendance_refused is not None
+
+    def refuse_attendance(self, reason: str) -> None:
+        """Latch a permanent refusal. `reason` is what the overlay shows."""
+        self.attendance_refused = reason
+        self.attendance_retry_in = 0
+
+    def defer_attendance_retry(self, frames: int) -> None:
+        """Wait `frames` frames before asking the database again."""
+        self.attendance_retry_in = frames
+
+    def may_attempt_attendance(self) -> bool:
+        """
+        Whether to attempt the write on this frame, counting down the backoff.
+
+        ⚠️ Mutates. It is called once per frame from the one place that writes,
+        and the countdown has to advance on the frames it refuses, or the
+        backoff never expires.
+        """
+        if self.attendance_retry_in > 0:
+            self.attendance_retry_in -= 1
+            return False
+
+        return True
 
     @property
     def is_provisional(self) -> bool:
@@ -341,11 +405,18 @@ class TrackState:
         self.confirmed = True
         self.attendance_saved = False
         self.attendance_status = None
+        self.attendance_refused = None
+        self.attendance_retry_in = 0
         self.mismatch_frames = 0
         self.unreadable_frames = 0
         self.liveness = liveness
 
-    def adopt_completed_identity(self, student_id: str, student_name: str) -> None:
+    def adopt_completed_identity(
+        self,
+        student_id: str,
+        student_name: str,
+        status: str | None = None,
+    ) -> None:
         """
         Inherit an identity that already finished attendance this session.
 
@@ -353,15 +424,22 @@ class TrackState:
         stepped out of frame and back in from being asked to pass liveness
         again for a mark they already have.
 
-        ⚠️ `attendance_status` is deliberately left alone: the mark was made by
-        a track this one never saw, so its status is not known here.
-        `recorded_status` reads that as "Present", which is what the overlay
-        showed before any of this existed.
+        `status` is what the register actually recorded, when the caller knows
+        it. It used to be unknowable here - the mark was made by a track this
+        one never saw - so `recorded_status` fell back to "Present". Since
+        FS-18 the session is seeded from the register at start, which carries
+        the real status with it, and a **Late** student re-appearing must not
+        read "Present" on the overlay: two screens disagreeing about one
+        session is FS-7. The fallback stays for the within-session case, where
+        it remains the pre-existing behaviour rather than a new claim.
         """
         self.student_id = student_id
         self.student_name = student_name
         self.confirmed = True
         self.attendance_saved = True
+        self.attendance_status = status or self.attendance_status
+        self.attendance_refused = None
+        self.attendance_retry_in = 0
         self.mismatch_frames = 0
         self.unreadable_frames = 0
         self.history.clear()

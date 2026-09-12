@@ -78,7 +78,7 @@ def context():
         subject=recognize_face.ActiveSubject(
             subject_id=1, session_id=1, subject_code="TEST-101"
         ),
-        recognized=set(),
+        recognized={},
         label_map={},
     )
 
@@ -421,4 +421,132 @@ def test_advancing_on_unreadable_frames_does_not_confirm_anybody(context):
         "recorded for a face the recogniser never actually read"
     )
     assert state.liveness.post_match_count == 0
+    assert not state.attendance_saved
+
+
+# ---------------------------------------------------------------------------
+# The post-liveness identity re-check (SE-18)
+#
+# ⚠️ **The third stage of the same defect, and the one Phase 6e deferred.**
+# R1 stopped an unreadable frame destroying the identity and let the challenge
+# advance on one. It left `note_identity_mismatch()` in that branch, which
+# zeroed `post_match_count` - so the re-check that runs *after* a passed
+# challenge still needed 8 CONSECUTIVE readable frames, and a single refused
+# crop sent it back to nothing.
+#
+# Expected wait at the 4.8 fps measured in logs/app.log, by readable-frame
+# rate: 2.1 s at 95%, 5.2 s at 80%, 11.4 s at 70%, 106 s at 50%. The rate is a
+# property of the camera, not of the student: align_face() warps every crop to
+# 200x200, so a small face box is upscaled before the blur gate measures it,
+# and interpolation cannot restore detail the sensor never resolved. Over 150
+# real enrolment crops the gate passes 100% at a 160 px face box, 93% at
+# 110 px and 0% at 70 px - which the geometry gate still admits.
+#
+# ⚠️ **A contradiction still resets the counter.** That is the branch above,
+# and it is the frame shape a face swap actually produces. What changed is only
+# that *absence of evidence* stopped counting as evidence against - the same
+# split R1 made, applied one stage later.
+# ---------------------------------------------------------------------------
+
+
+def pass_the_challenge(context, state):
+    """
+    Complete the sequence on readable frames, then zero the re-check.
+
+    The frame that satisfies the final step is itself a readable match, so it
+    also credits the re-check on its way out. Every test below is about what
+    the re-check does from a known count, so it is reset here rather than
+    having each one carry an off-by-one about which frame passed the challenge.
+    """
+    while not state.liveness.passed:
+        step = state.liveness.current_step
+        recognize_face.process_confirmed_track(
+            context, state, ALICE, yaw_satisfying(step)
+        )
+
+    state.liveness.post_match_count = 0
+    return state
+
+
+def test_an_unreadable_frame_no_longer_resets_the_recheck(context):
+    """⚠️ **The regression, stated as one frame.**"""
+    state = pass_the_challenge(context, confirmed_track())
+
+    drive(context, state, ALICE, frames=LIVENESS.post_match_frames - 1)
+    before = state.liveness.post_match_count
+
+    assert before == LIVENESS.post_match_frames - 1
+
+    drive(context, state, None, frames=1)
+
+    assert state.liveness.post_match_count == before, (
+        "one frame the quality gate refused undid the whole re-check. At a "
+        "70% readable-frame rate that is 11.4 s of standing still, and the "
+        "rate falls with the camera's resolution"
+    )
+
+
+def test_the_recheck_completes_across_unreadable_frames(context):
+    """
+    The student is recorded on 8 matching frames, whether or not they arrive
+    consecutively. Every one of the 8 is still a real LBPH match.
+    """
+    recorded = []
+
+    state = pass_the_challenge(context, confirmed_track())
+
+    def save(student_id, _subject):
+        recorded.append(student_id)
+        return "Present"
+
+    original = recognize_face.save_attendance
+    recognize_face.save_attendance = save
+
+    try:
+        for _ in range(LIVENESS.post_match_frames):
+            drive(context, state, None, frames=2)
+            drive(context, state, ALICE, frames=1)
+    finally:
+        recognize_face.save_attendance = original
+
+    assert recorded == [ALICE]
+    assert state.attendance_saved
+
+
+def test_a_contradiction_still_resets_the_recheck(context):
+    """
+    ⚠️ **The security property.** The re-check exists to establish that the
+    face which performed the movement is still the face the track is locked to.
+    Reading a *different* enrolled student is evidence against that, and it
+    must still cost the whole count.
+    """
+    state = pass_the_challenge(context, confirmed_track())
+
+    drive(context, state, ALICE, frames=LIVENESS.post_match_frames - 1)
+
+    assert state.liveness.post_match_count == LIVENESS.post_match_frames - 1
+
+    drive(context, state, BOB, frames=1)
+
+    assert state.liveness.post_match_count == 0, (
+        "a track switch after a passed challenge kept its progress - the "
+        "re-check no longer proves the same person is still there"
+    )
+
+
+def test_the_recheck_only_ever_advances_on_a_real_match(context):
+    """
+    ⚠️ **Why dropping the reset is safe.** `post_match_count` is incremented in
+    exactly one place - `note_identity_match()`, on the readable path - so an
+    unreadable frame has no way to make progress, only to leave it alone. Two
+    hundred of them cannot record anybody, which is what
+    `test_advancing_on_unreadable_frames_does_not_confirm_anybody` pins for the
+    challenge and this pins for the stage after it.
+    """
+    state = pass_the_challenge(context, confirmed_track())
+
+    drive(context, state, None, frames=200)
+
+    assert state.liveness.post_match_count == 0
+    assert not state.liveness.identity_reconfirmed
     assert not state.attendance_saved

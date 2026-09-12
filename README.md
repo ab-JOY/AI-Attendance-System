@@ -20,9 +20,28 @@ MySQL for records.
 ## Setup
 
 ```bash
+bash scripts/setup.sh           # Git Bash on Windows, any shell on POSIX
+
+source .venv/Scripts/activate   # Windows;  source .venv/bin/activate on POSIX
+python setup_db.py
+python app.py                   # http://127.0.0.1:5000
+```
+
+`scripts/setup.sh` checks for Python 3.11, creates `.venv`, installs the pinned
+dependencies, writes `.env` with a generated `SECRET_KEY`, and verifies that
+`cv2.face` and `mediapipe` actually import — the two failures that otherwise
+surface later as a camera page that does not work. It is safe to re-run: an
+existing `.env` is never overwritten, and `--recreate` rebuilds a venv that has
+gone wrong. It does not touch the database.
+
+<details>
+<summary>The same thing by hand</summary>
+
+```bash
 python -m venv .venv
 .venv/Scripts/activate          # Windows;  source .venv/bin/activate on POSIX
 
+python -m pip install --upgrade pip     # 23.x cannot read the newer wheel metadata
 pip install -e ".[dev]"
 
 cp .env.example .env
@@ -31,6 +50,8 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"   # paste as SECRET
 python setup_db.py
 python app.py                   # http://127.0.0.1:5000
 ```
+
+</details>
 
 `SECRET_KEY` is required and has no default. The app refuses to start without
 it, deliberately: the value it replaced is in git history, and a known Flask

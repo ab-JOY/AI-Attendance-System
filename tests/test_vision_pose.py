@@ -12,6 +12,15 @@ are lifted out of the pre-extraction blob with `ast` - `capture_dataset.py`
 cannot be imported, it opens a camera at module scope - and run beside the new
 ones over tens of thousands of randomised synthetic meshes. Nothing may differ.
 
+Three of the four gates are covered that way. The fourth, `get_head_pose`, is
+not, and deliberately: the 2026-08-21 fix changed its behaviour on purpose - it
+measures yaw and pitch against the face box now, not the frame - so equivalence
+with the original is the wrong thing to assert. Its differential test was
+removed rather than repaired, because there is nothing left for it to prove.
+The behavioural half of this file carries it instead, and
+test_the_pose_verdict_does_not_depend_on_how_close_the_face_is is the case the
+old implementation could not have passed.
+
 The second half is ordinary behavioural coverage: what each gate is actually
 for, written so a future change that shifts a threshold has to admit it.
 """
@@ -45,15 +54,23 @@ from vision.landmarks import (
 # of Phase 4, before any of this work.
 ORIGINAL_BLOB = "9179e57e5f33563c55a429e376c7e5478ddee613"
 
-# Lifted from the blob: the four gates, plus the module constants they close
-# over. The constants are lifted too rather than imported from vision.pose,
-# because importing them would make the comparison circular - the test would
-# prove the new code agrees with itself.
+# Lifted from the blob: three of the four gates, plus the module constants they
+# close over. The constants are lifted too rather than imported from
+# vision.pose, because importing them would make the comparison circular - the
+# test would prove the new code agrees with itself.
+#
+# ⚠️ `get_head_pose` is deliberately absent, and so are the LEFT_EYE/RIGHT_EYE
+# aliases only it read. It is the one gate whose behaviour was **meant** to
+# change after the extraction: the 2026-08-21 fix made yaw and pitch fractions
+# of the face box rather than of the frame, so the original and the current
+# implementation disagree by design and a differential test between them could
+# only ever fail. What replaces it is not a weaker test but a stronger one:
+# test_the_pose_verdict_does_not_depend_on_how_close_the_face_is asserts the
+# property the old code got wrong, which agreeing with the old code cannot.
 ORIGINAL_FUNCTIONS = (
     "calculate_face_ratio",
     "good_distance",
     "face_centered",
-    "get_head_pose",
     "detect_expression",
 )
 
@@ -61,8 +78,6 @@ ORIGINAL_CONSTANTS = (
     "MIN_FACE_RATIO",
     "MAX_FACE_RATIO",
     "CENTER_TOLERANCE",
-    "LEFT_EYE",
-    "RIGHT_EYE",
 )
 
 FRAME_WIDTH = new.CANONICAL_FRAME_WIDTH
@@ -251,23 +266,6 @@ def test_face_centered_is_unchanged(original):
     assert not mismatches, f"{len(mismatches)} of {TRIALS} differ: {mismatches[:5]}"
 
 
-def test_head_pose_is_unchanged(original):
-    rng = random.Random(20260812)
-    mesh = None
-    mismatches = []
-
-    for _ in range(TRIALS):
-        mesh = random_mesh(rng, mesh)
-
-        before = original["get_head_pose"](mesh)
-        after = new.get_head_pose(mesh)
-
-        if before != after:
-            mismatches.append((before, after))
-
-    assert not mismatches, f"{len(mismatches)} of {TRIALS} differ: {mismatches[:5]}"
-
-
 def test_expression_is_unchanged(original):
     rng = random.Random(20260813)
     mesh = None
@@ -287,8 +285,10 @@ def test_expression_is_unchanged(original):
 
 def test_the_random_meshes_exercise_every_pose():
     """
-    A differential test that only ever produced STRAIGHT would agree with
-    anything. This asserts the generator actually reaches all five branches.
+    A mesh generator that only ever produced STRAIGHT would make the pose
+    thresholds untested by anything here, and would have hidden the
+    frame-relative bug for another release. This asserts it actually reaches
+    all five branches.
     """
     rng = random.Random(20260814)
     mesh = None

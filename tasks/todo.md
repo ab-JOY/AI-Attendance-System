@@ -811,3 +811,169 @@ answered, so Phase 3 can start; Q2 and Q3 block Phases 5 and 6.*
 | 6 | ☐ | |
 | 6b | ☑ 2026-08-21 | **Defect I — retraining could not be started from the UI at all.** Not a UI defect: [static/js/training.js](../static/js/training.js), `/train_model` and the `BackgroundJob` were all correct. `train_model()` refuses the whole run on any `{student_id}_{name}` folder and names `scripts/rename_dataset_folders.py --apply` as the fix; that script refused too, because the target `{student_id}` folder existed — **a deadlock with no third step**. The three offending folders were verified **byte-for-byte identical** to their counterparts (SHA-256 over all 300 images, then a second independent per-file comparison by the script). Fix: `folders_are_identical()` resolves a *provably safe* collision by moving the leftover into `dataset/_migrated_duplicates/` (a move, never a delete — the 300 images are all still on disk), `train_model()` skips that directory by name, and a differing collision is still refused. Retraining verified end-to-end through the background job the button drives: **succeeded, 4 identities, trainer.yml 72,103,331 bytes** (≈18.0 MB/student, consistent with Phase 6a). 16 new tests; suite **1240 passed, 50 skipped**; ruff clean. New lesson **L26**. ⚠️ Corrects `handover-phase-6a.md` §1.4: those folders were "inert" when that was written and had since become fatal. |
 | 6c | ☑ 2026-08-21 | **Camera lifecycle — the wedged device, the relogin lockout, and the silent stall.** Three defects from UAT, all in §3 of [`assessment-phase-6c.md`](assessment-phase-6c.md). (1) **Nothing released the camera at process exit** — no `atexit`, no signal handler, no shutdown path, and `logout()` is `session.clear()`; a session running at exit left `cv2.VideoCapture` open and the OS holding the device, which Windows reports as `0xA00F429F<WindowShowFailed> (0x8007001F)` — a healthy device that will not open, indistinguishable from a hardware fault. `RecognitionSession` now registers a release hook on first camera open. **Verified in real subprocesses: fires on normal exit and on `KeyboardInterrupt`; confirmed it does *not* fire on a hard kill, which is documented rather than claimed.** (2) **The single stream slot leaked** — `generate_frames()` releases it in a `finally`, which for an MJPEG response runs only on close/collection, so `/video_feed` was refused with "already open in another window" and no relogin could clear it. Added a per-frame heartbeat and a `VIEWER_STALE_SECONDS = 10` takeover; the single-viewer invariant is intact and a reclaimed generator cannot evict its replacement. (3) **`CameraReader._read_failures` had no reader anywhere** — a dead camera stalled silently forever. Now warns once on the transition, logs recovery, and exposes `is_delivering`. 12 new tests; suite **1252 passed, 50 skipped**; ruff clean. New lesson **L27**. ⚠️ Deliberately **not** done: stopping the session on logout — see the handover, it is a behaviour decision, not a bug. |
+
+---
+
+## 9. Phase 6f — the verification-repeats defects (FS-17, FS-18, SE-18)
+
+**Raised 2026-08-30 by the user:** *"why does the verification repeat even
+after a person has already been verified?"* Traced to **three independent
+loops**, only one of which was the R1 defect Phase 6e closed. Reproduced
+without a camera or a database; the log evidence is `logs/app.log`
+2026-08-21 16:01–16:06, one person, five minutes, nothing recorded.
+
+### FS-17 — an unrecoverable rejection is retried on every frame, forever
+
+`process_confirmed_track()` sets `attendance_saved` only when
+`save_attendance()` returns truthily. `NOT_IN_CLASS` and `UNKNOWN_STUDENT` are
+falsy and **permanent**, so nothing latches, `identity_reconfirmed` stays True,
+and the next frame repeats the whole thing. Measured: **193 `save_attendance()`
+calls in 200 frames.** Each is two DB round trips plus a WARNING line, and
+because `predict_identity()` skips LBPH only on `attendance_saved`, each is
+*also* a full LBPH predict — 98 ms/face at today's roster (`docs/benchmarks.md`),
+280–400 ms at 30 students. One student missing from `enrolments` therefore
+holds the frame rate down **for everyone else in shot**. Reopens PE-3 for the
+exact face it was meant to exempt. 124 such lines in `logs/app.log`.
+
+- [x] Latch a permanent refusal on the track; stop retrying; skip LBPH for it
+- [x] Retry only `ERROR` (the DB was unreachable), on a frame backoff
+- [x] Log the refusal once per confirmed track, not once per frame
+
+### FS-18 — `recognized` is never seeded from the register
+
+`RecognitionSession.start()` does `self._recognized = set()` and reads no
+attendance rows, so `adopt_completed_identity()` — which exists precisely to
+stop a student re-passing liveness — cannot fire across a session restart. Stop
+and restart attendance, or restart the app, and a student already Present today
+redoes the 20-frame confirmation window *and* a fresh liveness challenge, for a
+write that is a no-op duplicate.
+
+- [x] Seed the session from the register at `start()`, via a `SessionHooks`
+      callable (`vision/` must stay database-free)
+- [x] Carry the recorded **status** with it, not just the id — otherwise a Late
+      student who re-appears reads "Present" on the overlay, which is FS-7
+- [x] A failed read must not stop the session starting
+
+### SE-18 — the post-liveness re-check resets on unreadable frames
+
+`note_identity_mismatch()` runs on every frame with no usable match, zeroing
+`post_match_count`, so attendance needs **8 consecutive** readable frames.
+Measured expected wait at the 4.8 fps in the log: 2.1 s at a 95% readable-frame
+rate, 11.4 s at 70%, **106 s at 50%**. A 25-frame run (~5 s) destroys a *passed*
+challenge outright and sends the track back to zero.
+
+⚠️ **This is the second half of the Phase 6c diagnosis that Phase 6e
+deliberately deferred** (`handover-phase-6e.md` §1, §7). **Decided 2026-08-30
+by the user: take it**, on the grounds that the log was recorded on a
+high-resolution camera and the demo may not use one.
+
+The change is R1's split applied one stage later: an unreadable frame must
+**neither advance nor reset** the re-check. A contradiction — LBPH reading a
+*different* enrolled student — still resets it.
+
+- [x] Unreadable frames stop resetting `post_match_count`
+- [x] A contradiction still resets it, and still drops the identity at 5 frames
+- [x] Pin that unreadable frames still cannot confirm anybody (the 6e trap)
+
+**Landed 2026-08-30.** 31 tests added (1327 → 1358), `ruff` clean, held-out
+accuracy **80/80 avg 33.46 — identical**, so recognition is unchanged. Measured
+before → after: `save_attendance()` calls in 200 frames **193 → 1**; the
+re-check surviving one unreadable frame **0 → preserved**. See
+[`handover-phase-6f.md`](handover-phase-6f.md). Gates re-run after the venv was
+rebuilt by `scripts/setup.sh --recreate`; results identical.
+
+### Not actioned — the user's call (§7)
+
+**The 70–95 px dead band.** `RECOGNITION_PROFILE.min_face_width` accepts a
+70 px face box; `align_face()` warps every crop to 200×200, so a small box is
+*upscaled* before `RECOGNITION_QUALITY.min_blur_variance = 50` takes its
+Laplacian, and interpolation cannot restore what the sensor never resolved.
+Measured over 150 real enrolment crops:
+
+| face box in frame | median blur variance | frames passing the gate |
+|---:|---:|---:|
+| 200 px | 1231.1 | 100% |
+| 160 px | 171.8 | 100% |
+| 130 px | 108.3 | 99% |
+| 110 px | 78.1 | 93% |
+| 90 px | 54.7 | 74% |
+| 70 px | 34.6 | **0%** |
+| 50 px | 16.0 | **0%** |
+
+So between 70 px and roughly 95 px the geometry gate admits, tracks and locks
+an identity onto a face whose every crop the quality gate then refuses. These
+are *enrolment stills* — already sharp, no motion blur — so a live frame mid-turn
+is worse. This is a **calibration decision** (L2 / PE-0: the last parameter
+changed here without re-measuring took recognition to 0/60), so it is recorded
+and not taken.
+
+### B3 — an empty class list now blocks the session, and the End control locks
+
+**Asked for 2026-08-30 by the user, same sprint.** B3 was handed to the other
+team as data work (`handover-phase-6e.md` §5) and remains theirs — but the
+*silence* around it was ours. FS-3 scopes recognition to `enrolments`, so a
+session on a subject nobody is enrolled in refuses every face with "Not in this
+class" and ends by writing a register of nobody. Nothing said so until a
+student was standing in front of the camera being refused.
+
+- [x] `enrolments.count_for_subject()` — the mirror of `count_for_student()`
+- [x] `subjects.for_selection_with_class_list_size()` — the picker, plus a count
+- [x] The attendance dropdown marks such a subject "— no class list"
+- [x] **`/start-attendance` refuses when the count is zero**, before a session
+      row exists and before the camera is touched
+- [x] The End dropdown is **locked to the running session's subject**
+- [x] The refusal is a `<dialog>`, not only the top-of-page notice — on a small
+      screen the notice is off-viewport and a refused Start read as a broken
+      button
+- [x] The dialog carries an **Open Class List** button to the refused subject,
+      withheld from non-admins because that screen is `@role_required('admin')`
+
+⚠️ **Built first as a warning that let the session start; changed to a refusal
+on the user's instruction.** The first reasoning was that an empty class list is
+a roster nobody has filled in yet and blocking would obstruct whoever is setting
+the class up. The user overruled it, and the reasoning holds: the session cannot
+produce one useful row, and that is knowable in a single query before an
+operator's time, a class's time and a camera slot are spent on it.
+
+⚠️ **The gate does not refuse when the check itself fails.** "The database did
+not respond" is not an answer, and refusing on it would turn a blip into a class
+that cannot take attendance — the outcome the gate exists to be cheaper than.
+`open_session()` needs the same database one line later, so a real outage still
+stops the session with its own message.
+
+**The End dropdown (R3/FS-16).** While a session runs there is exactly one
+subject that control may legitimately carry, so it is disabled, set to the
+running subject, and its value travels in a hidden input (a disabled `<select>`
+submits nothing). ⚠️ **The lock is a convenience; the 409 is the guard, and it
+stays** — a disabled control is absent from a curl, a replayed POST or a browser
+with scripting off, and what it stands in front of is a register written for a
+subject that was never taught.
+
+⚠️ **`COUNT(e.subject_id)`, never `COUNT(*)`** — demonstrated live against the
+dev database rather than asserted:
+
+```
+CS401: COUNT(*) = 1, COUNT(e.subject_id) = 0
+```
+
+A LEFT JOIN with no match still yields one row of NULLs, so `COUNT(*)` reports
+a student on a class list that has none — silencing the warning on precisely
+the subjects that need it. Third occurrence of this trap in the codebase
+(`repositories/students.py`, `scripts/preflight.py`) and the first pinned by a
+test.
+
+**Landed 2026-08-30.** 14 tests added (1358 → 1372), `ruff` clean,
+`node --check` clean. Both queries run against real MariaDB and agree.
+
+Driven live against the dev database, the gate refuses only what it should:
+
+```
+CS401   (id 1, 3 students) -> STARTS
+test123 (id 3, 0 students) -> REFUSED
+```
+
+⚠️ **An earlier version of this note said every subject was empty and
+attendance could not be started at all.** That was true when measured and stale
+within the hour — the user populated CS401 the same evening. A class-list count
+is operator state; quote it with a time attached, or re-run
+`python scripts/preflight.py`, which answers it live.

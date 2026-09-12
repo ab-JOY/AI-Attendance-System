@@ -83,6 +83,7 @@ class Settings(BaseSettings):
     # -----------------------------------------------------------------
     secret_key: str = Field(min_length=16)
     flask_debug: bool = False
+    flask_host: str = "127.0.0.1"
 
     # -----------------------------------------------------------------
     # TLS (CO-3, and the prerequisite for remote browser enrolment)

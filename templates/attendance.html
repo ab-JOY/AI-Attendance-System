@@ -30,6 +30,43 @@
     #}
     <p id="session-notice" class="flash" role="status" aria-live="polite" hidden></p>
 
+    {#
+        Why a dialog *as well as* the notice above.
+
+        The notice sits at the top of the page. On a phone the Start button is
+        below the fold, so pressing it scrolled nothing, changed nothing
+        visible, and read as the button being broken - reported exactly that
+        way. A refusal the operator cannot see is worse than no check at all,
+        because now the system looks faulty rather than particular.
+
+        ⚠️ **This is not the `alert()` US-1/US-2 removed, and the difference is
+        the point.** That was a browser modal: unreadable to a screen reader
+        until dismissed, and gone the moment it was, so "a session is already
+        running" had to be *remembered*. This is a <dialog>, it is labelled and
+        announced, it carries the button that fixes the problem rather than
+        only naming it, and **the notice above is still set** - so dismissing
+        the dialog leaves the message on the page instead of erasing it. Do not
+        replace this with alert(); do not drop the notice.
+    #}
+    <dialog id="session-dialog" aria-labelledby="session-dialog-title">
+        <h2 id="session-dialog-title">Cannot start the session</h2>
+
+        <p id="session-dialog-message"></p>
+
+        <div class="dialog-actions">
+            {#
+                An <a> rather than a button: it is a navigation, so it opens in
+                a new tab on a middle click and reads as a link to a screen
+                reader. `href` is filled in by the server's reply - see the JS.
+            #}
+            <a id="session-dialog-action" class="dialog-action" hidden></a>
+
+            <button type="button" id="session-dialog-close" class="dialog-dismiss">
+                Close
+            </button>
+        </div>
+    </dialog>
+
     <!-- CAMERA + SUMMARY -->
     <div class="attendance-wrapper">
 
@@ -101,6 +138,24 @@
                 <form id="startForm">
 
                     <label for="subject_id">Subject</label>
+                    {#
+                        B3. The marker on an offering with an empty class list.
+
+                        FS-3 scopes recognition to `enrolments`, so a session on
+                        a subject nobody is enrolled in refuses every face with
+                        "Not in this class" and ends by writing a register of
+                        nobody. That is correct behaviour - without the check any
+                        recognised face is recorded against whatever subject
+                        happens to be running - but nothing said so until a
+                        student was already standing in front of the camera being
+                        refused.
+
+                        Marked here *and* refused at /start-attendance. The
+                        marker is not the guard - it is what stops the operator
+                        picking a subject only to be told no, and what tells
+                        them which of several offerings is the one missing its
+                        roster.
+                    #}
                     <select id="subject_id" name="subject_id" required>
                         <option value="">Choose a subject…</option>
                         {% for subject in subjects %}
@@ -108,6 +163,7 @@
                                 {% if selected_subject_id == subject.id %}selected{% endif %}>
                                 {{ subject.subject_code }} - {{ subject.subject_name }}
                                 {% if subject.section %}({{ subject.section }}){% endif %}
+                                {% if subject.enrolled == 0 %} — no class list{% endif %}
                             </option>
                         {% endfor %}
                     </select>
@@ -143,16 +199,54 @@
                         nothing to prefer.
                     #}
                     <label for="end_subject_id">Subject</label>
-                    <select id="end_subject_id" name="subject_id" required>
+                    {#
+                        While a session is running this control is **locked to
+                        that session's subject**, because there is exactly one
+                        subject it may legitimately carry and offering a choice
+                        invites a mistake the server can only answer with a 409.
+
+                        ⚠️ **The lock is a convenience; the 409 is the guard,
+                        and it stays.** A disabled control is a suggestion - it
+                        is absent from a curl, a replayed form or a browser with
+                        scripting off - and what it is standing in front of is
+                        R3: a register written for a subject that was never
+                        taught, referentially valid and factually wrong, with no
+                        error anywhere. `/end-attendance` still prefers the
+                        running session's subject and still refuses a submission
+                        naming another. See tests/test_end_attendance_subject.py.
+
+                        A disabled <select> submits nothing, so the value
+                        travels in a hidden input beside it. `disabled` rather
+                        than `readonly` because `readonly` does nothing at all
+                        on a <select>.
+                    #}
+                    <select
+                        id="end_subject_id"
+                        name="subject_id"
+                        {% if running_subject_id %}disabled{% endif %}
+                        required>
                         <option value="">Choose a subject…</option>
                         {% for subject in subjects %}
                             <option value="{{ subject.id }}"
-                                {% if selected_subject_id == subject.id %}selected{% endif %}>
+                                {% if running_subject_id == subject.id
+                                      or (not running_subject_id
+                                          and selected_subject_id == subject.id) %}selected{% endif %}>
                                 {{ subject.subject_code }} - {{ subject.subject_name }}
                                 {% if subject.section %}({{ subject.section }}){% endif %}
                             </option>
                         {% endfor %}
                     </select>
+                    {% if running_subject_id %}
+                        <input
+                            type="hidden"
+                            id="end_subject_id_locked"
+                            name="subject_id"
+                            value="{{ running_subject_id }}">
+                        <p class="hint" id="end-subject-lock-note">
+                            Locked to the session that is running. End it to
+                            choose a different subject.
+                        </p>
+                    {% endif %}
 
                     <button type="submit" class="stop-btn">
                         End Attendance Session

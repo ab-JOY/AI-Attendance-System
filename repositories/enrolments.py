@@ -109,6 +109,33 @@ def count_for_student(cursor, student_id):
     return row["classes"] if isinstance(row, dict) else row[0]
 
 
+def count_for_subject(cursor, subject_id):
+    """
+    How many students are on this offering's class list. Zero is the answer
+    that matters.
+
+    The mirror of `count_for_student()`, and it exists for the same reason at
+    the other end of the relation: a subject with an empty class list is one
+    where recognition will refuse **every** face with "Not in this class"
+    (FS-3, deliberately) and ending the session writes a register of nobody.
+    Nothing said so before the session was over.
+
+    ⚠️ `COUNT(*)` over `enrolments` alone is correct here precisely because
+    there is no LEFT JOIN - every row is a real enrolment. The classless-subject
+    query in `subjects.for_selection()` cannot use it, and says why.
+    """
+    cursor.execute(
+        "SELECT COUNT(*) AS enrolled FROM enrolments WHERE subject_id = %s",
+        (subject_id,)
+    )
+
+    row = cursor.fetchone()
+
+    # Same guard as count_for_student: a plain cursor returns a tuple, and
+    # indexing [0] on a dict raises a KeyError a long way from here.
+    return row["enrolled"] if isinstance(row, dict) else row[0]
+
+
 def unenrol(cursor, student_id, subject_id):
     """
     Remove one student from one offering.

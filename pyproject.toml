@@ -63,6 +63,13 @@ dependencies = [
     # classes are used here.
     "bcrypt==5.0.0",
     "Flask-WTF==1.3.0",
+
+    # Phase 6 (mobile app).
+    #
+    # PyJWT: JWT authentication for the REST API that the React Native mobile
+    # app calls. The web routes continue to use Flask sessions; JWT is only
+    # for /api/* endpoints that cannot carry a session cookie.
+    "PyJWT==2.9.0",
 ]
 
 [project.optional-dependencies]

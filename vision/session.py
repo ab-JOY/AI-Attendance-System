@@ -129,6 +129,18 @@ class SessionHooks:
     # (capture) -> None. Resolution and buffering, applied once on open.
     configure_camera: Callable[[Any], None] | None = None
 
+    # (subject) -> {student_id: recorded status} for everyone the register
+    # already holds for this subject today (FS-18). Optional: without it a
+    # session starts believing nobody has been recorded, which is what put a
+    # student who was already Present through the whole confirmation window
+    # and a fresh liveness challenge every time attendance was restarted.
+    #
+    # ⚠️ It reaches the database, which is why it is a hook rather than a
+    # query written here - this package has no database in it, and keeping it
+    # that way is what makes its tests run in milliseconds. It must not raise;
+    # see `_seed_recognized`.
+    already_recorded: Callable[[Any], dict[str, str]] | None = None
+
 
 @dataclass(frozen=True)
 class SessionSnapshot:
@@ -142,6 +154,14 @@ class SessionSnapshot:
     `tracker` and `recognized` are the live objects, not copies: the loop's job
     is to advance them. That is safe because of the single-viewer invariant, not
     because of the lock - see the module docstring.
+
+    ⚠️ **`recognized` is a mapping, not a set** (FS-18). It was a set of ids;
+    it is now `{student_id: recorded status}`, because seeding it from the
+    register at session start means the status is known, and a **Late** student
+    who steps back into shot must not be drawn "Present". Membership tests and
+    `set(recognized)` read the same either way, so the two call sites that
+    changed are the write in `process_confirmed_track()` and the lookup in
+    `resolve_track_identity()`.
     """
 
     running: bool
@@ -151,7 +171,7 @@ class SessionSnapshot:
     recognizer: Any
     label_map: dict[int, dict[str, str]]
     tracker: FaceTracker
-    recognized: set[str]
+    recognized: dict[str, str | None]
 
 
 class RecognitionSession:
@@ -187,7 +207,7 @@ class RecognitionSession:
 
         self._running = False
         self._subject: Any = None
-        self._recognized: set[str] = set()
+        self._recognized: dict[str, str | None] = {}
 
         self._viewer: int | None = None
         self._next_viewer_token = 1
@@ -221,6 +241,11 @@ class RecognitionSession:
         """A copy, so a caller on another thread cannot see a partial set."""
         with self._lock:
             return set(self._recognized)
+
+    def recorded_status_of(self, student_id: str) -> str | None:
+        """What the register holds for this student, if anything (FS-18)."""
+        with self._lock:
+            return self._recognized.get(student_id)
 
     # -- the model (PE-4) --------------------------------------------------
 
@@ -312,12 +337,56 @@ class RecognitionSession:
                 self._detector = self._hooks.make_detector()
 
             self._subject = subject_code
-            self._recognized = set()
+            self._recognized = self._seed_recognized(subject_code)
             self._tracker.reset()
             self._running = True
 
             logger.info("Attendance started for %s", subject_code)
             return True
+
+    def _seed_recognized(self, subject_code: Any) -> dict[str, str | None]:
+        """
+        Who the register already holds for this subject today (FS-18).
+
+        This used to be `set()`, unconditionally, so the session began every
+        time believing nobody had been recorded. `adopt_completed_identity()`
+        reads this set and exists precisely to stop a student re-passing
+        liveness for a mark they already have - and it could not fire across a
+        restart, because the only thing that ever populated the set was a write
+        this process had made. Stop and start attendance and a student who was
+        already Present redid the 20-frame confirmation window and a fresh
+        liveness challenge, for a write the UNIQUE index then discarded.
+
+        ⚠️ **A failed read must not stop the session starting.** Losing this is
+        losing an optimisation - the student passes liveness again, exactly as
+        before - whereas refusing to start is losing the class. So every
+        failure is logged and swallowed, and the session begins empty.
+        """
+        if self._hooks.already_recorded is None:
+            return {}
+
+        try:
+            seeded = dict(self._hooks.already_recorded(subject_code))
+
+        except Exception:
+            logger.warning(
+                "Could not read who is already recorded for %s. Starting with "
+                "an empty list: anyone already marked will be asked to pass "
+                "liveness again, which is a delay rather than a wrong result.",
+                subject_code,
+                exc_info=True,
+            )
+            return {}
+
+        if seeded:
+            logger.info(
+                "%d student(s) are already recorded for %s today and will not "
+                "be asked to verify again.",
+                len(seeded),
+                subject_code,
+            )
+
+        return seeded
 
     def _ensure_released_at_exit(self) -> None:
         """
@@ -505,7 +574,7 @@ class RecognitionSession:
                 recognized=self._recognized,
             )
 
-    def mark_recognized(self, student_id: str) -> None:
+    def mark_recognized(self, student_id: str, status: str | None = None) -> None:
         """Record that this student's attendance has been written."""
         with self._lock:
-            self._recognized.add(student_id)
+            self._recognized[student_id] = status

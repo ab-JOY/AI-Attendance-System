@@ -63,6 +63,71 @@
     }
 
     /* ---------------------------------------------------------------
+     * The refusal dialog
+     *
+     * ⚠️ **Why this exists, and why it is not alert().**
+     *
+     * `notify()` writes to a strip at the top of the page. On a phone the
+     * Start button is below the fold, so a refusal scrolled nothing and
+     * changed nothing the operator could see: pressing Start appeared to do
+     * nothing at all, which reads as a broken button rather than as a
+     * deliberate refusal. Reported exactly that way.
+     *
+     * US-1/US-2 removed `alert()` from this page and the reasons still hold -
+     * it is unreadable to a screen reader until dismissed and gone the moment
+     * it is, so the message had to be *remembered*. A <dialog> is none of
+     * those things: it is labelled, it is announced, Escape closes it, focus
+     * is trapped and returned, and it can carry the button that fixes the
+     * problem instead of only describing it.
+     *
+     * **`notify()` is still called alongside it**, so dismissing the dialog
+     * leaves the message on the page rather than erasing it. That is the half
+     * of US-1/US-2 that a modal on its own would undo.
+     * --------------------------------------------------------------- */
+
+    var dialog = document.getElementById("session-dialog");
+    var dialogMessage = document.getElementById("session-dialog-message");
+    var dialogAction = document.getElementById("session-dialog-action");
+    var dialogClose = document.getElementById("session-dialog-close");
+
+    if (dialogClose && dialog) {
+        dialogClose.addEventListener("click", function () {
+            dialog.close();
+        });
+    }
+
+    function refuse(message, action) {
+        // Always, and first: the page keeps the message whether or not the
+        // dialog can be shown.
+        notify(message, "error");
+
+        if (!dialog || typeof dialog.showModal !== "function") {
+            // No <dialog> support. The notice above is the whole behaviour,
+            // which is exactly what this page did before - degraded, not
+            // broken.
+            return;
+        }
+
+        dialogMessage.textContent = message;
+
+        if (action && action.url) {
+            dialogAction.textContent = action.label || "Fix this";
+            dialogAction.href = action.url;
+            dialogAction.hidden = false;
+        } else {
+            // Cleared, not left over: the dialog is reused, and a stale button
+            // would send the next refusal somewhere unrelated.
+            dialogAction.hidden = true;
+            dialogAction.removeAttribute("href");
+            dialogAction.textContent = "";
+        }
+
+        if (!dialog.open) {
+            dialog.showModal();
+        }
+    }
+
+    /* ---------------------------------------------------------------
      * The live list
      * --------------------------------------------------------------- */
 
@@ -161,6 +226,66 @@
     }
 
     /* ---------------------------------------------------------------
+     * Locking the End control to the running session (R3/FS-16)
+     *
+     * While a session is running there is exactly one subject the End form
+     * may legitimately carry - the running one - because the register is
+     * written for the *session*, not for whatever this dropdown says. Leaving
+     * it free meant the only feedback on a mis-selection was a 409 after the
+     * fact.
+     *
+     * ⚠️ **This is a convenience, not the guard.** A disabled control is
+     * absent from a curl, a replayed POST or a browser with scripting off,
+     * and what it stands in front of is a register written for a subject that
+     * was never taught - referentially valid, factually wrong, and silent.
+     * /end-attendance still refuses a mismatch. Do not treat this as having
+     * made that check redundant.
+     *
+     * A disabled <select> submits nothing, so the value travels in a hidden
+     * input. The server renders the same pair when the page loads with a
+     * session already running; these two have to agree, which is why the
+     * element ids are shared.
+     * --------------------------------------------------------------- */
+
+    var endSubject = document.getElementById("end_subject_id");
+
+    function lockEndSubject(subjectId) {
+        if (!endSubject || !subjectId) {
+            return;
+        }
+
+        endSubject.value = String(subjectId);
+        endSubject.disabled = true;
+
+        // Inserted immediately after the select, which is where the template
+        // puts them when the page loads with a session already running. The
+        // two paths produce the same DOM on purpose: one of them is what a
+        // reload shows, and a difference between them would be a difference
+        // nobody would think to look for.
+        var anchor = endSubject;
+
+        if (!document.getElementById("end_subject_id_locked")) {
+            var hidden = document.createElement("input");
+            hidden.type = "hidden";
+            hidden.id = "end_subject_id_locked";
+            hidden.name = "subject_id";
+            hidden.value = String(subjectId);
+            anchor.parentNode.insertBefore(hidden, anchor.nextSibling);
+            anchor = hidden;
+        }
+
+        if (!document.getElementById("end-subject-lock-note")) {
+            var note = document.createElement("p");
+            note.className = "hint";
+            note.id = "end-subject-lock-note";
+            note.textContent =
+                "Locked to the session that is running. End it to choose a " +
+                "different subject.";
+            anchor.parentNode.insertBefore(note, anchor.nextSibling);
+        }
+    }
+
+    /* ---------------------------------------------------------------
      * Starting and ending
      * --------------------------------------------------------------- */
 
@@ -170,7 +295,9 @@
         var subject = document.getElementById("subject_id").value;
 
         if (!subject) {
-            notify("Choose a subject first.", "error");
+            // Same reasoning as a server refusal: on a phone the dropdown and
+            // the notice are not on screen together.
+            refuse("Choose a subject first.", null);
             return;
         }
 
@@ -198,17 +325,24 @@
                 button.disabled = false;
 
                 if (!body.success) {
-                    // ⚠️ Not alert(). The message is put on the page where it
-                    // stays readable, because "an attendance session is
-                    // already running" is something the operator has to act on
-                    // rather than dismiss.
-                    notify(body.message, "error");
+                    // Every refusal, not only the empty class list. They all
+                    // share the same failure: the operator pressed Start,
+                    // nothing visible happened, and the reason was written
+                    // somewhere they were not looking. `body.action` is
+                    // present only when the server has somewhere to send them.
+                    refuse(body.message, body.action);
                     return;
                 }
 
                 camera.style.display = "block";
                 camera.src = FEED_URL;
                 cameraText.hidden = true;
+
+                // R3/FS-16. The page does not reload on start, so the End
+                // control has to be locked here as well as on render - and
+                // to the subject the *server* says it started, not the one
+                // this form happens to be showing.
+                lockEndSubject(body.subject_id);
 
                 notify("Session running. Recognised students appear below.",
                        "success");
@@ -219,8 +353,8 @@
                 button.disabled = false;
 
                 if (error.message !== "signed out") {
-                    notify("The session could not be started. Reload and try "
-                           + "again.", "error");
+                    refuse("The session could not be started. Reload and try "
+                           + "again.", null);
                 }
             });
     });
