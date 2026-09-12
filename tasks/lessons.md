@@ -1535,3 +1535,53 @@ next stage lands. It was not, and the property it claimed to protect was
 actually held by something else entirely (where the counter is incremented, not
 where it is reset). **A correct comment about the wrong mechanism will get the
 bug restored by the next careful reader.**
+
+---
+
+## L33 - A preview that shows more than the server receives is a lie the user cannot see
+
+**Mobile attendance, reported as "the app keeps saying No face detected instead
+of rejecting an unrecognised face".** The face was in the photo; it was not in
+the frame the route judged.
+
+`infra/uploads.py::canonicalise()` centre-crops every upload to 16:9 because
+`vision/pose.py`'s thresholds were tuned at 1920x1080. The web camera already
+sends 16:9, so the crop is a no-op there and attendance worked. A phone shoots
+portrait: for a 1080x1440 photo the crop keeps **rows 416-1024 - 42% of the
+height, centred** - and a selfie puts the head above that band. Measured with a
+real enrolment face composited into a portrait frame, varying only the head's
+vertical position: detected in the photo the phone sent, gone from the frame
+the route saw, for any head centred above ~40% of frame height.
+
+Two things made it unreadable as a framing problem:
+
+1. **The preview was a 250x250 square.** A `CameraView` covers its box, so the
+   student saw rows ~180-1260 of the frame while the server kept 416-1024.
+   Framing the face perfectly in the preview could still put it outside what
+   was sent. **The preview was showing a picture nobody ever judged.**
+2. **The message was true and still misleading.** `multi_face_landmarks` really
+   was empty, so "No face detected." was honest about the detector and silent
+   about the crop - and it reads, to an operator, as a camera or a lighting
+   problem. This is **L25** from the opposite direction: there, a geometry
+   refusal was mislabelled as no-face; here, a genuine no-face hid a step that
+   had thrown the face away.
+
+⚠️ **L25 applies to how this was measured, and it bit again.** The stimulus was
+a 200x200 aligned dataset crop composited into a frame - exactly the synthetic
+L25 warns about. It is trustworthy here only because the finding is a
+**differential**: same image, same scale, only the head's vertical position
+changing, so the synthetic's known weakness (it needs ~430px of face height to
+be detected at all, measured) is held constant on both sides. It was *not*
+trustworthy for the alternative fix I tested on it - letterboxing the portrait
+frame into 1920x1080 scored 0/4 on the synthetic, which is a statement about
+the stimulus, not about letterboxing. **Use a differential or a real face; a
+synthetic's absolute detection rate means nothing.**
+
+**How to apply:** when a client and a server both have an opinion about the
+frame's geometry, make the client's preview *be* the server's window, and crop
+on the client where it is visible. `mobile/src/utils/frame.js` now crops to
+exactly the rectangle `canonicalise()` would take, and both camera screens
+render a 16:9 box - so what the student frames is what the server judges.
+⚠️ **Changing either camera screen's preview back to a square or a
+full-height box restores this bug silently**, with no test failing and the same
+honest-but-useless message.

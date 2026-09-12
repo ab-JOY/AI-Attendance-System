@@ -8,27 +8,38 @@ import React, { useState, useEffect, useRef } from 'react';
 import { View, StyleSheet, Text, Alert } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import client from '../api/client';
+import { useAuth } from '../context/AuthContext';
 import Button from '../components/Button';
 import Header from '../components/Header';
+import { captureLandscapeFrame, frameFormData, FRAME_ASPECT } from '../utils/frame';
 import { colors, spacing, typography } from '../theme/colors';
 
 export default function FaceCaptureScreen({ navigation, route }) {
   const { studentId, studentName } = route.params;
+  const { completeRegistration, getPendingToken } = useAuth();
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef(null);
   
   const [isCapturing, setIsCapturing] = useState(false);
   const [progress, setProgress] = useState(null);
   const [error, setError] = useState('');
+
+  // Create an axios config that includes the pending token
+  const authHeaders = () => {
+    const t = getPendingToken();
+    return t ? { headers: { Authorization: `Bearer ${t}` } } : {};
+  };
   
-  // Clean up capture session if user leaves
+  // Clean up capture session if user leaves the screen
   useEffect(() => {
-    return () => {
+    const unsubscribe = navigation.addListener('beforeRemove', (e) => {
+      // If we're capturing and user tries to go back, cancel the capture on the backend
       if (isCapturing) {
-        client.post('/api/enrol/cancel').catch(() => {});
+        client.post('/api/enrol/cancel', {}, authHeaders()).catch(() => {});
       }
-    };
-  }, [isCapturing]);
+    });
+    return unsubscribe;
+  }, [navigation, isCapturing]);
 
   if (!permission) {
     return <View style={styles.container} />;
@@ -54,7 +65,7 @@ export default function FaceCaptureScreen({ navigation, route }) {
       const response = await client.post('/api/enrol/start', {
         student_id: studentId,
         student_name: studentName,
-      });
+      }, authHeaders());
 
       if (response.data.success) {
         setProgress(response.data.progress);
@@ -64,7 +75,7 @@ export default function FaceCaptureScreen({ navigation, route }) {
         setIsCapturing(false);
       }
     } catch (err) {
-      setError('Could not start capture session.');
+      setError('Could not start capture session: ' + (err.response?.data?.message || err.message));
       setIsCapturing(false);
     }
   };
@@ -73,28 +84,22 @@ export default function FaceCaptureScreen({ navigation, route }) {
     if (!cameraRef.current) return;
 
     try {
-      // Capture a frame
-      const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.5,
-        base64: true,
-      });
+      // Capture a frame, cropped to the 16:9 window the preview showed. The
+      // server crops to 16:9 itself, and a portrait shot loses the head in
+      // that crop - see ../utils/frame.js. The retry loop below hid this here
+      // as a slow capture rather than as an error.
+      const photo = await captureLandscapeFrame(cameraRef.current);
+      const formData = frameFormData(photo);
 
-      // Send to server
-      // Note: the server expects a multipart/form-data with 'frame' or a base64 string depending on API setup.
-      // Since our API blueprint defers to the existing web flow, we format it as multipart.
-      // However, for simplicity in React Native, we'll send it as base64 in a JSON payload.
-      // *Wait, the web backend expects standard form-data with a file upload.*
-      
-      const formData = new FormData();
-      formData.append('frame', {
-        uri: photo.uri,
-        name: 'frame.jpg',
-        type: 'image/jpeg',
-      });
+      const config = {
+        ...authHeaders(),
+        headers: {
+          ...(authHeaders().headers || {}),
+          'Content-Type': 'multipart/form-data',
+        },
+      };
 
-      const response = await client.post('/api/enrol/frame', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
+      const response = await client.post('/api/enrol/frame', formData, config);
 
       if (response.data.success) {
         setProgress(response.data.progress);
@@ -117,11 +122,13 @@ export default function FaceCaptureScreen({ navigation, route }) {
 
   const finishCapture = async () => {
     try {
-      const response = await client.post('/api/enrol/finish');
+      const response = await client.post('/api/enrol/finish', {}, authHeaders());
       if (response.data.success) {
         setIsCapturing(false);
+        // Activate the stored token now that face capture is done
+        completeRegistration();
         Alert.alert('Success', 'Face capture complete! Model is retraining.', [
-          { text: 'OK', onPress: () => navigation.replace('Main') }
+          { text: 'OK' }
         ]);
       } else {
         setError(response.data.message);
@@ -144,12 +151,17 @@ export default function FaceCaptureScreen({ navigation, route }) {
         }
       }} />
       
-      <View style={styles.cameraContainer}>
-        <CameraView style={styles.camera} facing="front" ref={cameraRef} />
-        
-        <View style={styles.overlay}>
-          <View style={styles.frameOutline} />
+      <View style={styles.cameraStage}>
+        <View style={styles.cameraContainer}>
+          <CameraView style={StyleSheet.absoluteFill} facing="front" ref={cameraRef} />
+
+          <View style={styles.overlay}>
+            <View style={styles.frameOutline} />
+          </View>
         </View>
+        <Text style={styles.framingHint}>
+          Only what you can see here is sent - keep your whole face inside the oval.
+        </Text>
       </View>
 
       <View style={styles.controls}>
@@ -197,25 +209,41 @@ const styles = StyleSheet.create({
   button: {
     width: '100%',
   },
-  cameraContainer: {
+  cameraStage: {
     flex: 1,
+    justifyContent: 'center',
+  },
+  // ⚠️ 16:9, matching the crop in ../utils/frame.js. A CameraView covers its
+  // box, so this shape *is* the window that gets uploaded; a full-height
+  // preview shows the student a frame the server never receives.
+  cameraContainer: {
+    width: '100%',
+    aspectRatio: FRAME_ASPECT,
     position: 'relative',
     backgroundColor: '#000',
+    overflow: 'hidden',
   },
-  camera: {
-    flex: 1,
+  framingHint: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    marginTop: spacing.md,
+    paddingHorizontal: spacing.lg,
   },
   overlay: {
-    ...StyleSheet.absoluteFillObject,
+    flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    zIndex: 10,
   },
+  // Sized to sit inside the 16:9 box on a phone-width screen; the old
+  // 250x300 oval was taller than the preview is now.
   frameOutline: {
-    width: 250,
-    height: 300,
+    width: '38%',
+    height: '82%',
     borderWidth: 4,
     borderColor: colors.primary,
-    borderRadius: 150, // Oval shape
+    borderRadius: 999, // Oval shape
     backgroundColor: 'transparent',
   },
   controls: {

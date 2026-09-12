@@ -3,21 +3,26 @@
  * Shows live session status and allows students to join the session.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { View, StyleSheet, Text, ScrollView, RefreshControl, Alert } from 'react-native';
+import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
 import client from '../api/client';
 import Button from '../components/Button';
 import Header from '../components/Header';
 import Card from '../components/Card';
+import { captureLandscapeFrame, frameFormData, FRAME_ASPECT } from '../utils/frame';
 import { colors, spacing, typography, borderRadius } from '../theme/colors';
 
 export default function AttendanceMonitoringScreen() {
   const { user } = useAuth();
   const [liveData, setLiveData] = useState(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [isJoining, setIsJoining] = useState(false);
+  const [isCameraOpen, setIsCameraOpen] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [permission, requestPermission] = useCameraPermissions();
+  const cameraRef = useRef(null);
 
   const fetchLiveData = async () => {
     try {
@@ -42,17 +47,47 @@ export default function AttendanceMonitoringScreen() {
     setIsRefreshing(false);
   };
 
-  const handleJoinSession = () => {
-    // In this app architecture, joining a session implies opening the phone camera
-    // to run face recognition, similar to FaceCaptureScreen but for attendance.
-    // However, the backend recognize_face.py relies on a server-side camera.
-    // For now, we will show an alert that this feature requires the server-side camera
-    // or a dedicated mobile recognition endpoint.
-    Alert.alert(
-      'Join Session',
-      'This feature will open your camera to verify your face and mark you present.',
-      [{ text: 'OK' }]
-    );
+  const handleJoinSession = async () => {
+    if (!isCameraOpen) {
+      if (!permission?.granted) {
+        const result = await requestPermission();
+        if (!result.granted) return;
+      }
+      setIsCameraOpen(true);
+      return;
+    }
+
+    if (!cameraRef.current) return;
+
+    try {
+      setIsVerifying(true);
+
+      // Cropped to the 16:9 window the preview showed, because the server
+      // crops to 16:9 itself and a portrait shot loses the head - see
+      // ../utils/frame.js.
+      const photo = await captureLandscapeFrame(cameraRef.current);
+      const formData = frameFormData(photo);
+
+      const response = await client.post('/api/attendance/frame', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+
+      if (response.data.success) {
+        if (response.data.done) {
+          Alert.alert('Verified!', response.data.message);
+          setIsCameraOpen(false);
+          fetchLiveData();
+        } else {
+          Alert.alert('Try again', response.data.message);
+        }
+      } else {
+        Alert.alert('Error', response.data.message);
+      }
+    } catch (err) {
+      Alert.alert('Error', 'Verification failed: ' + (err.response?.data?.message || err.message));
+    } finally {
+      setIsVerifying(false);
+    }
   };
 
   if (!liveData?.running) {
@@ -85,8 +120,21 @@ export default function AttendanceMonitoringScreen() {
 
         <View style={styles.avatarContainer}>
           <View style={styles.avatarBox}>
-            <Ionicons name="person-outline" size={120} color={colors.secondary} />
+            {isCameraOpen ? (
+              <CameraView 
+                style={StyleSheet.absoluteFill} 
+                facing="front" 
+                ref={cameraRef}
+              />
+            ) : (
+              <Ionicons name="person-outline" size={96} color={colors.secondary} />
+            )}
           </View>
+          {isCameraOpen && (
+            <Text style={styles.framingHint}>
+              Keep your whole face inside the box - only what you can see here is sent.
+            </Text>
+          )}
         </View>
 
         <View style={styles.statsRow}>
@@ -97,9 +145,9 @@ export default function AttendanceMonitoringScreen() {
 
         {user?.role === 'student' && (
           <Button
-            title="Join Attendance Session"
+            title={isCameraOpen ? "Verify My Face" : "Join Attendance Session"}
             onPress={handleJoinSession}
-            loading={isJoining}
+            loading={isVerifying}
             style={styles.joinButton}
           />
         )}
@@ -167,12 +215,24 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: spacing.xl,
   },
+  // ⚠️ 16:9, matching the crop in ../utils/frame.js. A CameraView covers its
+  // box, so this shape *is* the window that gets uploaded. The square this
+  // used to be showed more of the frame than the server ever received, so a
+  // correctly framed face could still be cropped away server-side and come
+  // back as "No face detected."
   avatarBox: {
-    width: 250,
-    height: 250,
+    width: '100%',
+    aspectRatio: FRAME_ASPECT,
     backgroundColor: colors.primary,
     justifyContent: 'center',
     alignItems: 'center',
+    overflow: 'hidden',
+  },
+  framingHint: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    marginTop: spacing.sm,
   },
   statsRow: {
     alignItems: 'center',
