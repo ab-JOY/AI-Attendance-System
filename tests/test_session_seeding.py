@@ -253,3 +253,51 @@ def test_the_hook_swallows_a_database_error(monkeypatch):
     )
 
     assert recognize_face.already_recorded_today(subject) == {}
+
+
+# ---------------------------------------------------------------------------
+# An Absent row is not a mark (reported 2026-09-12)
+# ---------------------------------------------------------------------------
+
+
+def test_absent_rows_are_not_treated_as_already_recorded():
+    """
+    ⚠️ **The regression, and it silently cost a class their attendance.**
+    `insert_absences()` writes an Absent row for every enrolled student who was
+    not recognised when a session ended. This query selected those rows too, so
+    the next session that day seeded them into `recognized` and skipped them -
+    a student absent from the 8am period could not be recorded present at 9am.
+
+    Measured on the dev database on 2026-09-12: three students carried Absent
+    rows for CS401 and the session started at 20:30 logged "3 student(s) are
+    already recorded ... and will not be asked to verify again", naming exactly
+    those three.
+    """
+    cursor = ScriptedCursor([{"student_id": ALICE, "status": "Present"}])
+
+    attendance_repo.recorded_today(cursor, 7)
+
+    sql, _params = cursor.queries[0]
+
+    assert "status IN ('Present', 'Late')" in sql, (
+        "Absent must not count as recorded - it is the row that says the "
+        "student was *not* recorded."
+    )
+
+
+def test_the_seed_still_carries_the_status_it_finds():
+    """
+    The filter narrows which rows are seeded, not what is seeded from them.
+    A Late student must still read Late on the overlay (FS-7).
+    """
+    cursor = ScriptedCursor(
+        [
+            {"student_id": ALICE, "status": "Present"},
+            {"student_id": BOB, "status": "Late"},
+        ]
+    )
+
+    assert attendance_repo.recorded_today(cursor, 7) == {
+        ALICE: "Present",
+        BOB: "Late",
+    }

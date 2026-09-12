@@ -358,6 +358,17 @@ def recorded_today(cursor, subject_id):
     suppresses duplicate writes** (RE-3). If this query and that index ever
     disagree about what "already recorded" means, a student is either asked to
     verify twice or skipped when they should not be.
+
+    ⚠️ **An Absent row is not a mark, and reading it as one cost a class their
+    attendance.** `insert_absences()` writes an Absent row for every enrolled
+    student who was not recognised when a session ended. This query used to
+    select those too, so the *next* session that day seeded them into
+    `recognized`, logged "will not be asked to verify again", and skipped them
+    for the rest of the day - a student absent from the 8am period could not be
+    recorded present at 9am. Measured on the dev database on 2026-09-12: three
+    students carried Absent rows for CS401 and the next session's seed reported
+    exactly those three. The statuses that mean "this student was recorded" are
+    the ones `derive_status()` can produce, and Absent is not among them.
     """
     cursor.execute(
         """
@@ -365,6 +376,7 @@ def recorded_today(cursor, subject_id):
         FROM attendance
         WHERE subject_id = %s
         AND attendance_date = CURDATE()
+        AND status IN ('Present', 'Late')
         """,
         (subject_id,),
     )

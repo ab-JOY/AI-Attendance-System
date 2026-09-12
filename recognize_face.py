@@ -761,6 +761,22 @@ def save_attendance(student_id, subject):
     face is recorded against whatever subject happens to be running.
 
     **FS-8 - Late is derived** from the subject's scheduled start.
+
+    ⚠️ **The duplicate branch upgrades an Absent and touches nothing else.** It
+    was `id = id` - a no-op - which was right while the only row that could
+    already exist was an earlier Present. Since FS-4 a session end writes an
+    Absent row for everyone unrecognised, and that row sits on the same UNIQUE
+    key: a student marked absent at 8am could be recognised at 9am and the
+    write would be silently discarded, leaving the register saying Absent for a
+    student standing in front of the camera. Only Absent is overwritten, so a
+    Present is never restamped with a later arrival time and a Late is never
+    quietly promoted.
+
+    ⚠️ **The order of the three assignments is load-bearing.** MySQL applies
+    them left to right and each `IF` reads the value the column holds *at that
+    point*, so `status` must be assigned last - promote it first and the other
+    two would test a column that already says Present and keep the absentee's
+    NULL `time_in`.
     """
     try:
         with db_cursor(dictionary=True, commit=True) as cursor:
@@ -829,7 +845,12 @@ def save_attendance(student_id, subject):
                     status
                 )
                 VALUES (%s, %s, %s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE id = id
+                ON DUPLICATE KEY UPDATE
+                    session_id = IF(status = 'Absent', VALUES(session_id),
+                                    session_id),
+                    time_in    = IF(status = 'Absent', VALUES(time_in),
+                                    time_in),
+                    status     = IF(status = 'Absent', VALUES(status), status)
                 """,
                 (
                     student_id,
@@ -844,6 +865,15 @@ def save_attendance(student_id, subject):
             if cursor.rowcount == 0:
                 logger.info(
                     "Attendance already recorded for %s", student_id
+                )
+            elif cursor.rowcount == 2:
+                # 2 is MySQL's "a duplicate was updated", which here can only
+                # be an Absent row from an earlier session end being replaced.
+                logger.info(
+                    "Attendance corrected from Absent: %s - %s (%s)",
+                    student_id,
+                    enrolled["name"],
+                    resolved,
                 )
             else:
                 logger.info(

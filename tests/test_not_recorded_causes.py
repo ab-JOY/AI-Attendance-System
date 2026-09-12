@@ -37,6 +37,9 @@ class ScriptedCursor:
     def __init__(self, answers):
         self.answers = list(answers)
         self.queries = []
+        # What MySQL reports for a row that was inserted. 2 would mean a
+        # duplicate was updated - the Absent upgrade below.
+        self.rowcount = 1
 
     def execute(self, sql, params=None):
         self.queries.append((" ".join(sql.split()), params))
@@ -138,3 +141,63 @@ def test_a_recorded_status_is_still_green_or_amber():
     """The paths this change must not have disturbed."""
     assert status_color("Present") == (0, 255, 0)
     assert status_color("Late") == (0, 215, 255)
+
+
+# ---------------------------------------------------------------------------
+# An earlier Absent must not survive a later recognition (reported 2026-09-12)
+# ---------------------------------------------------------------------------
+
+
+def test_the_write_upgrades_an_absent_row_and_nothing_else(scripted):
+    """
+    ⚠️ **The duplicate branch used to be `id = id`, a deliberate no-op.**
+
+    That was right while the only row that could already exist was an earlier
+    Present. Since FS-4, ending a session writes an Absent row for everyone
+    unrecognised, on the same UNIQUE key (student_id, subject_id,
+    attendance_date) - so a student marked absent at 8am who is recognised at
+    9am had the write discarded, and the register kept saying Absent for
+    someone standing in front of the camera.
+
+    Only Absent is overwritten: a Present must never be restamped with a later
+    arrival time, and a Late must never be quietly promoted.
+    """
+    cursor = scripted([{"student_id": STUDENT, "name": "T", "scheduled_start": None}])
+
+    save_attendance(STUDENT, SUBJECT)
+
+    sql, _params = cursor.queries[-1]
+
+    assert "ON DUPLICATE KEY UPDATE" in sql
+    assert "id = id" not in sql, "the no-op branch is what discarded the upgrade"
+
+    for column in ("session_id", "time_in", "status"):
+        assert f"IF(status = 'Absent', VALUES({column}), {column})" in sql, (
+            f"{column} must only be replaced when the existing row is Absent"
+        )
+
+
+def test_status_is_the_last_assignment_in_the_upgrade(scripted):
+    """
+    ⚠️ **Order is load-bearing.** MySQL applies the assignments left to right
+    and each `IF` reads the column as it stands at that point. Promote `status`
+    first and the other two would test a column that already says Present,
+    keeping the absentee's NULL `time_in` on a student who did arrive.
+    """
+    cursor = scripted([{"student_id": STUDENT, "name": "T", "scheduled_start": None}])
+
+    save_attendance(STUDENT, SUBJECT)
+
+    sql, _params = cursor.queries[-1]
+    upgrade = sql.split("ON DUPLICATE KEY UPDATE", 1)[1]
+
+    # "status = IF(" is the assignment; "status = 'Absent'" inside each IF is
+    # the test, so match on the assignment's shape rather than the bare name.
+    assigned = upgrade.index("status = IF(")
+
+    assert assigned > upgrade.index("time_in = IF("), (
+        "status must be assigned after the columns whose IF reads it"
+    )
+    assert assigned > upgrade.index("session_id = IF("), (
+        "status must be assigned after the columns whose IF reads it"
+    )
