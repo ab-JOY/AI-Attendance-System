@@ -147,6 +147,10 @@ def test_the_export_itself_never_materialises_the_register(monkeypatch):
                 "subject_code": "CS401",
                 "section": "A",
                 "instructor": "Nobody In Particular",
+                "department": "College of Nothing",
+                "program": "BSNOTHING",
+                "year_level": 4,
+                "student_section": "A",
                 "time_in": None,
                 "status": "Absent",
             }

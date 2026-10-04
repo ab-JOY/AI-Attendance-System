@@ -68,6 +68,57 @@ def sections(cursor):
     return cursor.fetchall()
 
 
+def placements(cursor, instructor_id=None):
+    """
+    Every section that has somebody to report on, with its program and
+    department - the choices the report filters offer.
+
+    With `instructor_id`, only the sections of students on that instructor's
+    class lists: an instructor filters by the departments, programs, years and
+    sections they actually teach, and is not shown the rest of the school.
+    None is an administrator, who is offered every section.
+
+    One row per section, ordered by department, program, year and name. The
+    department, program and year lists are derived from these rows by the
+    caller, so the four dropdowns can never offer a combination that does not
+    exist.
+    """
+    taught = ""
+    values = ()
+
+    if instructor_id is not None:
+        taught = """
+            JOIN students st ON st.section_id = sec.id
+            JOIN enrolments e ON e.student_id = st.student_id
+            JOIN subjects sub ON sub.id = e.subject_id
+            WHERE sub.instructor_id = %s
+        """
+        values = (instructor_id,)
+
+    cursor.execute(
+        f"""
+        SELECT DISTINCT
+            d.id AS department_id,
+            d.department_code,
+            d.department_name,
+            p.id AS program_id,
+            p.program_code,
+            sec.id AS section_id,
+            sec.year_level,
+            sec.section_name
+        FROM sections sec
+        JOIN programs p ON p.id = sec.program_id
+        JOIN departments d ON d.id = p.department_id
+        {taught}
+        ORDER BY d.department_name, p.program_code, sec.year_level,
+                 sec.section_name
+        """,
+        values,
+    )
+
+    return cursor.fetchall()
+
+
 def _first_column(row):
     # dictionary=True nearly everywhere, but a plain cursor returns a tuple -
     # the same guard as repositories/enrolments.py.

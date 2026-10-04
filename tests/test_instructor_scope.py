@@ -164,6 +164,9 @@ def reports(monkeypatch):
         record("instructors", []),
     )
     monkeypatch.setattr(
+        reports_module.academics_repo, "placements", record("placements", [])
+    )
+    monkeypatch.setattr(
         reports_module.attendance_repo, "filtered", record("register", [])
     )
     monkeypatch.setattr(
@@ -172,10 +175,10 @@ def reports(monkeypatch):
         record("sessions", []),
     )
 
-    def register_workbook(*args):
+    def register_workbook(*args, **kwargs):
         import io
 
-        asked["export"] = (args, {})
+        asked["export"] = (args, kwargs)
         return io.BytesIO(b"not a real workbook"), 0
 
     monkeypatch.setattr(
@@ -280,7 +283,112 @@ def test_the_export_link_carries_the_chosen_filters(client, reports):
         "date": ["2026-08-16"],
         "subject": ["3"],
         "instructor": ["8"],
+        "sort": ["date"],
     }
+
+
+# ---------------------------------------------------------------------------
+# Narrowing and ordering by where the student belongs
+# ---------------------------------------------------------------------------
+
+EVERYTHING = {
+    "department_id": None,
+    "program_id": None,
+    "year_level": None,
+    "section_id": None,
+}
+
+
+def test_the_placement_filters_reach_the_register_the_sessions_and_the_export(
+    client, reports
+):
+    """One set of filters, three consumers. A fourth that forgot them would
+    show one section on screen and export the school."""
+    sign_in(client, role="admin", admin_id=1)
+
+    query = "department_id=5&program_id=5&year_level=4&section_id=2&sort=placement"
+    chosen = {"department_id": 5, "program_id": 5, "year_level": 4, "section_id": 2}
+
+    client.get(f"/reports?{query}")
+    client.get(f"/export_excel?{query}")
+
+    assert reports["register"][1] == dict(chosen, sort="placement")
+    assert reports["export"][1] == dict(chosen, sort="placement")
+    assert reports["sessions"][1] == chosen
+
+
+def test_an_instructor_narrows_within_their_own_classes(client, reports):
+    """
+    The placement filters do not replace the scope, they sit inside it: the
+    instructor key is still the session's whatever else the URL asks for.
+    """
+    sign_in(client, **{INSTRUCTOR_KEY: 7})
+
+    client.get("/reports?year_level=4&section_id=2")
+
+    assert reports["register"][0] == (None, None, 7)
+    assert reports["register"][1] == dict(
+        EVERYTHING, year_level=4, section_id=2, sort="date"
+    )
+
+
+def test_an_instructor_is_offered_only_the_sections_they_teach(client, reports):
+    """An administrator is offered every section; an instructor, their own."""
+    sign_in(client, **{INSTRUCTOR_KEY: 7})
+    client.get("/reports")
+
+    assert reports["placements"][1] == {"instructor_id": 7}
+
+    sign_in(client, role="admin", admin_id=1)
+    client.get("/reports")
+
+    assert reports["placements"][1] == {"instructor_id": None}
+
+
+@pytest.mark.parametrize(
+    "sort", ["", "nonsense", "a.status; DROP TABLE attendance", "PLACEMENT"]
+)
+def test_an_unknown_sort_is_the_default_one(client, reports, sort):
+    """
+    `sort` is a key into an allowlist, never SQL: an ORDER BY cannot be a
+    bound parameter, so the only safe thing a request can do is choose.
+    """
+    from urllib.parse import quote
+
+    sign_in(client, role="admin", admin_id=1)
+
+    assert client.get(f"/reports?sort={quote(sort)}").status_code == 200
+    assert reports["register"][1]["sort"] == "date"
+
+
+def test_every_sort_the_form_offers_is_one_the_query_knows():
+    from repositories import attendance as attendance_repo
+
+    assert set(attendance_repo.SORT_ORDERS) == {"date", "placement"}
+    assert attendance_repo.DEFAULT_SORT in attendance_repo.SORT_ORDERS
+
+
+def test_a_filter_the_query_does_not_know_is_an_error_not_a_no_op():
+    """
+    Ignored silently, a mistyped filter returns the whole register under a
+    heading that says it is one section's.
+    """
+    from repositories import attendance as attendance_repo
+
+    with pytest.raises(KeyError):
+        attendance_repo._filtered_query(campus_id=3)
+
+
+def test_the_placement_filters_are_bound_not_spliced():
+    from repositories import attendance as attendance_repo
+
+    query, values = attendance_repo._filtered_query(
+        None, None, 7, "placement", year_level=4, section_id=2
+    )
+
+    assert values == [7, 4, 2]
+    assert "sec.year_level = %s" in query and "s.section_id = %s" in query
+    assert query.rstrip().endswith(attendance_repo.SORT_ORDERS["placement"])
 
 
 # ---------------------------------------------------------------------------

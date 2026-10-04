@@ -73,6 +73,11 @@ EXPORT_COLUMNS = (
     # Last, so the columns before it stay where an existing spreadsheet or
     # macro expects them.
     ("Instructor", "instructor"),
+    # Where the *student* belongs. "Section" above is the offering's.
+    ("Department", "department"),
+    ("Program", "program"),
+    ("Year Level", "year_level"),
+    ("Student Section", "student_section"),
 )
 
 
@@ -94,13 +99,15 @@ def _cell(value):
     return value
 
 
-def register_workbook(selected_date=None, subject_id=None, instructor_id=None):
+def register_workbook(selected_date=None, subject_id=None, instructor_id=None,
+                      **options):
     """
     Build the filtered register as a workbook. Returns `(buffer, row_count)`.
 
     The three filters are the ones `/reports` applied to the screen, so the
     file matches what it was exported from - including whose register it is
-    (DM-5).
+    (DM-5). `options` are the placement filters and the sort order, passed
+    straight through, so the rows are also in the order the screen showed.
 
     The buffer is positioned at the start, ready to be handed to `send_file`.
 
@@ -120,7 +127,7 @@ def register_workbook(selected_date=None, subject_id=None, instructor_id=None):
     # function exists to remove.
     with db_cursor(dictionary=True) as cursor:
         for row in attendance_repo.iter_filtered(
-            cursor, selected_date, subject_id, instructor_id
+            cursor, selected_date, subject_id, instructor_id, **options
         ):
             sheet.append([_cell(row[column]) for _heading, column in EXPORT_COLUMNS])
             written += 1

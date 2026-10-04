@@ -1025,6 +1025,11 @@ instructor account, every pre-existing row unchanged. Fast suite **1390 →
 1462**, integration **67 passed**, 11 of 11 mutations caught. See
 [`handover-phase-7.md`](handover-phase-7.md).
 
+**Added the same day, at the user's request:** `/reports` narrows by the
+student's department, program, year level and section, and sorts by them, for
+the admin and - within their own classes - for an instructor. Fast suite
+**1472**, integration **73**, 6 more mutations caught. `handover-phase-7.md` §8.
+
 ### §7.7 — open, the user's
 
 1. **Drop the legacy columns** `students.college_department`, `program`,

@@ -9,6 +9,7 @@ import mysql.connector
 from flask import Blueprint, render_template, request, send_file
 
 from infra.db import db_cursor
+from repositories import academics as academics_repo
 from repositories import attendance as attendance_repo
 from repositories import instructors as instructors_repo
 from repositories import subjects as subjects_repo
@@ -24,16 +25,25 @@ reports_bp = Blueprint("reports", __name__)
 
 def _filters():
     """
-    `(date, subject_id, instructor_id)` from the query string.
+    `(date, subject_id, instructor_id, options)` from the query string.
 
     `subject_id` is None unless the value is a positive integer, so a filter
     typed into the URL by hand cannot reach a query.
+
+    `options` is everything else the register can be narrowed and ordered by,
+    as the keyword arguments `attendance_repo.filtered()` takes: the student's
+    `department_id`, `program_id`, `year_level` and `section_id`, and `sort`.
 
     ⚠️ **`instructor_id` is only a filter for an administrator (DM-5).** For a
     signed-in instructor it is their own key, taken from the session, and
     `?instructor=` is not read at all - otherwise the scope would be a default
     the URL could override. Both the screen and the export come through here,
     so the two cannot disagree about whose register this is.
+
+    ⚠️ **The placement filters need no such care, and that is deliberate.**
+    They narrow *within* the scope: an instructor who asks for a department
+    they do not teach gets their own classes filtered to nothing, never
+    somebody else's.
     """
     selected_date = request.args.get('date')
     subject_id = optional_id(request.args.get('subject'))
@@ -44,7 +54,42 @@ def _filters():
         optional_id(request.args.get('instructor')) if scope is None else scope
     )
 
-    return selected_date, subject_id, instructor_id
+    options = {
+        key: optional_id(request.args.get(key))
+        for key in attendance_repo.PLACEMENT_FILTERS
+    }
+
+    # A key, never SQL: the repository maps it to an ORDER BY it wrote itself.
+    sort = request.args.get('sort', '')
+
+    options['sort'] = (
+        sort if sort in attendance_repo.SORT_ORDERS
+        else attendance_repo.DEFAULT_SORT
+    )
+
+    return selected_date, subject_id, instructor_id, options
+
+
+def _placement_choices(placements):
+    """
+    The four dropdowns' options, derived from the sections that exist.
+
+    Each list is the distinct values in `placements`, in the order they
+    arrive, so a department or year with nothing in it is never offered.
+    """
+    departments, programs, years = {}, {}, set()
+
+    for row in placements:
+        departments.setdefault(row['department_id'], row)
+        programs.setdefault(row['program_id'], row)
+        years.add(row['year_level'])
+
+    return {
+        "departments": list(departments.values()),
+        "programs": list(programs.values()),
+        "year_levels": sorted(years),
+        "sections": placements,
+    }
 
 
 @reports_bp.route('/reports')
@@ -58,9 +103,16 @@ def reports():
 
     An instructor sees their own classes and sessions and nothing else; an
     administrator sees everything, or one instructor's by choosing them (DM-5).
+    Either can narrow and order what they see by the students' department,
+    program, year level and section - an instructor is offered the ones they
+    teach.
     """
-    selected_date, subject_id, instructor_id = _filters()
+    selected_date, subject_id, instructor_id, options = _filters()
     scope = instructor_scope()
+
+    placement = {
+        key: options[key] for key in attendance_repo.PLACEMENT_FILTERS
+    }
 
     with db_cursor(dictionary=True) as cursor:
         # The subject picker offers only what the reader may see: for an
@@ -73,11 +125,15 @@ def reports():
             instructors_repo.all_instructors(cursor) if scope is None else []
         )
 
+        choices = _placement_choices(
+            academics_repo.placements(cursor, instructor_id=scope)
+        )
+
         records = attendance_repo.filtered(
-            cursor, selected_date, subject_id, instructor_id
+            cursor, selected_date, subject_id, instructor_id, **options
         )
         class_sessions = attendance_repo.sessions_filtered(
-            cursor, selected_date, subject_id, instructor_id
+            cursor, selected_date, subject_id, instructor_id, **placement
         )
 
     total_present = sum(1 for r in records if r['status'] == 'Present')
@@ -91,6 +147,9 @@ def reports():
         session_limit=attendance_repo.SESSION_LIST_LIMIT,
         subjects=subjects,
         instructors=instructors,
+        choices=choices,
+        placement=placement,
+        sort=options['sort'],
         selected_date=selected_date,
         selected_subject=subject_id,
         selected_instructor=instructor_id if scope is None else None,
@@ -126,11 +185,11 @@ def export_excel():
     attempt used a temporary file with a `call_on_close` cleanup hook, the hook
     did not fire, and an integration test found the leftovers.
     """
-    selected_date, subject_id, instructor_id = _filters()
+    selected_date, subject_id, instructor_id, options = _filters()
 
     try:
         workbook, rows = reporting.register_workbook(
-            selected_date, subject_id, instructor_id
+            selected_date, subject_id, instructor_id, **options
         )
 
     except mysql.connector.Error:
@@ -142,8 +201,8 @@ def export_excel():
         # always a filter the operator did not mean.
         logger.info(
             "Exported an empty register (date=%r, subject_id=%r, "
-            "instructor_id=%r)",
-            selected_date, subject_id, instructor_id,
+            "instructor_id=%r, %r)",
+            selected_date, subject_id, instructor_id, options,
         )
 
     filename = (

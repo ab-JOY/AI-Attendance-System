@@ -63,6 +63,65 @@
 
             </select>
 
+            {#
+                By where the *student* belongs. The options are the sections
+                that exist - for an instructor, the ones on their own class
+                lists - so nothing is offered that would report on nobody.
+            #}
+            <label for="department_id">Department</label>
+            <select id="department_id" name="department_id">
+                <option value="">All Departments</option>
+                {% for department in choices.departments %}
+                <option value="{{ department.department_id }}"
+                    {% if placement.department_id == department.department_id %}selected{% endif %}>
+                    {{ department.department_code }} - {{ department.department_name }}
+                </option>
+                {% endfor %}
+            </select>
+
+            <label for="program_id">Program</label>
+            <select id="program_id" name="program_id">
+                <option value="">All Programs</option>
+                {% for program in choices.programs %}
+                <option value="{{ program.program_id }}"
+                    {% if placement.program_id == program.program_id %}selected{% endif %}>
+                    {{ program.program_code }}
+                </option>
+                {% endfor %}
+            </select>
+
+            <label for="year_level">Year Level</label>
+            <select id="year_level" name="year_level">
+                <option value="">All Years</option>
+                {% for year in choices.year_levels %}
+                <option value="{{ year }}"
+                    {% if placement.year_level == year %}selected{% endif %}>
+                    Year {{ year }}
+                </option>
+                {% endfor %}
+            </select>
+
+            <label for="section_id">Section</label>
+            <select id="section_id" name="section_id">
+                <option value="">All Sections</option>
+                {% for section in choices.sections %}
+                <option value="{{ section.section_id }}"
+                    {% if placement.section_id == section.section_id %}selected{% endif %}>
+                    {{ section.program_code }} {{ section.year_level }} - {{ section.section_name }}
+                </option>
+                {% endfor %}
+            </select>
+
+            <label for="sort">Sort by</label>
+            <select id="sort" name="sort">
+                <option value="date" {% if sort == 'date' %}selected{% endif %}>
+                    Date, newest first
+                </option>
+                <option value="placement" {% if sort == 'placement' %}selected{% endif %}>
+                    Department, program, year and section
+                </option>
+            </select>
+
             <button type="submit">
                 Generate Report
             </button>
@@ -78,7 +137,12 @@
             <a href="{{ url_for('reports.export_excel',
                                 date=selected_date or none,
                                 subject=selected_subject,
-                                instructor=selected_instructor) }}"
+                                instructor=selected_instructor,
+                                department_id=placement.department_id,
+                                program_id=placement.program_id,
+                                year_level=placement.year_level,
+                                section_id=placement.section_id,
+                                sort=sort) }}"
                class="export-btn">
                 Export Excel
             </a>
@@ -194,6 +258,9 @@
                 <th>Date</th>
                 <th>Student ID</th>
                 <th>Name</th>
+                <th>Program</th>
+                <th>Year</th>
+                <th>Section</th>
                 <th>Subject Code</th>
                 <th>Instructor</th>
                 <th>Time In</th>
@@ -209,6 +276,26 @@
 
             {% for record in records %}
 
+            {#
+                Sorted by placement, the rows arrive a section at a time, so
+                each section gets one heading. Sorted by date they do not, and
+                a heading per row would be noise - the three columns carry it.
+            #}
+            {% if sort == 'placement' and loop.changed(record.student_section_id) %}
+            <tr class="group-row">
+                <th colspan="11" scope="colgroup">
+                    {% if record.student_section_id %}
+                        {{ record.department }}
+                        &rsaquo; {{ record.program }}
+                        &rsaquo; Year {{ record.year_level }}
+                        &rsaquo; Section {{ record.student_section }}
+                    {% else %}
+                        Unassigned — no program, year level or section
+                    {% endif %}
+                </th>
+            </tr>
+            {% endif %}
+
             <tr>
 
                 <td>{{ record.attendance_date }}</td>
@@ -216,6 +303,12 @@
                 <td>{{ record.student_id }}</td>
 
                 <td>{{ record.student_name }}</td>
+
+                <td>{{ record.program or "—" }}</td>
+
+                <td>{{ record.year_level or "—" }}</td>
+
+                <td>{{ record.student_section or "—" }}</td>
 
                 <td>{{ record.subject_code }}</td>
 
@@ -277,7 +370,7 @@
 
             <tr>
 
-                <td colspan="8" class="no-records">
+                <td colspan="11" class="no-records">
                     No attendance records found.
                 </td>
 

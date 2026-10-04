@@ -743,3 +743,188 @@ def test_a_subject_is_assigned_to_an_instructor_account(client, two_instructors)
             "SELECT instructor_id FROM subjects WHERE subject_code = 'INT-TEST-303'"
         )
         assert cursor.fetchone()[0] == two_instructors["mine"]
+
+
+# ===========================================================================
+# Reports narrowed and ordered by where the student belongs
+# ===========================================================================
+
+
+@pytest.fixture
+def mixed_register(scratch_database):
+    """
+    One instructor teaching students from two sections, and a second
+    instructor whose only student is in a third - in another department.
+    """
+    from infra.db import db_cursor
+
+    with db_cursor(dictionary=True, commit=True) as cursor:
+        mine = make_instructor(cursor, "INT-TEST-INSTR-1", "Instructor One")
+        theirs = make_instructor(cursor, "INT-TEST-INSTR-2", "Instructor Two")
+
+        my_subject = make_subject(
+            cursor, subject_code="INT-TEST-101", instructor_id=mine
+        )
+        their_subject = make_subject(
+            cursor, subject_code="INT-TEST-202", instructor_id=theirs
+        )
+
+        make_student(cursor, "INT-TEST-0001", name="Zed Fourth-Year",
+                     program="BSCS", year_level=4, section="B")
+        make_student(cursor, "INT-TEST-0002", name="Amy First-Year",
+                     program="BSCS", year_level=1, section="A")
+        make_student(cursor, "INT-TEST-0003", name="Nell Nursing",
+                     program="BSN", year_level=4, section="B")
+
+        for student_id, subject_id in (
+            ("INT-TEST-0001", my_subject),
+            ("INT-TEST-0002", my_subject),
+            ("INT-TEST-0003", their_subject),
+        ):
+            make_enrolment(cursor, student_id, subject_id)
+            make_attendance(cursor, student_id, subject_id)
+
+    return {"mine": mine, "theirs": theirs}
+
+
+def names_on(client, url):
+    """Which of the three seeded students the page shows, in page order."""
+    html = page(client, url)
+
+    found = [
+        (html.index(name), name)
+        for name in ("Zed Fourth-Year", "Amy First-Year", "Nell Nursing")
+        if name in html
+    ]
+
+    return [name for _position, name in sorted(found)]
+
+
+def placement_ids(student_id):
+    from infra.db import db_cursor
+    from repositories import students as students_repo
+
+    with db_cursor(dictionary=True) as cursor:
+        return students_repo.details(cursor, student_id)
+
+
+def test_the_administrator_narrows_the_report_by_each_level(client, mixed_register):
+    sign_in_as(client)
+
+    bscs = placement_ids("INT-TEST-0001")
+    nursing = placement_ids("INT-TEST-0003")
+
+    assert sorted(names_on(client, f"/reports?department_id={bscs['department_id']}")) == [
+        "Amy First-Year", "Zed Fourth-Year",
+    ]
+    assert names_on(client, f"/reports?program_id={nursing['program_id']}") == [
+        "Nell Nursing"
+    ]
+    assert sorted(names_on(client, "/reports?year_level=4")) == [
+        "Nell Nursing", "Zed Fourth-Year",
+    ]
+    assert names_on(client, f"/reports?section_id={bscs['section_id']}") == [
+        "Zed Fourth-Year"
+    ]
+    assert names_on(
+        client, f"/reports?department_id={bscs['department_id']}&year_level=1"
+    ) == ["Amy First-Year"]
+
+
+def test_sorting_by_placement_orders_by_department_program_year_and_section(
+    client, mixed_register
+):
+    """
+    Computing before Nursing, year 1 before year 4 - and not by name, which
+    would put Amy, Nell, Zed.
+    """
+    sign_in_as(client)
+
+    assert names_on(client, "/reports?sort=placement") == [
+        "Amy First-Year", "Zed Fourth-Year", "Nell Nursing",
+    ]
+
+
+def test_the_export_is_narrowed_and_ordered_like_the_screen(client, mixed_register):
+    sign_in_as(client)
+
+    assert exported_students(client, "/export_excel?sort=placement") == [
+        "Amy First-Year", "Zed Fourth-Year", "Nell Nursing",
+    ]
+    assert exported_students(client, "/export_excel?year_level=1") == [
+        "Amy First-Year"
+    ]
+
+
+def test_an_instructor_is_offered_the_placements_of_their_own_classes(
+    mixed_register,
+):
+    from infra.db import db_cursor
+    from repositories import academics as academics_repo
+
+    with db_cursor(dictionary=True) as cursor:
+        mine = academics_repo.placements(
+            cursor, instructor_id=mixed_register["mine"]
+        )
+        everyone = academics_repo.placements(cursor)
+
+    assert [(row["program_code"], row["year_level"], row["section_name"]) for row in mine] == [
+        ("BSCS", 1, "A"), ("BSCS", 4, "B"),
+    ]
+    assert len(everyone) == 3
+
+
+def test_an_instructor_filtering_by_a_section_they_do_not_teach_sees_nothing(
+    client, mixed_register
+):
+    """
+    The filter narrows inside the scope. Naming another instructor's section
+    is not a way to their register.
+    """
+    sign_in_as(client, "instructor", instructor_pk=mixed_register["mine"])
+
+    nursing = placement_ids("INT-TEST-0003")
+
+    assert names_on(client, f"/reports?section_id={nursing['section_id']}") == []
+    assert names_on(client, "/reports?year_level=4") == ["Zed Fourth-Year"]
+
+    assert exported_students(
+        client, f"/export_excel?department_id={nursing['department_id']}"
+    ) == []
+
+
+def test_the_sessions_table_follows_the_placement_filter(mixed_register):
+    """
+    Under a placement filter a session is listed only if it recorded a
+    student of that placement, and its tallies count those students only.
+    """
+    from infra.db import db_cursor
+    from repositories import attendance as attendance_repo
+
+    with db_cursor(dictionary=True, commit=True) as cursor:
+        cursor.execute("SELECT id FROM subjects WHERE subject_code = 'INT-TEST-101'")
+        subject_id = cursor.fetchone()["id"]
+
+        cursor.execute(
+            """
+            INSERT INTO attendance_sessions
+                (subject_id, session_date, started_at, started_by)
+            VALUES (%s, CURDATE(), NOW(), 'int-test')
+            """,
+            (subject_id,),
+        )
+        session_id = cursor.lastrowid
+
+        cursor.execute(
+            "UPDATE attendance SET session_id = %s WHERE subject_id = %s",
+            (session_id, subject_id),
+        )
+
+    with db_cursor(dictionary=True) as cursor:
+        (whole,) = attendance_repo.sessions_filtered(cursor)
+        (first_years,) = attendance_repo.sessions_filtered(cursor, year_level=1)
+        nobody = attendance_repo.sessions_filtered(cursor, year_level=3)
+
+    assert int(whole["present"]) == 2
+    assert int(first_years["present"]) == 1
+    assert nobody == []

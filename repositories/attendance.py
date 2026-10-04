@@ -24,6 +24,8 @@ same thing for the same reason.
 
 from __future__ import annotations
 
+from repositories.students import ACADEMIC_JOIN
+
 # The register row as every screen wants to see it: the *joined* student name,
 # never a copy stored on the attendance row. There used to be a
 # `student_name` column here - a copy taken at write time that `update_student`
@@ -39,17 +41,79 @@ REGISTER_COLUMNS = """
     sub.section,
     COALESCE(i.fullname, sub.instructor) AS instructor,
     a.time_in,
-    a.status
+    a.status,
+    s.section_id AS student_section_id,
+    d.department_code AS department_code,
+    d.department_name AS department,
+    p.program_code AS program,
+    sec.year_level AS year_level,
+    sec.section_name AS student_section
 """
 
 # LEFT JOIN to `instructors`: an offering with no linked account still has a
 # register, and an inner join would drop its rows from every report.
-REGISTER_JOIN = """
+#
+# The student's placement comes through `students.ACADEMIC_JOIN` - the same
+# LEFT JOINs the student lists use, so the register and the roster cannot
+# disagree about where somebody belongs. `section` above is the *offering's*
+# typed section; `student_section` is the student's own.
+REGISTER_JOIN = f"""
     FROM attendance a
     JOIN students s ON s.student_id = a.student_id
     JOIN subjects sub ON sub.id = a.subject_id
     LEFT JOIN instructors i ON i.id = sub.instructor_id
+    {ACADEMIC_JOIN}
 """
+
+# The four ways a report can be narrowed by where the *student* belongs, and
+# the column each compares. The keys are the keyword names the functions below
+# take and the query-string names /reports reads.
+#
+# A fixed mapping, so the WHERE clause is still assembled only from literals
+# written in this file - the value is always a bound parameter.
+PLACEMENT_FILTERS = {
+    "department_id": "p.department_id",
+    "program_id": "sec.program_id",
+    "year_level": "sec.year_level",
+    "section_id": "s.section_id",
+}
+
+# How the register can be ordered. An allowlist for the same reason: `sort`
+# arrives in a query string, and an ORDER BY cannot be a bound parameter, so
+# the request chooses a *key* and the SQL comes from here.
+#
+# `placement` puts unplaced students last and keeps each section together, so
+# the screen can draw one heading per section.
+DEFAULT_SORT = "date"
+
+SORT_ORDERS = {
+    "date": "a.attendance_date DESC, a.time_in DESC",
+    "placement": (
+        "d.department_name IS NULL, d.department_name, p.program_code, "
+        "sec.year_level, sec.section_name, s.name, a.attendance_date DESC"
+    ),
+}
+
+
+def _placement_conditions(placement):
+    """
+    `(sql, values)` for the placement filters that are set.
+
+    Unknown keys raise rather than being ignored: a filter that silently does
+    nothing returns the whole register under a heading that says it is one
+    section's.
+    """
+    sql = ""
+    values = []
+
+    for key, value in placement.items():
+        column = PLACEMENT_FILTERS[key]
+
+        if value is not None:
+            sql += f" AND {column} = %s"
+            values.append(value)
+
+    return sql, values
 
 
 # ---------------------------------------------------------------------------
@@ -266,9 +330,15 @@ def insert_absences(cursor, rows):
 EXPORT_FETCH_SIZE = 500
 
 
-def _filtered_query(selected_date=None, subject_id=None, instructor_id=None):
+def _filtered_query(selected_date=None, subject_id=None, instructor_id=None,
+                    sort=DEFAULT_SORT, **placement):
     """
     The filtered-register SELECT and its bound values.
+
+    `placement` is any of `PLACEMENT_FILTERS` - the student's department,
+    program, year level or section - and `sort` is a key of `SORT_ORDERS`. An
+    unrecognised sort falls back to the default rather than failing: it comes
+    from a URL, and a stale bookmark should still show a register.
 
     `instructor_id` narrows the register to one instructor's offerings (DM-5).
     For a signed-in instructor it is their own key and the caller does not let
@@ -298,7 +368,12 @@ def _filtered_query(selected_date=None, subject_id=None, instructor_id=None):
         query += " AND sub.instructor_id = %s"
         values.append(instructor_id)
 
-    query += " ORDER BY a.attendance_date DESC, a.time_in DESC"
+    placed, placed_values = _placement_conditions(placement)
+
+    query += placed
+    values += placed_values
+
+    query += " ORDER BY " + SORT_ORDERS.get(sort, SORT_ORDERS[DEFAULT_SORT])
 
     return query, values
 
@@ -310,7 +385,7 @@ SESSION_LIST_LIMIT = 100
 
 
 def sessions_filtered(cursor, selected_date=None, subject_id=None,
-                      instructor_id=None):
+                      instructor_id=None, **placement):
     """
     The class meetings behind the register, newest first, with their tallies.
 
@@ -325,8 +400,28 @@ def sessions_filtered(cursor, selected_date=None, subject_id=None,
     ⚠️ Conditional SUMs over a LEFT JOIN, COALESCEd: a session that recorded
     nobody still appears, with zeros, which is the row an instructor most needs
     to see.
+
+    ⚠️ **With a placement filter the joins become inner ones.** "Sessions for
+    year 4, section B" means the sessions in which a student of that section
+    was recorded, and the tallies then count those students only. A session
+    that recorded none of them is not listed - under that filter it has
+    nothing to say.
     """
-    query = """
+    placed, placed_values = _placement_conditions(placement)
+
+    # `s`, `sec`, `p` and `d` only exist in the query when something filters on
+    # them, so the unfiltered list keeps its LEFT JOIN and its empty sessions.
+    marks = (
+        f"""
+        JOIN attendance a ON a.session_id = ses.id
+        JOIN students s ON s.student_id = a.student_id
+        {ACADEMIC_JOIN}
+        """
+        if placed else
+        "LEFT JOIN attendance a ON a.session_id = ses.id"
+    )
+
+    query = f"""
         SELECT
             ses.id,
             ses.session_date,
@@ -343,7 +438,7 @@ def sessions_filtered(cursor, selected_date=None, subject_id=None,
         FROM attendance_sessions ses
         JOIN subjects sub ON sub.id = ses.subject_id
         LEFT JOIN instructors i ON i.id = sub.instructor_id
-        LEFT JOIN attendance a ON a.session_id = ses.id
+        {marks}
         WHERE 1=1
     """
     values = []
@@ -360,6 +455,9 @@ def sessions_filtered(cursor, selected_date=None, subject_id=None,
         query += " AND sub.instructor_id = %s"
         values.append(instructor_id)
 
+    query += placed
+    values += placed_values
+
     query += f"""
         GROUP BY ses.id
         ORDER BY ses.started_at DESC, ses.id DESC
@@ -371,14 +469,17 @@ def sessions_filtered(cursor, selected_date=None, subject_id=None,
     return cursor.fetchall()
 
 
-def filtered(cursor, selected_date=None, subject_id=None, instructor_id=None):
+def filtered(cursor, selected_date=None, subject_id=None, instructor_id=None,
+             sort=DEFAULT_SORT, **placement):
     """
     The register, narrowed by the filters the operator chose, as a list.
 
     For `/reports`, which renders the rows into a template and needs to know
     how many there are. The export uses `iter_filtered()` below.
     """
-    query, values = _filtered_query(selected_date, subject_id, instructor_id)
+    query, values = _filtered_query(
+        selected_date, subject_id, instructor_id, sort, **placement
+    )
 
     cursor.execute(query, values)
 
@@ -386,7 +487,7 @@ def filtered(cursor, selected_date=None, subject_id=None, instructor_id=None):
 
 
 def iter_filtered(cursor, selected_date=None, subject_id=None,
-                  instructor_id=None):
+                  instructor_id=None, sort=DEFAULT_SORT, **placement):
     """
     The same register, yielded a batch at a time.
 
@@ -413,7 +514,9 @@ def iter_filtered(cursor, selected_date=None, subject_id=None,
     `register_workbook()` writes the sheet *inside* its `with db_cursor()`
     block rather than collecting first.
     """
-    query, values = _filtered_query(selected_date, subject_id, instructor_id)
+    query, values = _filtered_query(
+        selected_date, subject_id, instructor_id, sort, **placement
+    )
 
     cursor.execute(query, values)
 

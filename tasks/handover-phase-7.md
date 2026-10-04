@@ -280,3 +280,58 @@ re-run in that session and match the table in §0.
 - **An admin screen for departments, programs and sections** — none exists.
 - Everything still open from 6f: the 70–95 px dead band (the user's), SE-18
   and R1 measured on the demo camera.
+
+---
+
+## 8. Addendum, same day — reports by department, program, year and section
+
+**Asked for by the user after §0–§7 were written:** the admin can sort and
+narrow the reports by department, program, year and section; an instructor can
+do the same for the departments and programs they have a class in.
+
+| Gate | §0 | Now |
+|---|---|---|
+| `pytest` (fast) | 1462 passed, 70 skipped | **1472 passed, 76 skipped** |
+| `pytest tests/integration` | 67 passed | **73 passed** |
+| Mutation run | 11 of 11 | **+6 of 6** |
+| `ruff` | 18, all `web/api.py` | unchanged |
+
+**No migration.** The schema is still at 009.
+
+**What it is.** `/reports` has four more filters — Department, Program, Year
+Level, Section — and a **Sort by** control: *Date, newest first* (the default,
+unchanged) or *Department, program, year and section*, which also draws one
+heading row per section. The register table gained Program, Year and Section
+columns; the export gained Department, Program, Year Level and Student Section,
+after Instructor, and is narrowed and ordered exactly like the screen.
+
+**Measured on the deployed database:** admin, section 1 → 38 rows, section 2 →
+8 (46 in all); each instructor's per-section counts match a direct query
+(18+3, 9+2, 11+3).
+
+### Traps
+
+- ⚠️ **"Section" means the student's section**, read through
+  `students.section_id`. `subjects.section` is still free text (§7.7.2) and is
+  a different thing: on this database three year-1 students are on the class
+  lists of offerings labelled `4B`, and they report under **Year 1 › B**. The
+  export has both — "Section" (the offering's) and "Student Section".
+- ⚠️ **`sort` is a key into `attendance_repo.SORT_ORDERS`, never SQL.** An
+  ORDER BY cannot be a bound parameter. An unknown key falls back to the
+  default; a test feeds it `a.status; DROP TABLE attendance`.
+- ⚠️ **The placement filters sit inside the instructor scope, not beside it.**
+  An instructor naming a section they do not teach gets nothing. Pinned, and a
+  mutation that lets `section_id` displace the scope is caught.
+- ⚠️ **An unknown placement keyword raises `KeyError`** in
+  `_placement_conditions()`. Deliberate: a filter silently ignored returns the
+  whole register under a heading that says it is one section's.
+- **An instructor's dropdowns offer only sections of students on their class
+  lists** (`academics_repo.placements(instructor_id=…)`); the department,
+  program and year lists are derived from those rows, so no combination that
+  does not exist is offered. An administrator is offered every section that
+  exists — a department with no students in it is not listed.
+- **Under a placement filter the Sessions table lists only sessions that
+  recorded a student of that placement**, and its tallies count those students
+  only. Unfiltered, it still lists sessions that recorded nobody.
+- **The mobile API's history endpoint is unchanged** — it takes none of the new
+  filters.

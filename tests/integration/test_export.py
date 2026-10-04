@@ -84,7 +84,7 @@ def test_the_export_is_a_real_workbook_with_a_header(client, register):
 
     assert rows[0] == (
         "Date", "Student ID", "Student", "Subject", "Section", "Time In", "Status",
-        "Instructor",
+        "Instructor", "Department", "Program", "Year Level", "Student Section",
     )
 
 
