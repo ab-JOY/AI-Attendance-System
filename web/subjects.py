@@ -24,10 +24,12 @@ from flask import (
 
 from infra.db import db_cursor
 from repositories import enrolments as enrolments_repo
+from repositories import instructors as instructors_repo
 from repositories import subjects as subjects_repo
 from security.access import role_required
 from security.paths import UnsafeStudentPathError, validate_student_id
 from web.errors import error_page
+from web.placement import optional_id
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +41,7 @@ subjects_bp = Blueprint("subjects", __name__)
 SUBJECT_FIELDS = (
     'subject_code',
     'subject_name',
-    'instructor',
+    'instructor_id',
     'day',
     'course',
     'section',
@@ -69,6 +71,21 @@ def _subject_form():
         request.form.get(field, '').strip() for field in SUBJECT_FIELDS
     )
 
+    # DM-4. The instructor is an account chosen from a list, not a typed name:
+    # `instructors.id`, or None for an offering nobody is assigned to yet. A
+    # typed name linked the offering to nobody, so nothing could be scoped to
+    # the person who teaches it.
+    instructor_at = SUBJECT_FIELDS.index('instructor_id')
+
+    if values[instructor_at] and optional_id(values[instructor_at]) is None:
+        return None, error_page(400, "Choose an instructor from the list.")
+
+    values = (
+        *values[:instructor_at],
+        optional_id(values[instructor_at]),
+        *values[instructor_at + 1:],
+    )
+
     missing = [
         field
         for field, value in zip(SUBJECT_FIELDS, values, strict=True)
@@ -92,12 +109,15 @@ def subjects():
     try:
         with db_cursor(dictionary=True) as cursor:
             records = subjects_repo.all_subjects(cursor)
+            instructors = instructors_repo.all_instructors(cursor)
 
     except mysql.connector.Error:
         logger.exception("Could not load the subjects list")
         return error_page(500)
 
-    return render_template("subjects.html", subjects=records)
+    return render_template(
+        "subjects.html", subjects=records, instructors=instructors
+    )
 
 
 @subjects_bp.route('/add_subject', methods=['POST'])
@@ -111,6 +131,12 @@ def add_subject():
     try:
         with db_cursor(commit=True) as cursor:
             subjects_repo.insert(cursor, *values)
+
+    except mysql.connector.IntegrityError:
+        # The foreign key refused it: the chosen instructor account was
+        # deleted after the form was rendered.
+        logger.warning("Refused subject %r: no such instructor", values[0])
+        return error_page(409, "That instructor no longer exists.")
 
     except mysql.connector.Error:
         logger.exception("Could not add subject %r", values[0])
@@ -134,6 +160,12 @@ def edit_subject(id):
         with db_cursor(dictionary=True) as cursor:
             subject = subjects_repo.get(cursor, id)
 
+            # Only for a subject that exists: the 404 below needs nothing else.
+            instructors = (
+                instructors_repo.all_instructors(cursor)
+                if subject is not None else []
+            )
+
     except mysql.connector.Error:
         logger.exception("Could not load subject %s for editing", id)
         return error_page(500)
@@ -147,7 +179,9 @@ def edit_subject(id):
     if subject is None:
         return error_page(404, "That subject could not be found.")
 
-    return render_template("edit_subject.html", subject=subject)
+    return render_template(
+        "edit_subject.html", subject=subject, instructors=instructors
+    )
 
 
 @subjects_bp.route('/update_subject/<int:id>', methods=['POST'])
@@ -161,6 +195,10 @@ def update_subject(id):
     try:
         with db_cursor(commit=True) as cursor:
             subjects_repo.update(cursor, id, *values)
+
+    except mysql.connector.IntegrityError:
+        logger.warning("Refused update of subject %s: no such instructor", id)
+        return error_page(409, "That instructor no longer exists.")
 
     except mysql.connector.Error:
         logger.exception("Could not update subject %s", id)

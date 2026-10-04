@@ -71,9 +71,18 @@ export default function StudentRegistrationScreen({ navigation }) {
       !formData.last_name ||
       !formData.password ||
       !formData.college_department ||
-      !formData.program
+      !formData.program ||
+      !formData.year_level ||
+      !formData.section
     ) {
-      setError('Student number, first name, last name, password, college, and program are required.');
+      setError('Student number, first name, last name, password, college, program, year level, and section are required.');
+      return;
+    }
+
+    // The server stores a student against a section, which is a program, a
+    // year level and a name - so it refuses a year level that is not a number.
+    if (!/^[1-6]$/.test(formData.year_level.trim())) {
+      setError('Year level must be a number from 1 to 6.');
       return;
     }
 

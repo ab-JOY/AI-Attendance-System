@@ -70,6 +70,9 @@ EXPORT_COLUMNS = (
     ("Section", "section"),
     ("Time In", "time_in"),
     ("Status", "status"),
+    # Last, so the columns before it stay where an existing spreadsheet or
+    # macro expects them.
+    ("Instructor", "instructor"),
 )
 
 
@@ -91,9 +94,13 @@ def _cell(value):
     return value
 
 
-def register_workbook(selected_date=None, subject_id=None):
+def register_workbook(selected_date=None, subject_id=None, instructor_id=None):
     """
     Build the filtered register as a workbook. Returns `(buffer, row_count)`.
+
+    The three filters are the ones `/reports` applied to the screen, so the
+    file matches what it was exported from - including whose register it is
+    (DM-5).
 
     The buffer is positioned at the start, ready to be handed to `send_file`.
 
@@ -112,7 +119,9 @@ def register_workbook(selected_date=None, subject_id=None):
     # fetch everything, close, then write - is the memory behaviour this
     # function exists to remove.
     with db_cursor(dictionary=True) as cursor:
-        for row in attendance_repo.iter_filtered(cursor, selected_date, subject_id):
+        for row in attendance_repo.iter_filtered(
+            cursor, selected_date, subject_id, instructor_id
+        ):
             sheet.append([_cell(row[column]) for _heading, column in EXPORT_COLUMNS])
             written += 1
 

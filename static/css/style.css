@@ -320,6 +320,21 @@ button:hover{
     background:#F4F6F9;
 }
 
+/* The heading row that separates one department, program, year and section
+   from the next on the student and instructor lists. Lighter than the column
+   header and left-aligned, so it reads as a divider and not a second header. */
+.subject-table .group-row th{
+    background:#E8ECF7;
+    color:#0A1F8F;
+    padding:10px 15px;
+    text-align:left;
+    font-weight:600;
+}
+
+.subject-table tr.group-row:hover{
+    background:#E8ECF7;
+}
+
 /* ===================================
    ATTENDANCE PAGE
 =================================== */

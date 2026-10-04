@@ -19,7 +19,7 @@ the rest.
 | Face images (100 per student) | `dataset/{student_id}/` | Training data for the LBPH recogniser |
 | Biometric template (LBPH histograms) | `trainer/trainer.yml` | Derived from the images; used to recognise a face at attendance time |
 | Label map | `trainer/labels.txt` | Maps a model label to a student ID; the name is read from `students` |
-| Student ID, name, department, programme, year, section | MySQL `students` | Identifies who an attendance record belongs to |
+| Student ID, name, department, programme, year, section | MySQL `students`, placed through `sections` → `programs` → `departments` | Identifies who an attendance record belongs to |
 | Attendance events (student, subject, date, time, status) | MySQL `attendance` | The purpose of the system |
 | Administrator and instructor credentials | MySQL `admin`, `instructors` | Access control |
 | Application log | `logs/app.log` | Operational diagnosis and an audit trail |

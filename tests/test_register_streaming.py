@@ -146,6 +146,7 @@ def test_the_export_itself_never_materialises_the_register(monkeypatch):
                 "student_name": "Nobody",
                 "subject_code": "CS401",
                 "section": "A",
+                "instructor": "Nobody In Particular",
                 "time_in": None,
                 "status": "Absent",
             }

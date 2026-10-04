@@ -50,6 +50,46 @@ ROLE_RESTRICTED = "role"
 MUST_CHANGE_PASSWORD = "must_change_password"
 
 
+# Session key holding `instructors.id` for a signed-in instructor. Distinct
+# from `instructor_id`, which is the *login* identifier the instructor types
+# and the key the change-password route addresses the account by. Subjects
+# reference the numeric primary key, so that is what scoping needs.
+INSTRUCTOR_KEY = "instructor_pk"
+
+# What an instructor whose session cannot say which instructor they are is
+# scoped to. AUTO_INCREMENT keys start at 1, so this matches no subject.
+NO_INSTRUCTOR = 0
+
+
+def instructor_scope() -> int | None:
+    """
+    Whose classes the signed-in user may see (DM-5).
+
+    None for an administrator: unrestricted. For an instructor, their
+    `instructors.id` - every query that takes an `instructor_id` then returns
+    only the offerings assigned to them.
+
+    ⚠️ **Fails closed.** A session created before this key existed, or by any
+    role that is not `admin`, has no `instructor_pk` and gets `NO_INSTRUCTOR`,
+    which matches nothing. The instructor sees an empty system and signs in
+    again; the alternative is treating "I do not know who you are" as
+    "unrestricted", which is the defect this exists to close.
+    """
+    if session.get("role") == "admin":
+        return None
+
+    scope = session.get(INSTRUCTOR_KEY)
+
+    if not isinstance(scope, int):
+        logger.warning(
+            "No instructor key in the session of %r; scoping to nothing",
+            session.get("user"),
+        )
+        return NO_INSTRUCTOR
+
+    return scope
+
+
 def public(view: Callable) -> Callable:
     """Reachable without a session: the login page, the login POST, logout."""
     setattr(view, _ACCESS_ATTR, PUBLIC)

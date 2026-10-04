@@ -24,7 +24,12 @@ from flask import Blueprint, flash, redirect, render_template, request, session,
 from config.settings import settings as app_config
 from infra.db import db_cursor
 from repositories import credentials as credentials_repo
-from security.access import MUST_CHANGE_PASSWORD, authenticated, public
+from security.access import (
+    INSTRUCTOR_KEY,
+    MUST_CHANGE_PASSWORD,
+    authenticated,
+    public,
+)
 from security.passwords import (
     PasswordTooLongError,
     hash_password,
@@ -132,6 +137,10 @@ def login():
         session['user'] = account['fullname']
         session['role'] = 'instructor'
         session['instructor_id'] = account['instructor_id']
+        # The numeric key `subjects.instructor_id` references, which is what
+        # limits this instructor to their own classes (DM-5). See
+        # security.access.instructor_scope().
+        session[INSTRUCTOR_KEY] = account['id']
 
     # Flagged in the database, or still using a credential this system ships
     # with. Either way the account can reach nothing but the change-password

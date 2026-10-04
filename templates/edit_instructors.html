@@ -42,6 +42,17 @@
                 value="{{ instructor.fullname }}"
                 required>
 
+            <label for="department_id">Department</label>
+            <select id="department_id" name="department_id">
+                <option value="">Unassigned</option>
+                {% for department in departments %}
+                    <option value="{{ department.id }}"
+                        {% if instructor.department_id == department.id %}selected{% endif %}>
+                        {{ department.department_code }} - {{ department.department_name }}
+                    </option>
+                {% endfor %}
+            </select>
+
             <label for="password">New Password (Optional)</label>
             <input
                 type="password"

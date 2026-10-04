@@ -113,7 +113,7 @@ def recorder(monkeypatch):
     # B3: the attendance page's picker carries a class-list size now, so the
     # stub follows `_all_subjects()` to the function it actually calls. The
     # list is empty either way - nothing in this file is about the dropdown.
-    def for_selection_with_class_list_size(_cursor):
+    def for_selection_with_class_list_size(_cursor, instructor_id=None):
         return []
 
     monkeypatch.setattr(sessions_module, "db_cursor", fake_cursor)

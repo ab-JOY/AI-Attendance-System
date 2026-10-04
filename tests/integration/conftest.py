@@ -83,6 +83,11 @@ _SCRATCH_NAME = re.compile(r"^test_[A-Za-z0-9_]+$")
 # Truncated between tests, children before parents. `schema_migrations` is
 # deliberately absent: emptying the ledger would make the schema look unapplied
 # to anything that checked it mid-run.
+#
+# ⚠️ `departments` and `programs` are absent too, and for the same kind of
+# reason: migration 009 *seeds* them, so they are part of the schema a test
+# starts from rather than data a test created. `sections` is created by use and
+# is emptied.
 DATA_TABLES = (
     "attendance_audit",
     "attendance",
@@ -90,6 +95,7 @@ DATA_TABLES = (
     "attendance_sessions",
     "subjects",
     "students",
+    "sections",
     "instructors",
     "admin",
 )
@@ -250,17 +256,25 @@ def client(flask_app):
     return flask_app.test_client()
 
 
-def sign_in_as(client, role="admin", username=None):
+def sign_in_as(client, role="admin", username=None, instructor_pk=None):
     """
     Fabricate a session, exactly as tests/test_route_security.py does.
 
     Deliberately does not create a credential row: authentication is tested in
     the fast suite, and seeding a bcrypt hash per test would cost more than
     every query under test combined.
+
+    `instructor_pk` is the `instructors.id` login puts in the session, which
+    is what limits an instructor to their own classes (DM-5). Left out, an
+    instructor session is scoped to nothing - which is itself a case worth
+    testing, so it is not defaulted.
     """
     with client.session_transaction() as session:
         session["user"] = username or f"int-test-{role}"
         session["role"] = role
+
+        if instructor_pk is not None:
+            session["instructor_pk"] = instructor_pk
 
 
 # ===========================================================================
@@ -272,25 +286,30 @@ def sign_in_as(client, role="admin", username=None):
 # ===========================================================================
 
 
-def make_student(cursor, student_id, name="Integration Test Subject", **overrides):
-    values = {
-        "student_id": student_id,
-        "name": name,
-        "college_department": "College of Computing",
-        "program": "BSCS",
-        "year_level": 4,
-        "section": "B",
-    }
-    values.update(overrides)
+def make_student(cursor, student_id, name="Integration Test Subject",
+                 program="BSCS", year_level=4, section="B"):
+    """
+    A student, placed in a section (migration 009).
+
+    `program` is a seeded `programs.program_code`. Pass `program=None` for a
+    student who is Unassigned.
+    """
+    from repositories import academics as academics_repo
+
+    section_id = None
+
+    if program is not None:
+        program_id = academics_repo.program_id_for_code(cursor, program)
+
+        assert program_id is not None, f"{program!r} is not a seeded program"
+
+        section_id = academics_repo.section_for(
+            cursor, program_id, year_level, section
+        )
 
     cursor.execute(
-        """
-        INSERT INTO students
-            (student_id, name, college_department, program, year_level, section)
-        VALUES (%(student_id)s, %(name)s, %(college_department)s,
-                %(program)s, %(year_level)s, %(section)s)
-        """,
-        values,
+        "INSERT INTO students (student_id, name, section_id) VALUES (%s, %s, %s)",
+        (student_id, name, section_id),
     )
 
     return student_id
@@ -329,7 +348,8 @@ def make_subject(cursor, subject_code="INT-TEST-101", time_in="08:00:00", **over
     return cursor.lastrowid
 
 
-def make_instructor(cursor, instructor_id="INT-TEST-INSTR", fullname="Integration Instructor"):
+def make_instructor(cursor, instructor_id="INT-TEST-INSTR",
+                    fullname="Integration Instructor"):
     """
     An instructor account. The password is a placeholder string, not a bcrypt
     hash: nothing here logs in through it (see `sign_in_as`), and generating a

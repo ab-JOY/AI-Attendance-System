@@ -14,6 +14,7 @@ from flask import Blueprint, flash, redirect, render_template, request, url_for
 
 from infra import dataset_store
 from infra.db import db_cursor
+from repositories import academics as academics_repo
 from repositories import students as students_repo
 from repositories import subjects as subjects_repo
 from security.access import role_required
@@ -25,10 +26,40 @@ from security.paths import (
     validate_student_name,
 )
 from web.errors import error_page
+from web.placement import optional_id, parse_placement, section_id_for
 
 logger = logging.getLogger(__name__)
 
 students_bp = Blueprint("students", __name__)
+
+
+# The four ways the student list can be narrowed, and the query-string key each
+# arrives under. The keys are the keyword names `students_repo.roster()` takes.
+ROSTER_FILTERS = ("department_id", "program_id", "year_level", "section_id")
+
+
+def _roster_filters():
+    """The chosen list filters, each an int or None."""
+    return {key: optional_id(request.args.get(key)) for key in ROSTER_FILTERS}
+
+
+def _manage_students_page(cursor, records, filters=None, query=""):
+    """
+    Render Manage Students with the filter bar filled in.
+
+    One function because the list is reached three ways - unfiltered, filtered
+    and searched - and each must offer the same filters.
+    """
+    return render_template(
+        "manage_students.html",
+        students=records,
+        departments=academics_repo.departments(cursor),
+        programs=academics_repo.programs(cursor),
+        sections=academics_repo.sections(cursor),
+        year_levels=academics_repo.YEAR_LEVELS,
+        filters=filters or dict.fromkeys(ROSTER_FILTERS),
+        query=query,
+    )
 
 
 @students_bp.route('/students')
@@ -40,19 +71,32 @@ def students():
     with db_cursor(dictionary=True) as cursor:
         records = students_repo.all_students(cursor)
         offerings = subjects_repo.for_selection(cursor)
+        programs = academics_repo.programs(cursor)
 
     return render_template(
-        'students.html', students=records, subjects=offerings
+        'students.html',
+        students=records,
+        subjects=offerings,
+        programs=programs,
+        year_levels=academics_repo.YEAR_LEVELS,
     )
 
 
 @students_bp.route('/manage_students')
 @role_required('admin')
 def manage_students():
-    with db_cursor(dictionary=True) as cursor:
-        records = students_repo.all_students(cursor)
+    """
+    The student list, grouped by where each student belongs (DM-2).
 
-    return render_template("manage_students.html", students=records)
+    Filters arrive in the query string, so a filtered list is a link that can
+    be bookmarked and a refresh does not resubmit anything.
+    """
+    filters = _roster_filters()
+
+    with db_cursor(dictionary=True) as cursor:
+        records = students_repo.roster(cursor, **filters)
+
+        return _manage_students_page(cursor, records, filters=filters)
 
 
 @students_bp.route('/search_student', methods=['POST'])
@@ -63,7 +107,7 @@ def search_student():
     with db_cursor(dictionary=True) as cursor:
         records = students_repo.search(cursor, query)
 
-    return render_template("manage_students.html", students=records)
+        return _manage_students_page(cursor, records, query=query)
 
 
 @students_bp.route(
@@ -155,13 +199,16 @@ def edit_student(student_id):
     try:
         with db_cursor(dictionary=True) as cursor:
             student = students_repo.details(cursor, student_id)
+            programs = academics_repo.programs(cursor)
 
         if student is None:
             return redirect(url_for('students.manage_students'))
 
         return render_template(
             "edit_students.html",
-            student=student
+            student=student,
+            programs=programs,
+            year_levels=academics_repo.YEAR_LEVELS,
         )
 
     except mysql.connector.Error:
@@ -178,13 +225,6 @@ def update_student(student_id):
 
     # Read the submitted form values.
     name = request.form.get('name', '').strip()
-    college_department = request.form.get(
-        'college_department',
-        ''
-    ).strip()
-    program = request.form.get('program', '').strip()
-    year_level = request.form.get('year_level', '').strip()
-    section = request.form.get('section', '').strip()
     password = request.form.get('password', '')
 
     # SE-3. The ID from the URL was previously trusted outright. The name no
@@ -198,18 +238,12 @@ def update_student(student_id):
         logger.warning("Rejected student update: %s", error)
         return error_page(400, str(error))
 
-    # Validate required values.
-    if not program:
-        return error_page(400, "Program is required.")
+    # Where the student belongs: a program, a year level and a section. The
+    # department is not a field - it is the program's (migration 009).
+    placement, problem = parse_placement(request.form)
 
-    if not section:
-        return error_page(400, "Section is required.")
-
-    try:
-        year_level = int(year_level)
-
-    except (TypeError, ValueError):
-        return error_page(400, "Year level must be a valid number.")
+    if problem is not None:
+        return error_page(400, problem)
 
     password_hash = None
 
@@ -237,26 +271,21 @@ def update_student(student_id):
     # The folder is `dataset/{student_id}` now. A rename touches one row.
     try:
         with db_cursor(dictionary=True, commit=True) as cursor:
+            section_id = section_id_for(cursor, placement)
+
+            if section_id is None:
+                # The program was removed after the form was rendered. Refused
+                # rather than saved as Unassigned: the operator chose a
+                # placement and would not be told it had been dropped.
+                return error_page(400, "That program no longer exists.")
+
             if password_hash is not None:
                 changed = students_repo.update_details_and_password(
-                    cursor,
-                    student_id,
-                    name,
-                    college_department,
-                    program,
-                    year_level,
-                    section,
-                    password_hash,
+                    cursor, student_id, name, section_id, password_hash
                 )
             else:
                 changed = students_repo.update_details(
-                    cursor,
-                    student_id,
-                    name,
-                    college_department,
-                    program,
-                    year_level,
-                    section,
+                    cursor, student_id, name, section_id
                 )
 
             if changed == 0 and not students_repo.exists(cursor, student_id):

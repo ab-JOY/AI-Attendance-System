@@ -115,6 +115,13 @@ def started(monkeypatch):
         return True
 
     monkeypatch.setattr(sessions_module, "db_cursor", fake_cursor)
+
+    # DM-5. An instructor may only run a session on their own subject. These
+    # tests are about the class-list gate, which sits behind that check, so the
+    # subject is theirs; tests/test_instructor_scope.py covers the refusal.
+    monkeypatch.setattr(
+        sessions_module.subjects_repo, "is_taught_by", lambda *_args: True
+    )
     monkeypatch.setattr(
         sessions_module.attendance_service, "open_session", open_session
     )
@@ -233,7 +240,7 @@ def stub_subjects(monkeypatch, rows):
     monkeypatch.setattr(
         sessions_module.subjects_repo,
         "for_selection_with_class_list_size",
-        lambda _cursor: rows,
+        lambda _cursor, instructor_id=None: rows,
     )
 
     @contextlib.contextmanager

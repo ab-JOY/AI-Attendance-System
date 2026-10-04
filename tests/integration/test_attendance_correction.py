@@ -24,6 +24,7 @@ from infra.db import db_cursor
 from .conftest import (
     make_attendance,
     make_enrolment,
+    make_instructor,
     make_student,
     make_subject,
     sign_in_as,
@@ -41,10 +42,20 @@ def absent_record():
     Returns the attendance row id.
     """
     with db_cursor(commit=True) as cursor:
-        subject_id = make_subject(cursor)
+        # The subject has an instructor, because an instructor may only correct
+        # a record from a class of their own (DM-5) and two tests below make
+        # the correction as that instructor.
+        subject_id = make_subject(cursor, instructor_id=make_instructor(cursor))
         make_student(cursor, STUDENT)
         make_enrolment(cursor, STUDENT, subject_id)
         return make_attendance(cursor, STUDENT, subject_id, status="Absent")
+
+
+def the_instructor():
+    """The `instructors.id` of the one instructor `absent_record` created."""
+    with db_cursor() as cursor:
+        cursor.execute("SELECT id FROM instructors")
+        return cursor.fetchone()[0]
 
 
 def status_of(attendance_id):
@@ -69,7 +80,7 @@ def audit_rows(attendance_id):
 
 
 def test_correcting_an_absent_to_present_updates_the_register(client, absent_record):
-    sign_in_as(client, "instructor")
+    sign_in_as(client, "instructor", instructor_pk=the_instructor())
 
     response = client.post(
         f"/attendance/{absent_record}/correct",
@@ -86,7 +97,7 @@ def test_the_correction_is_recorded_with_who_when_and_why(client, absent_record)
     string rather than a foreign key on purpose: an audit trail that
     disappears when the account is deleted is not an audit trail.
     """
-    sign_in_as(client, "instructor")
+    sign_in_as(client, "instructor", instructor_pk=the_instructor())
 
     client.post(
         f"/attendance/{absent_record}/correct",

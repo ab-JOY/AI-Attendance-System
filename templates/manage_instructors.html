@@ -25,6 +25,34 @@
 
     </div>
 
+    {# DM-3. A GET form: a filtered list is a link, and it changes nothing. #}
+    <div class="report-filter">
+
+        <form method="GET" action="{{ url_for('instructors.manage_instructors') }}">
+
+            <label for="department_id">Department</label>
+            <select id="department_id" name="department_id">
+                <option value="">All Departments</option>
+                {% for department in departments %}
+                    <option value="{{ department.id }}"
+                        {% if selected_department == department.id %}selected{% endif %}>
+                        {{ department.department_code }} - {{ department.department_name }}
+                    </option>
+                {% endfor %}
+            </select>
+
+            <button type="submit">
+                Filter
+            </button>
+
+            <a href="{{ url_for('instructors.manage_instructors') }}">
+                Show all
+            </a>
+
+        </form>
+
+    </div>
+
     <h2 style="margin-top:30px;">Instructor List</h2>
 
     <table class="subject-table">
@@ -40,6 +68,15 @@
         {% if instructors %}
 
             {% for instructor in instructors %}
+
+            {# DM-3. One heading per department; the rows arrive ordered by it. #}
+            {% if loop.changed(instructor.department_id) %}
+            <tr class="group-row">
+                <th colspan="4" scope="colgroup">
+                    {{ instructor.department_name or "Unassigned — no department" }}
+                </th>
+            </tr>
+            {% endif %}
 
             <tr>
 

@@ -99,6 +99,9 @@ def test_enrolment_accepts_the_name(client, no_database, name):
         "mode": "new",
         "student_id": STUDENT,
         "name": name,
+        "program_id": "1",
+        "year_level": "3",
+        "section": "B",
     })
 
     assert response.status_code == 200, (
@@ -161,6 +164,9 @@ def test_editing_a_student_accepts_the_name(client, monkeypatch, name):
 
     monkeypatch.setattr(students_module, "db_cursor", fake_cursor)
     monkeypatch.setattr(
+        students_module, "section_id_for", lambda _cursor, _placement: 1
+    )
+    monkeypatch.setattr(
         students_module.students_repo,
         "update_details",
         lambda *args, **kwargs: 1,
@@ -170,8 +176,7 @@ def test_editing_a_student_accepts_the_name(client, monkeypatch, name):
 
     response = client.post(f"/update_student/{STUDENT}", data={
         "name": name,
-        "college_department": "College of Computing",
-        "program": "BSCS",
+        "program_id": "1",
         "year_level": "3",
         "section": "B",
     })
@@ -216,6 +221,9 @@ def test_editing_a_student_hashes_a_new_password(client, monkeypatch):
 
     monkeypatch.setattr(students_module, "db_cursor", fake_cursor)
     monkeypatch.setattr(
+        students_module, "section_id_for", lambda _cursor, _placement: 1
+    )
+    monkeypatch.setattr(
         students_module.students_repo,
         "update_details_and_password",
         update_details_and_password,
@@ -225,8 +233,7 @@ def test_editing_a_student_hashes_a_new_password(client, monkeypatch):
 
     response = client.post(f"/update_student/{STUDENT}", data={
         "name": "Updated Student",
-        "college_department": "College of Computing",
-        "program": "BSCS",
+        "program_id": "1",
         "year_level": "3",
         "section": "B",
         "password": "new-secret",
@@ -251,6 +258,9 @@ def test_editing_a_student_rejects_a_short_password_without_updating(
 
     monkeypatch.setattr(students_module, "db_cursor", fake_cursor)
     monkeypatch.setattr(
+        students_module, "section_id_for", lambda _cursor, _placement: 1
+    )
+    monkeypatch.setattr(
         students_module.students_repo,
         "update_details_and_password",
         lambda *args: updates.append(args),
@@ -260,8 +270,7 @@ def test_editing_a_student_rejects_a_short_password_without_updating(
 
     response = client.post(f"/update_student/{STUDENT}", data={
         "name": "Updated Student",
-        "college_department": "College of Computing",
-        "program": "BSCS",
+        "program_id": "1",
         "year_level": "3",
         "section": "B",
         "password": "short",

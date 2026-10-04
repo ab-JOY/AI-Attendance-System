@@ -18,14 +18,40 @@ import mysql.connector
 from flask import Blueprint, flash, redirect, render_template, request, session, url_for
 
 from infra.db import db_cursor
+from repositories import academics as academics_repo
 from repositories import instructors as instructors_repo
 from security.access import role_required
 from security.passwords import PasswordTooLongError, hash_password
 from web.errors import error_page
+from web.placement import optional_id
 
 logger = logging.getLogger(__name__)
 
 instructors_bp = Blueprint("instructors", __name__)
+
+
+def _department_from_form(cursor):
+    """
+    `(department_id, None)` from the form, or `(None, error_page)`.
+
+    The department is optional - an instructor may be Unassigned, which the
+    list says out loud - so a blank field is None and not a refusal. A value
+    that names no department *is* refused, here, rather than surfacing as a
+    foreign-key error from the INSERT.
+    """
+    raw = request.form.get('department_id', '').strip()
+
+    if not raw:
+        return None, None
+
+    department_id = optional_id(raw)
+
+    if department_id is None or not academics_repo.department_exists(
+        cursor, department_id
+    ):
+        return None, error_page(400, "Choose a department from the list.")
+
+    return department_id, None
 
 
 @instructors_bp.route('/instructors')
@@ -34,26 +60,45 @@ def instructors():
     try:
         with db_cursor(dictionary=True) as cursor:
             records = instructors_repo.all_instructors(cursor)
+            departments = academics_repo.departments(cursor)
 
     except mysql.connector.Error:
         logger.exception("Could not load the instructors list")
         return error_page(500)
 
-    return render_template("instructors.html", instructors=records)
+    return render_template(
+        "instructors.html", instructors=records, departments=departments
+    )
 
 
 @instructors_bp.route('/manage_instructors')
 @role_required('admin')
 def manage_instructors():
+    """
+    The instructor list, grouped by department (DM-3).
+
+    The filter arrives in the query string, so a filtered list is a link and a
+    refresh resubmits nothing.
+    """
+    department_id = optional_id(request.args.get('department_id'))
+
     try:
         with db_cursor(dictionary=True) as cursor:
-            records = instructors_repo.all_instructors(cursor)
+            records = instructors_repo.roster(
+                cursor, department_id=department_id
+            )
+            departments = academics_repo.departments(cursor)
 
     except mysql.connector.Error:
         logger.exception("Could not load the instructor management list")
         return error_page(500)
 
-    return render_template("manage_instructors.html", instructors=records)
+    return render_template(
+        "manage_instructors.html",
+        instructors=records,
+        departments=departments,
+        selected_department=department_id,
+    )
 
 
 @instructors_bp.route('/search_instructor', methods=['POST'])
@@ -64,12 +109,18 @@ def search_instructor():
     try:
         with db_cursor(dictionary=True) as cursor:
             records = instructors_repo.search(cursor, query)
+            departments = academics_repo.departments(cursor)
 
     except mysql.connector.Error:
         logger.exception("Instructor search failed")
         return error_page(500)
 
-    return render_template("manage_instructors.html", instructors=records)
+    return render_template(
+        "manage_instructors.html",
+        instructors=records,
+        departments=departments,
+        selected_department=None,
+    )
 
 
 @instructors_bp.route('/add_instructor', methods=['POST'])
@@ -97,8 +148,14 @@ def add_instructor():
 
     try:
         with db_cursor(commit=True) as cursor:
+            department_id, failure = _department_from_form(cursor)
+
+            if failure is not None:
+                return failure
+
             instructors_repo.insert(
-                cursor, instructor_id, fullname, hashed_password
+                cursor, instructor_id, fullname, hashed_password,
+                department_id,
             )
 
     except mysql.connector.IntegrityError:
@@ -128,6 +185,7 @@ def edit_instructor(instructor_id):
     try:
         with db_cursor(dictionary=True) as cursor:
             instructor = instructors_repo.get(cursor, instructor_id)
+            departments = academics_repo.departments(cursor)
 
     except mysql.connector.Error:
         logger.exception("Could not load instructor %r", instructor_id)
@@ -140,7 +198,11 @@ def edit_instructor(instructor_id):
     # is edit_instructors.html - so the route returned 500 for every request.
     # Fixed in passing because a route that 500s for the legitimate user is
     # not meaningfully "secured".
-    return render_template("edit_instructors.html", instructor=instructor)
+    return render_template(
+        "edit_instructors.html",
+        instructor=instructor,
+        departments=departments,
+    )
 
 
 @instructors_bp.route('/update_instructor/<instructor_id>', methods=['POST'])
@@ -164,12 +226,20 @@ def update_instructor(instructor_id):
 
     try:
         with db_cursor(commit=True) as cursor:
+            department_id, failure = _department_from_form(cursor)
+
+            if failure is not None:
+                return failure
+
             if hashed_password is not None:
-                instructors_repo.update_name_and_password(
-                    cursor, instructor_id, fullname, hashed_password
+                instructors_repo.update_details_and_password(
+                    cursor, instructor_id, fullname, department_id,
+                    hashed_password,
                 )
             else:
-                instructors_repo.update_name(cursor, instructor_id, fullname)
+                instructors_repo.update_details(
+                    cursor, instructor_id, fullname, department_id
+                )
 
     except mysql.connector.Error:
         logger.exception("Could not update instructor %r", instructor_id)

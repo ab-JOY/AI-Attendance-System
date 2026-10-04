@@ -182,6 +182,9 @@ def render_enrol_page(client, monkeypatch, subject_ids):
         "mode": "new",
         "student_id": STUDENT,
         "name": NAME,
+        "program_id": "1",
+        "year_level": "3",
+        "section": "B",
         "subject_ids": subject_ids,
     }).get_data(as_text=True)
 

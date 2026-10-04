@@ -10,10 +10,12 @@ from flask import Blueprint, render_template, request, send_file
 
 from infra.db import db_cursor
 from repositories import attendance as attendance_repo
+from repositories import instructors as instructors_repo
 from repositories import subjects as subjects_repo
-from security.access import authenticated
+from security.access import authenticated, instructor_scope
 from services import reporting
 from web.errors import error_page
+from web.placement import optional_id
 
 logger = logging.getLogger(__name__)
 
@@ -22,21 +24,27 @@ reports_bp = Blueprint("reports", __name__)
 
 def _filters():
     """
-    `(date, subject_id)` from the query string.
+    `(date, subject_id, instructor_id)` from the query string.
 
     `subject_id` is None unless the value is a positive integer, so a filter
     typed into the URL by hand cannot reach a query.
+
+    ⚠️ **`instructor_id` is only a filter for an administrator (DM-5).** For a
+    signed-in instructor it is their own key, taken from the session, and
+    `?instructor=` is not read at all - otherwise the scope would be a default
+    the URL could override. Both the screen and the export come through here,
+    so the two cannot disagree about whose register this is.
     """
     selected_date = request.args.get('date')
-    selected_subject = request.args.get('subject')
+    subject_id = optional_id(request.args.get('subject'))
 
-    subject_id = (
-        int(selected_subject)
-        if selected_subject and str(selected_subject).isdigit()
-        else None
+    scope = instructor_scope()
+
+    instructor_id = (
+        optional_id(request.args.get('instructor')) if scope is None else scope
     )
 
-    return selected_date, selected_subject, subject_id
+    return selected_date, subject_id, instructor_id
 
 
 @reports_bp.route('/reports')
@@ -47,12 +55,30 @@ def reports():
 
     `total_absent` was structurally 0 before Phase 4: it counted Absent rows in
     a table nothing ever wrote an Absent row into (FS-4).
+
+    An instructor sees their own classes and sessions and nothing else; an
+    administrator sees everything, or one instructor's by choosing them (DM-5).
     """
-    selected_date, selected_subject, subject_id = _filters()
+    selected_date, subject_id, instructor_id = _filters()
+    scope = instructor_scope()
 
     with db_cursor(dictionary=True) as cursor:
-        subjects = subjects_repo.for_report_filter(cursor)
-        records = attendance_repo.filtered(cursor, selected_date, subject_id)
+        # The subject picker offers only what the reader may see: for an
+        # instructor their own offerings, for an administrator all of them.
+        subjects = subjects_repo.for_report_filter(cursor, instructor_id=scope)
+
+        # The instructor picker is the administrator's. An instructor has
+        # exactly one answer and is not asked.
+        instructors = (
+            instructors_repo.all_instructors(cursor) if scope is None else []
+        )
+
+        records = attendance_repo.filtered(
+            cursor, selected_date, subject_id, instructor_id
+        )
+        class_sessions = attendance_repo.sessions_filtered(
+            cursor, selected_date, subject_id, instructor_id
+        )
 
     total_present = sum(1 for r in records if r['status'] == 'Present')
     total_late = sum(1 for r in records if r['status'] == 'Late')
@@ -61,9 +87,13 @@ def reports():
     return render_template(
         'reports.html',
         records=records,
+        class_sessions=class_sessions,
+        session_limit=attendance_repo.SESSION_LIST_LIMIT,
         subjects=subjects,
+        instructors=instructors,
         selected_date=selected_date,
-        selected_subject=selected_subject,
+        selected_subject=subject_id,
+        selected_instructor=instructor_id if scope is None else None,
         total_present=total_present,
         total_late=total_late,
         total_absent=total_absent,
@@ -96,10 +126,12 @@ def export_excel():
     attempt used a temporary file with a `call_on_close` cleanup hook, the hook
     did not fire, and an integration test found the leftovers.
     """
-    selected_date, _selected_subject, subject_id = _filters()
+    selected_date, subject_id, instructor_id = _filters()
 
     try:
-        workbook, rows = reporting.register_workbook(selected_date, subject_id)
+        workbook, rows = reporting.register_workbook(
+            selected_date, subject_id, instructor_id
+        )
 
     except mysql.connector.Error:
         logger.exception("Excel export failed: database error")
@@ -109,8 +141,9 @@ def export_excel():
         # Not an error - an empty register is a legitimate answer - but nearly
         # always a filter the operator did not mean.
         logger.info(
-            "Exported an empty register (date=%r, subject_id=%r)",
-            selected_date, subject_id,
+            "Exported an empty register (date=%r, subject_id=%r, "
+            "instructor_id=%r)",
+            selected_date, subject_id, instructor_id,
         )
 
     filename = (

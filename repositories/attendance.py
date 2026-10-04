@@ -37,14 +37,18 @@ REGISTER_COLUMNS = """
     sub.subject_code,
     sub.subject_name,
     sub.section,
+    COALESCE(i.fullname, sub.instructor) AS instructor,
     a.time_in,
     a.status
 """
 
+# LEFT JOIN to `instructors`: an offering with no linked account still has a
+# register, and an inner join would drop its rows from every report.
 REGISTER_JOIN = """
     FROM attendance a
     JOIN students s ON s.student_id = a.student_id
     JOIN subjects sub ON sub.id = a.subject_id
+    LEFT JOIN instructors i ON i.id = sub.instructor_id
 """
 
 
@@ -53,7 +57,7 @@ REGISTER_JOIN = """
 # ---------------------------------------------------------------------------
 
 
-def counters(cursor):
+def counters(cursor, instructor_id=None):
     """
     The four dashboard numbers (FS-5), in one round trip.
 
@@ -64,18 +68,50 @@ def counters(cursor):
     `ended_at`. That includes sessions started and never ended as well as one
     running right now, which is honest: an unclosed session is a real thing
     that happened and the operator should see it.
+
+    With `instructor_id`, the same four numbers for that instructor's own
+    offerings (DM-5): the students on their class lists, their subjects,
+    today's marks in them, and their open sessions. A student in two of their
+    classes is one student, hence the DISTINCT.
     """
+    if instructor_id is None:
+        cursor.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM students) AS students,
+                (SELECT COUNT(*) FROM subjects) AS subjects,
+                (SELECT COUNT(*) FROM attendance
+                 WHERE attendance_date = CURDATE()) AS attendance_today,
+                (SELECT COUNT(*) FROM attendance_sessions
+                 WHERE session_date = CURDATE()
+                 AND ended_at IS NULL) AS active_sessions
+            """
+        )
+
+        return cursor.fetchone()
+
     cursor.execute(
         """
         SELECT
-            (SELECT COUNT(*) FROM students) AS students,
-            (SELECT COUNT(*) FROM subjects) AS subjects,
-            (SELECT COUNT(*) FROM attendance
-             WHERE attendance_date = CURDATE()) AS attendance_today,
-            (SELECT COUNT(*) FROM attendance_sessions
-             WHERE session_date = CURDATE()
-             AND ended_at IS NULL) AS active_sessions
-        """
+            (SELECT COUNT(DISTINCT e.student_id)
+             FROM enrolments e
+             JOIN subjects sub ON sub.id = e.subject_id
+             WHERE sub.instructor_id = %s) AS students,
+            (SELECT COUNT(*) FROM subjects
+             WHERE instructor_id = %s) AS subjects,
+            (SELECT COUNT(*)
+             FROM attendance a
+             JOIN subjects sub ON sub.id = a.subject_id
+             WHERE a.attendance_date = CURDATE()
+             AND sub.instructor_id = %s) AS attendance_today,
+            (SELECT COUNT(*)
+             FROM attendance_sessions ses
+             JOIN subjects sub ON sub.id = ses.subject_id
+             WHERE ses.session_date = CURDATE()
+             AND ses.ended_at IS NULL
+             AND sub.instructor_id = %s) AS active_sessions
+        """,
+        (instructor_id,) * 4,
     )
 
     return cursor.fetchone()
@@ -230,9 +266,13 @@ def insert_absences(cursor, rows):
 EXPORT_FETCH_SIZE = 500
 
 
-def _filtered_query(selected_date=None, subject_id=None):
+def _filtered_query(selected_date=None, subject_id=None, instructor_id=None):
     """
     The filtered-register SELECT and its bound values.
+
+    `instructor_id` narrows the register to one instructor's offerings (DM-5).
+    For a signed-in instructor it is their own key and the caller does not let
+    the request choose it; for an administrator it is a filter like the others.
 
     The WHERE clause is assembled, but only from fixed fragments - every value
     is a bound parameter. `subject_id` and not `subject_code`: two sections
@@ -254,26 +294,99 @@ def _filtered_query(selected_date=None, subject_id=None):
         query += " AND a.subject_id = %s"
         values.append(subject_id)
 
+    if instructor_id is not None:
+        query += " AND sub.instructor_id = %s"
+        values.append(instructor_id)
+
     query += " ORDER BY a.attendance_date DESC, a.time_in DESC"
 
     return query, values
 
 
-def filtered(cursor, selected_date=None, subject_id=None):
-    """
-    The register, narrowed by the filters the operator chose, as a list.
+# The sessions table on /reports shows this many, newest first. A bound rather
+# than a page: the register beside it is the record, and this is the index to
+# it.
+SESSION_LIST_LIMIT = 100
 
-    For `/reports`, which renders the rows into a template and needs to know
-    how many there are. The export uses `iter_filtered()` below.
+
+def sessions_filtered(cursor, selected_date=None, subject_id=None,
+                      instructor_id=None):
     """
-    query, values = _filtered_query(selected_date, subject_id)
+    The class meetings behind the register, newest first, with their tallies.
+
+    Takes the same three filters as `_filtered_query()` so the two tables on
+    /reports always describe the same slice.
+
+    ⚠️ **The tallies count the rows this session wrote**, through
+    `attendance.session_id`. The register holds one row per student per subject
+    per day (RE-3), so a second session for the same class on the same day
+    shows the marks it added and not the ones the first already held.
+
+    ⚠️ Conditional SUMs over a LEFT JOIN, COALESCEd: a session that recorded
+    nobody still appears, with zeros, which is the row an instructor most needs
+    to see.
+    """
+    query = """
+        SELECT
+            ses.id,
+            ses.session_date,
+            ses.started_at,
+            ses.ended_at,
+            ses.started_by,
+            sub.subject_code,
+            sub.subject_name,
+            sub.section,
+            COALESCE(i.fullname, sub.instructor) AS instructor,
+            COALESCE(SUM(a.status = 'Present'), 0) AS present,
+            COALESCE(SUM(a.status = 'Late'), 0) AS late,
+            COALESCE(SUM(a.status = 'Absent'), 0) AS absent
+        FROM attendance_sessions ses
+        JOIN subjects sub ON sub.id = ses.subject_id
+        LEFT JOIN instructors i ON i.id = sub.instructor_id
+        LEFT JOIN attendance a ON a.session_id = ses.id
+        WHERE 1=1
+    """
+    values = []
+
+    if selected_date:
+        query += " AND ses.session_date = %s"
+        values.append(selected_date)
+
+    if subject_id is not None:
+        query += " AND ses.subject_id = %s"
+        values.append(subject_id)
+
+    if instructor_id is not None:
+        query += " AND sub.instructor_id = %s"
+        values.append(instructor_id)
+
+    query += f"""
+        GROUP BY ses.id
+        ORDER BY ses.started_at DESC, ses.id DESC
+        LIMIT {SESSION_LIST_LIMIT}
+    """
 
     cursor.execute(query, values)
 
     return cursor.fetchall()
 
 
-def iter_filtered(cursor, selected_date=None, subject_id=None):
+def filtered(cursor, selected_date=None, subject_id=None, instructor_id=None):
+    """
+    The register, narrowed by the filters the operator chose, as a list.
+
+    For `/reports`, which renders the rows into a template and needs to know
+    how many there are. The export uses `iter_filtered()` below.
+    """
+    query, values = _filtered_query(selected_date, subject_id, instructor_id)
+
+    cursor.execute(query, values)
+
+    return cursor.fetchall()
+
+
+def iter_filtered(cursor, selected_date=None, subject_id=None,
+                  instructor_id=None):
     """
     The same register, yielded a batch at a time.
 
@@ -300,7 +413,7 @@ def iter_filtered(cursor, selected_date=None, subject_id=None):
     `register_workbook()` writes the sheet *inside* its `with db_cursor()`
     block rather than collecting first.
     """
-    query, values = _filtered_query(selected_date, subject_id)
+    query, values = _filtered_query(selected_date, subject_id, instructor_id)
 
     cursor.execute(query, values)
 
@@ -399,6 +512,7 @@ def record(cursor, attendance_id):
             a.student_id,
             s.name AS student_name,
             a.subject_id,
+            sub.instructor_id,
             sub.subject_code,
             sub.subject_name,
             sub.section,

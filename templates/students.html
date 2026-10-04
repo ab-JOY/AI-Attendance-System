@@ -48,31 +48,29 @@
                 autocomplete="new-password"
                 placeholder="Leave blank to set it later">
 
-            <label for="college_department">College Department</label>
+            {#
+                Migration 009. Department and program used to be two unrelated
+                dropdowns hardcoded here, so any department could be paired
+                with any program and neither had to exist anywhere else. The
+                department is the program's now: choosing the program under
+                its heading is choosing both.
+            #}
+            <label for="program_id">Program</label>
             <select
-                id="college_department"
-                name="college_department"
-                required>
-
-                <option value="">Select Department</option>
-                <option value="College of Computing">College of Computing</option>
-                <option value="College of Engineering">College of Engineering</option>
-                <option value="College of Business">College of Business</option>
-                <option value="College of Education">College of Education</option>
-
-            </select>
-
-            <label for="program">Program</label>
-            <select
-                id="program"
-                name="program"
+                id="program_id"
+                name="program_id"
                 required>
 
                 <option value="">Select Program</option>
-                <option value="BSCS">BSCS</option>
-                <option value="BSIT">BSIT</option>
-                <option value="BSIS">BSIS</option>
-                <option value="BSEd">BSEd</option>
+                {% for department, offered in programs|groupby('department_name') %}
+                    <optgroup label="{{ department }}">
+                        {% for program in offered %}
+                            <option value="{{ program.id }}">
+                                {{ program.program_code }} - {{ program.program_name }}
+                            </option>
+                        {% endfor %}
+                    </optgroup>
+                {% endfor %}
 
             </select>
 
@@ -83,10 +81,9 @@
                 required>
 
                 <option value="">Select Year Level</option>
-                <option value="1">1st Year</option>
-                <option value="2">2nd Year</option>
-                <option value="3">3rd Year</option>
-                <option value="4">4th Year</option>
+                {% for year in year_levels %}
+                    <option value="{{ year }}">Year {{ year }}</option>
+                {% endfor %}
 
             </select>
 
@@ -95,6 +92,7 @@
                 type="text"
                 id="section"
                 name="section"
+                maxlength="100"
                 placeholder="Enter Section"
                 required>
 
@@ -173,14 +171,19 @@
 
         {% for student in students %}
 
+        {# Computed here and handed over: `loop` belongs to this template and
+           an included one cannot see it. #}
+        {% set new_group = loop.changed(student.section_id) %}
+        {% include 'student_group_row.html' %}
+
         <tr>
 
             <td>{{ student.student_id }}</td>
             <td>{{ student.name }}</td>
-            <td>{{ student.college_department }}</td>
-            <td>{{ student.program }}</td>
-            <td>{{ student.year_level }}</td>
-            <td>{{ student.section }}</td>
+            <td>{{ student.college_department or "—" }}</td>
+            <td>{{ student.program or "—" }}</td>
+            <td>{{ student.year_level or "—" }}</td>
+            <td>{{ student.section or "—" }}</td>
 
             {#
                 US-10, the other half: a student can fall out of every class

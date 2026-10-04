@@ -1585,3 +1585,70 @@ render a 16:9 box - so what the student frames is what the server judges.
 ⚠️ **Changing either camera screen's preview back to a square or a
 full-height box restores this bug silently**, with no test failing and the same
 honest-but-useless message.
+
+---
+
+## L34 - A test that only closes its connection on the last line hangs when it fails
+
+**2026-10-04, Phase 7, the migration 009 tests. Found by mutating the
+migration, not by reading the test.**
+
+Each 009 test opened its own connection to a second scratch database, seeded
+it, migrated, asserted, and closed the connection on its final line. All of
+them passed. Then the mutation run removed `HAVING COUNT(*) = 1` from the
+instructor backfill, the assertion failed as it should - and the run sat there
+for eleven minutes.
+
+A failing `assert` skips everything after it, including `connection.close()`.
+The connection had just run a SELECT with autocommit off, so it held an open
+transaction and a metadata lock on the table. The fixture's teardown then
+issued `DROP DATABASE`, which waited on that lock for ever. **The test could
+pass and it could hang; the one thing it could not do was fail.**
+
+**How to apply:**
+
+- **A resource a test opens is the fixture's to close**, in a `finally`, before
+  any teardown that needs the resource gone. A close on the last line of a test
+  body is a close that only happens on success.
+- **The failure path of a test is code, and it is the least exercised code in
+  the repository.** These tests fail only when somebody breaks the migration,
+  which is exactly when a hang is most expensive - in CI it is a job that times
+  out with no assertion message.
+- **Give a mutation runner a timeout and unbuffered output.** The first run had
+  neither, so the hang looked like a slow run and its results so far were
+  sitting in a buffer that died with the process.
+- This is [L4](#l4) once more: a check whose job is to detect a problem has to
+  be run against the problem. It found a defect in the *test* this time, and
+  only because the mutation made the test take the branch nobody had taken.
+
+---
+
+## L35 - A broad request is answered with stated defaults, not a questionnaire
+
+**2026-10-04, corrected by the user.**
+
+Asked to "fix the database, separate the students and instructors by
+department, program/course and year and section", I read the schema, found four
+things the request did not settle - what "separate" should change, what an
+instructor belongs to, whether subjects are included, where the lists come
+from - and put them to the user as a four-question dialog before writing
+anything. The user dismissed the dialog and sent the request again, with more
+in it.
+
+They did not say why, so **this is my reading of it, not their words**: the
+questions were mine to answer. Each one had a recommended option that I had
+already chosen, and none of them was a decision only the user could make - they
+were design choices with a sensible default. `todo.md` §7 is for decisions that
+shape the thesis; "should the dropdown be grouped" is not one.
+
+**How to apply:**
+
+- **Proceed on the recommended option and write the choice down** where the
+  user will see it - the plan in `todo.md`, the handover, the closing message -
+  so it can be overruled after the fact at the cost of one sentence.
+- **Keep what is hard to undo out of the default.** Migration 009 drops nothing
+  for this reason: the destructive half is listed in §7.7 as the user's, and
+  everything that was done can be reverted by ignoring a column.
+- **A question is for something only they can know or only they may decide** -
+  what the machine did last night ([L15](#l15)), which calibration to accept
+  (§7). Not for a choice between two designs I can describe.

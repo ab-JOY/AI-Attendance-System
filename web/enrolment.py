@@ -59,6 +59,7 @@ from services.training import training_job
 from vision.enrolment import DEFAULT_PLAN, MAX_IMAGES, EnrolmentComplete
 from vision.pose import MIN_NATIVE_FRAME_WIDTH
 from web.errors import error_page
+from web.placement import parse_placement, section_id_for
 
 logger = logging.getLogger(__name__)
 
@@ -150,11 +151,16 @@ def enrol():
                     "Recapture Face from Manage Students instead.",
                 )
 
+        # Checked before the capture rather than after it: a placement that
+        # cannot be saved is cheaper to hear about now than at the end of a
+        # hundred images.
+        placement, problem = parse_placement(request.form)
+
+        if problem is not None:
+            return error_page(400, problem)
+
         record = {
-            'college_department': request.form.get('college_department', ''),
-            'program': request.form.get('program', ''),
-            'year_level': request.form.get('year_level', ''),
-            'section': request.form.get('section', ''),
+            **placement,
             # US-10. Nothing is written here - this rides along in the opaque
             # record and is applied at /enrol/finish, with the student row, in
             # one transaction.
@@ -327,6 +333,11 @@ def enrol_finish():
     record = dict(capture_session.record)
     chosen_subject_ids = record.pop(SUBJECTS_KEY, []) or []
 
+    # ⚠️ Parsed again, not trusted. `record` went to the browser as JSON and
+    # came back with /enrol/start, so what arrives here is a request body. A
+    # recapture carries `{}` and is not placed - see the branch below.
+    placement, placement_problem = parse_placement(record)
+
     password_hash = getattr(capture_session, "password_hash", None)
 
     if password_hash is not None:
@@ -340,6 +351,28 @@ def enrol_finish():
                 # replaces a face, not a timetable.
                 students_repo.rename(cursor, student_id, student_name)
             else:
+                # ⚠️ **Resolved inside this transaction.** A section created
+                # here and a student row that then failed would otherwise
+                # leave an empty section behind.
+                #
+                # An unusable placement is not fatal at this point: the images
+                # are already on disk, so the student is written Unassigned -
+                # which the list says out loud - rather than the capture being
+                # thrown away over a field that takes ten seconds to fix.
+                section_id = (
+                    section_id_for(cursor, placement)
+                    if placement is not None else None
+                )
+
+                if section_id is None:
+                    logger.warning(
+                        "Enrolling %s with no section: %s",
+                        student_id,
+                        placement_problem or "the chosen program no longer exists",
+                    )
+
+                record['section_id'] = section_id
+
                 students_repo.insert(cursor, student_id, student_name, record)
 
                 if chosen_subject_ids:

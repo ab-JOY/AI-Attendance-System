@@ -977,3 +977,64 @@ attendance could not be started at all.** That was true when measured and stale
 within the hour — the user populated CS401 the same evening. A class-list count
 is operator state; quote it with a time attached, or re-run
 `python scripts/preflight.py`, which answers it live.
+
+---
+
+## 10. Phase 7 — academic structure, and reports scoped to the instructor
+
+**Raised 2026-10-03 by the user:** *"fix the database, separate the students
+and instructors by department, program/course and year and section … make the
+reports on each instructor organized … the admin can sort the reports per
+instructor or as a whole."*
+
+### What the live database held (reviewed 2026-10-04, MariaDB 10.4.32)
+
+| Finding | Evidence |
+|---|---|
+| **DM-1** `departments` and `programs` exist but no migration creates them and no code reads them | created by hand 2026-09-13, 9 rows each; `schema_migrations` stops at 008, so a fresh install has neither (PO-5 reopened) |
+| **DM-2** a student's department, program, year and section are four unrelated strings | `students.college_department` held `College of Computing`, which is not a row in `departments`; the form dropdowns were hardcoded and offered programs the table does not have |
+| **DM-3** instructors belong to nothing | `instructors` has no department column |
+| **DM-4** no subject is linked to an instructor account | `subjects.instructor_id` NULL on 3 of 3, while all three typed names match an account exactly — migration 005's backfill ran when `instructors` was empty and the form has only ever written the free text |
+| **DM-5** an instructor sees every class | `/reports`, `/export_excel`, `/attendance`, the dashboard and the correction screen were `@authenticated` with no ownership check |
+| DM-6 three sessions from 2026-09-01 never closed | ids 12, 24, 28; **not touched** — data, and the user's to decide |
+
+Integrity otherwise clean: 0 orphaned attendance rows, 0 attendance rows for a
+student not on that class list, 0 students in no class.
+
+### Plan
+
+- [x] **Migration 009** — adopt `departments`/`programs` (DM-1), add `sections`
+      (program + year level + name), `students.section_id`,
+      `instructors.department_id`, re-run the instructor backfill (DM-4).
+      **Additive only.** The four legacy text columns on `students` are left in
+      place and no longer read; dropping them is the contract step and is the
+      user's call (§7.7).
+- [x] Students, enrolment, the mobile API and the class list read placement
+      through the joins, under the same key names as before.
+- [x] Student and instructor lists grouped and filterable by department,
+      program, year and section (DM-2, DM-3).
+- [x] Subject form picks an instructor **account** (DM-4).
+- [x] Reports, export, attendance, dashboard and corrections scoped to the
+      signed-in instructor; admin filters by instructor or sees all (DM-5).
+- [x] Tests, integration run against a scratch database, live migration with a
+      dump taken first, handover.
+
+**Landed 2026-10-04.** Migration 009 applied to the deployed database after a
+rehearsal on a copy: 4 of 4 students placed, 3 of 3 subjects linked to an
+instructor account, every pre-existing row unchanged. Fast suite **1390 →
+1462**, integration **67 passed**, 11 of 11 mutations caught. See
+[`handover-phase-7.md`](handover-phase-7.md).
+
+### §7.7 — open, the user's
+
+1. **Drop the legacy columns** `students.college_department`, `program`,
+   `year_level`, `section` (migration 010). Safe on this database — all 4
+   students resolved. On a database where a student's typed program is not in
+   `programs`, 009 leaves that student *Unassigned* and the text is the only
+   record of what was typed, so the drop wants a check first.
+2. **`subjects.course` / `subjects.section` are still free text.** Linking an
+   offering to a `sections` row would let a class list be filled from the
+   section. Not done: it was not asked for and it changes the subject form.
+3. **DM-6** — close or delete the three stale sessions.
+4. **Instructor departments are unset.** 009 does not guess one from the
+   subjects an instructor teaches; set them on Manage Instructors.

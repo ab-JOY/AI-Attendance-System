@@ -141,7 +141,7 @@ minutes total. **That is expected, not a hang.**
 
 | ID | Test | Precondition | Steps | Expected |
 |---|---|---|---|---|
-| **C1** | Capture page opens | Admin, consent obtained | Students → fill in ID, name, department, program, year, section → submit | Capture page opens, browser asks for camera permission. Allow it. |
+| **C1** | Capture page opens | Admin, consent obtained | Students → fill in ID, name, program, year level, section → submit | Capture page opens, browser asks for camera permission. Allow it. |
 | **C2** | Permission refused | C1 | Reload and **deny** camera permission | A message explains what to do. Not a blank error page. |
 | **C3** | Full capture | C1 allowed | Work through all nine stages | Progress advances, instruction changes per stage, finishes at 100/100. Student appears in the list. |
 | **C4** | Guidance is usable | C3 | While capturing, move off-centre, too close, too far | It says **which** thing is wrong, not just that it failed. |

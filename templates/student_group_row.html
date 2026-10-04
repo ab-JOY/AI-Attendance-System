@@ -1,0 +1,31 @@
+{#
+    One heading row per section, on both student lists (DM-2).
+
+    The rows arrive ordered by department, program, year level and section -
+    `repositories.students.ROSTER_WITH_CLASS_COUNT` - so a heading belongs
+    wherever any of the four changes from the row before.
+
+    ⚠️ `new_group` is set by the including template, inside its loop, as
+    `loop.changed(student.section_id)`. It cannot be computed here: an included
+    template does not see the caller's `loop`, and asking for it raises
+    `'loop' is undefined` - at render time, on a list with at least one
+    student, which is why a suite that only ever rendered an empty list was
+    green through it (lessons.md L5).
+
+    A student with no section is Unassigned, said in words rather than left as
+    four empty cells (US-6).
+#}
+{% if new_group %}
+<tr class="group-row">
+    <th colspan="8" scope="colgroup">
+        {% if student.section_id %}
+            {{ student.college_department }}
+            &rsaquo; {{ student.program }}
+            &rsaquo; Year {{ student.year_level }}
+            &rsaquo; Section {{ student.section }}
+        {% else %}
+            Unassigned — no program, year level or section
+        {% endif %}
+    </th>
+</tr>
+{% endif %}

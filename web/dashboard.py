@@ -9,7 +9,7 @@ from flask import Blueprint, render_template
 
 from infra.db import db_cursor
 from repositories import attendance as attendance_repo
-from security.access import authenticated
+from security.access import authenticated, instructor_scope
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,11 @@ def dashboard():
 
     try:
         with db_cursor(dictionary=True) as cursor:
-            counts = attendance_repo.counters(cursor) or counts
+            # DM-5: an instructor's dashboard counts their own classes. None
+            # for an administrator, which is the whole school.
+            counts = attendance_repo.counters(
+                cursor, instructor_id=instructor_scope()
+            ) or counts
 
     except mysql.connector.Error:
         # A dashboard that cannot count is still a usable navigation page, and

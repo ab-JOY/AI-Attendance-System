@@ -22,13 +22,15 @@ from flask import Blueprint, jsonify, request
 
 from config.settings import settings as app_config
 from infra.db import db_cursor
+from repositories import academics as academics_repo
 from repositories import attendance as attendance_repo
 from repositories import credentials as credentials_repo
 from repositories import enrolments as enrolments_repo
 from repositories import students as students_repo
 from repositories import subjects as subjects_repo
-from security.access import public
+from security.access import NO_INSTRUCTOR, public
 from security.passwords import hash_password, verify_password
+from web.placement import parse_placement, section_id_for
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +104,26 @@ def role_required_api(*roles):
     return decorator
 
 
+def _instructor_scope(user: dict) -> int | None:
+    """
+    Whose classes this token may see (DM-5) - the JWT counterpart of
+    `security.access.instructor_scope()`.
+
+    None for an administrator. For an instructor, the `instructors.id` the
+    token was issued with; a token issued before that claim existed carries
+    none and is scoped to nothing until it expires, rather than to everything.
+
+    Students are not scoped here - the routes below already confine a student
+    to their own rows.
+    """
+    if user.get("role") != "instructor":
+        return None
+
+    scope = user.get("instructor_pk")
+
+    return scope if isinstance(scope, int) else NO_INSTRUCTOR
+
+
 # ---------------------------------------------------------------------------
 # AUTH
 # ---------------------------------------------------------------------------
@@ -153,6 +175,7 @@ def api_login():
         token = _make_token({
             "role": "instructor",
             "user_id": account["instructor_id"],
+            "instructor_pk": account["id"],
             "display_name": account["fullname"],
         })
 
@@ -239,10 +262,12 @@ def api_subjects():
         if user.get("role") == "student":
             cursor.execute(
                 """
-                SELECT s.id, s.subject_code, s.subject_name, s.instructor,
+                SELECT s.id, s.subject_code, s.subject_name,
+                       COALESCE(i.fullname, s.instructor) AS instructor,
                        s.day, s.course, s.section, s.time_in, s.time_out
                 FROM subjects s
                 JOIN enrolments e ON e.subject_id = s.id
+                LEFT JOIN instructors i ON i.id = s.instructor_id
                 WHERE e.student_id = %s
                 ORDER BY s.subject_code
                 """,
@@ -250,7 +275,9 @@ def api_subjects():
             )
             subjects = cursor.fetchall()
         else:
-            subjects = subjects_repo.for_selection(cursor)
+            subjects = subjects_repo.for_selection(
+                cursor, instructor_id=_instructor_scope(user)
+            )
 
     return jsonify({"success": True, "subjects": subjects})
 
@@ -258,19 +285,36 @@ def api_subjects():
 @api_bp.route("/colleges_programs", methods=["GET"])
 @public
 def api_colleges_programs():
-    """Return distinct lists of colleges and programs for the registration dropdowns."""
+    """
+    The departments and programs a student can register under.
+
+    Read from `departments` and `programs` (migration 009). It used to be
+    `SELECT DISTINCT` over what earlier students had typed, so the lists
+    offered whatever had been entered before - including values that were
+    never a department - and were empty on a new installation.
+
+    `colleges` and `programs` keep their shape for the app that is already
+    installed: department names and program codes. `structure` pairs each
+    program with its department, which the two flat lists cannot say.
+    """
     try:
         with db_cursor(dictionary=True) as cursor:
-            cursor.execute("SELECT DISTINCT college_department FROM students WHERE college_department IS NOT NULL AND college_department != '' ORDER BY college_department")
-            colleges = [row['college_department'] for row in cursor.fetchall()]
-
-            cursor.execute("SELECT DISTINCT program FROM students WHERE program IS NOT NULL AND program != '' ORDER BY program")
-            programs = [row['program'] for row in cursor.fetchall()]
+            departments = academics_repo.departments(cursor)
+            programs = academics_repo.programs(cursor)
 
             return jsonify({
                 "success": True,
-                "colleges": colleges,
-                "programs": programs
+                "colleges": [row["department_name"] for row in departments],
+                "programs": [row["program_code"] for row in programs],
+                "structure": [
+                    {
+                        "program_id": row["id"],
+                        "program": row["program_code"],
+                        "program_name": row["program_name"],
+                        "college_department": row["department_name"],
+                    }
+                    for row in programs
+                ],
             })
     except mysql.connector.Error:
         logger.exception("Could not fetch colleges and programs")
@@ -324,10 +368,9 @@ def api_register_student():
     last_name = data.get("last_name", "").strip()
     email = data.get("email", "").strip()
     password = data.get("password", "").strip()
-    college_department = data.get("college_department", "").strip()
-    program = data.get("program", "").strip()
-    year_level = data.get("year_level", "").strip()
-    section = data.get("section", "").strip()
+    program = str(data.get("program") or "").strip()
+    year_level = str(data.get("year_level") or "").strip()
+    section = str(data.get("section") or "").strip()
 
     if not student_id or not first_name or not last_name or not password:
         return jsonify({
@@ -348,6 +391,15 @@ def api_register_student():
     name_parts.append(last_name)
     name = " ".join(name_parts)
 
+    # A program must come with a year level and a section: a student belongs
+    # to a section, and a program on its own has nowhere to be stored
+    # (migration 009). Checked before bcrypt and before a connection is taken.
+    if program and not (year_level.isdigit() and section):
+        return jsonify({
+            "success": False,
+            "message": "Year level and section are required.",
+        }), 400
+
     try:
         password_hash = hash_password(password)
     except Exception:
@@ -364,19 +416,29 @@ def api_register_student():
                     "message": "A student with that ID is already registered.",
                 }), 409
 
-            record = {
-                "college_department": college_department,
-                "program": program,
-                "year_level": year_level or None,
-                "section": section,
-            }
-            students_repo.insert(cursor, student_id, name, record)
+            section_id = None
 
-            # Set the password
-            cursor.execute(
-                "UPDATE students SET password = %s WHERE student_id = %s",
-                (password_hash, student_id),
-            )
+            if program:
+                # The app sends the program's code, which is unique. The
+                # department it also sends is not consulted: it is a property
+                # of the program, and the two were free to disagree.
+                placement, problem = parse_placement({
+                    "program_id": academics_repo.program_id_for_code(
+                        cursor, program
+                    ),
+                    "year_level": year_level,
+                    "section": section,
+                })
+
+                if problem is not None:
+                    return jsonify({"success": False, "message": problem}), 400
+
+                section_id = section_id_for(cursor, placement)
+
+            students_repo.insert(cursor, student_id, name, {
+                "section_id": section_id,
+                "password_hash": password_hash,
+            })
 
         token = _make_token({
             "role": "student",
@@ -452,7 +514,10 @@ def api_attendance_history():
                 cursor.execute(query, values)
             else:
                 records = attendance_repo.filtered(
-                    cursor, selected_date=selected_date, subject_id=subject_id
+                    cursor,
+                    selected_date=selected_date,
+                    subject_id=subject_id,
+                    instructor_id=_instructor_scope(user),
                 )
                 return jsonify({
                     "success": True,
@@ -627,7 +692,9 @@ def api_dashboard():
     """Dashboard statistics."""
     try:
         with db_cursor(dictionary=True) as cursor:
-            counters = attendance_repo.counters(cursor)
+            counters = attendance_repo.counters(
+                cursor, instructor_id=_instructor_scope(request.jwt_user)
+            )
 
         return jsonify({
             "success": True,

@@ -27,13 +27,31 @@
                 value="{{ subject.subject_name }}"
                 required>
 
-            <label for="instructor">Instructor</label>
-            <input
-                type="text"
-                id="instructor"
-                name="instructor"
-                value="{{ subject.instructor }}"
-                required>
+            {#
+                DM-4. An instructor *account*, chosen from a list. This was a
+                text box, and a typed name linked the subject to nobody - so
+                on the deployed database every subject had a named instructor
+                and none of them belonged to one. Reports limited to an
+                instructor's own classes are limited by this choice.
+            #}
+            <label for="instructor_id">Instructor</label>
+            <select id="instructor_id" name="instructor_id">
+                <option value="">Unassigned</option>
+                {% for instructor in instructors %}
+                    <option value="{{ instructor.id }}"
+                        {% if subject.instructor_id == instructor.id %}selected{% endif %}>
+                        {{ instructor.fullname }}
+                        {% if instructor.department_code %}({{ instructor.department_code }}){% endif %}
+                    </option>
+                {% endfor %}
+            </select>
+
+            {% if subject.instructor and not subject.instructor_id %}
+                <p class="hint">
+                    Previously typed as "{{ subject.instructor }}", which is
+                    not linked to an instructor account.
+                </p>
+            {% endif %}
 
             <label for="day">Day</label>
             <select id="day" name="day" required>

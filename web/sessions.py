@@ -42,7 +42,7 @@ from recognize_face import session as recognition_session
 from repositories import attendance as attendance_repo
 from repositories import enrolments as enrolments_repo
 from repositories import subjects as subjects_repo
-from security.access import authenticated, json_api
+from security.access import authenticated, instructor_scope, json_api
 from services import attendance as attendance_service
 from web.errors import error_page
 
@@ -74,7 +74,54 @@ def _all_subjects():
     student has been refused in front of the camera.
     """
     with db_cursor(dictionary=True) as cursor:
-        return subjects_repo.for_selection_with_class_list_size(cursor)
+        # DM-5: an instructor is offered their own offerings. None for an
+        # administrator, which is every offering.
+        return subjects_repo.for_selection_with_class_list_size(
+            cursor, instructor_id=instructor_scope()
+        )
+
+
+# What an instructor is told when a request names an offering that is not
+# theirs (DM-5). The dropdowns never offer one, so reaching this means the
+# offering was reassigned after the page loaded, or the request was made by
+# hand.
+NOT_YOUR_SUBJECT = (
+    "That subject is not assigned to you. Ask an administrator to assign it "
+    "under Subjects if it should be."
+)
+
+
+def _may_use_subject(subject_id):
+    """
+    Whether the signed-in user may run or end a session on this offering.
+
+    Always True for an administrator. For an instructor, only an offering
+    assigned to their account.
+
+    ⚠️ **This is the guard; the filtered dropdown is the convenience.** A
+    control that does not offer another instructor's class is absent from a
+    curl and a replayed POST - the same relationship the End control's lock
+    has with the 409 behind it.
+
+    ⚠️ **Refuses on a database error, unlike `_class_list_is_empty()`.** That
+    gate protects the operator's time and must not close on a blip. This one
+    decides whose register gets written, and "could not check" is not "yes".
+    A real outage stops the session one line later either way.
+    """
+    scope = instructor_scope()
+
+    if scope is None:
+        return True
+
+    try:
+        with db_cursor(dictionary=True) as cursor:
+            return subjects_repo.is_taught_by(cursor, subject_id, scope)
+
+    except mysql.connector.Error:
+        logger.exception(
+            "Could not check who teaches subject_id %s; refusing", subject_id
+        )
+        return False
 
 
 # Why a session on a subject with an empty class list is refused (B3). Module
@@ -196,6 +243,15 @@ def start_attendance():
 
     subject_id = int(subject_id)
 
+    if not _may_use_subject(subject_id):
+        logger.warning(
+            "Refused to start attendance: %r is not the instructor of "
+            "subject_id %s",
+            session.get('user'), subject_id,
+        )
+
+        return jsonify({"success": False, "message": NOT_YOUR_SUBJECT})
+
     # B3. Checked **first**, before a session row exists and before the camera
     # is touched, so a refusal costs nothing and leaves nothing behind. The
     # other two refusal paths below have to undo an `attendance_sessions` row
@@ -291,6 +347,18 @@ def start_attendance():
     })
 
 
+def _may_correct(record):
+    """
+    Whether the signed-in user may see and correct this register row (DM-5).
+
+    An instructor corrects their own classes. `record` carries the offering's
+    `instructor_id` from the join in `attendance_repo.record()`.
+    """
+    scope = instructor_scope()
+
+    return scope is None or record.get('instructor_id') == scope
+
+
 @sessions_bp.route('/stop_camera', methods=['POST'])
 @authenticated
 @json_api
@@ -376,6 +444,18 @@ def end_attendance():
         return error_page(400, "Choose a subject from the list.")
 
     submitted_id = int(submitted)
+
+    # DM-5. Before anything else, and before stop_camera(): an instructor may
+    # end only their own class, and a refusal must leave whatever is running
+    # running - the same reasoning as the mismatch refusal just below.
+    if not _may_use_subject(submitted_id):
+        logger.warning(
+            "Refused to end attendance: %r is not the instructor of "
+            "subject_id %s",
+            session.get('user'), submitted_id,
+        )
+
+        return error_page(403, NOT_YOUR_SUBJECT)
 
     if active is not None and submitted_id != active.subject_id:
         # ⚠️ Refused *before* stop_camera() and before the transaction. Nothing
@@ -817,6 +897,16 @@ def correct_attendance(attendance_id):
             if record is None:
                 return error_page(404, "That attendance record no longer exists.")
 
+            if not _may_correct(record):
+                # 404, not 403: to an instructor, another instructor's record
+                # is not theirs to know exists. The log says what happened.
+                logger.warning(
+                    "Refused correction screen for record %s to %r: not their "
+                    "class",
+                    attendance_id, session.get('user'),
+                )
+                return error_page(404, "That attendance record no longer exists.")
+
             history = attendance_repo.correction_history(cursor, attendance_id)
 
         return render_template(
@@ -856,6 +946,18 @@ def correct_attendance(attendance_id):
             existing = attendance_repo.lock_for_correction(cursor, attendance_id)
 
             if existing is None:
+                return error_page(404, "That attendance record no longer exists.")
+
+            # DM-5. The GET above hides another instructor's record; this is
+            # what refuses the POST that names it anyway. Nothing has been
+            # written yet, so returning here changes nothing.
+            if instructor_scope() is not None and not _may_correct(
+                attendance_repo.record(cursor, attendance_id) or {}
+            ):
+                logger.warning(
+                    "Refused correction of record %s by %r: not their class",
+                    attendance_id, session.get('user'),
+                )
                 return error_page(404, "That attendance record no longer exists.")
 
             old_status = existing['status']

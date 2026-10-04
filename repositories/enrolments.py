@@ -10,11 +10,19 @@ register both scope themselves by it.
 
 from __future__ import annotations
 
+from repositories.students import ACADEMIC_JOIN
+
 # The student columns the class-list screen shows on both sides of the
 # transfer. One string because the two queries below have to agree - a column
 # in one list and not the other makes the two tables render differently for no
 # stated reason.
-ROSTER_COLUMNS = "s.student_id, s.name, s.program, s.year_level, s.section"
+#
+# Placement is read through `students.ACADEMIC_JOIN` (migration 009), under the
+# key names the template already used.
+ROSTER_COLUMNS = (
+    "s.student_id, s.name, p.program_code AS program, "
+    "sec.year_level AS year_level, sec.section_name AS section"
+)
 
 
 def enrolled_in(cursor, subject_id):
@@ -24,6 +32,7 @@ def enrolled_in(cursor, subject_id):
         SELECT {ROSTER_COLUMNS}
         FROM enrolments e
         JOIN students s ON s.student_id = e.student_id
+        {ACADEMIC_JOIN}
         WHERE e.subject_id = %s
         ORDER BY s.name ASC
         """,
@@ -39,6 +48,7 @@ def not_enrolled_in(cursor, subject_id):
         f"""
         SELECT {ROSTER_COLUMNS}
         FROM students s
+        {ACADEMIC_JOIN}
         WHERE NOT EXISTS (
             SELECT 1 FROM enrolments e
             WHERE e.student_id = s.student_id

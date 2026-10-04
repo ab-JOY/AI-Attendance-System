@@ -17,6 +17,32 @@
                 name="date"
                 value="{{ request.args.get('date','') }}">
 
+            {#
+                DM-5. The administrator's control: one instructor's classes,
+                or everybody's. An instructor is not offered it - the route
+                has already limited everything on this page to their own
+                classes, from the session rather than from this form.
+            #}
+            {% if session['role'] == 'admin' %}
+            <label for="instructor">Instructor</label>
+            <select id="instructor" name="instructor">
+
+                <option value="">
+                    All Instructors
+                </option>
+
+                {% for instructor in instructors %}
+                <option
+                    value="{{ instructor.id }}"
+                    {% if selected_instructor == instructor.id %}selected{% endif %}
+                >
+                    {{ instructor.fullname }}{% if instructor.department_code %} ({{ instructor.department_code }}){% endif %}
+                </option>
+                {% endfor %}
+
+            </select>
+            {% endif %}
+
             <label for="subject">Subject</label>
             <select id="subject" name="subject">
 
@@ -27,7 +53,7 @@
                 {% for subject in subjects %}
                 <option
                     value="{{ subject.id }}"
-                    {% if request.args.get('subject') == subject.id|string %}
+                    {% if selected_subject == subject.id %}
                     selected
                     {% endif %}
                 >
@@ -42,7 +68,17 @@
             </button>
 
             <!-- EXPORT EXCEL -->
-            <a href="{{ url_for('reports.export_excel') }}"
+            {#
+                ⚠️ The link carries the filters. It was a bare
+                `url_for('reports.export_excel')`, so the route that honours
+                the chosen filters (FS-11) was never sent any and the
+                spreadsheet was always the whole register, whatever the screen
+                showed. `url_for` drops a None, so an unset filter adds nothing.
+            #}
+            <a href="{{ url_for('reports.export_excel',
+                                date=selected_date or none,
+                                subject=selected_subject,
+                                instructor=selected_instructor) }}"
                class="export-btn">
                 Export Excel
             </a>
@@ -59,6 +95,13 @@
             <p>{{ total_present }}</p>
         </div>
 
+        {# Counted by the route since FS-8 and never shown: Late was the one
+           status with no card, so the three cards did not sum to the total. #}
+        <div class="card">
+            <h2>Total Late</h2>
+            <p>{{ total_late }}</p>
+        </div>
+
         <div class="card">
             <h2>Total Absent</h2>
             <p>{{ total_absent }}</p>
@@ -71,7 +114,78 @@
 
     </div>
 
+    <!-- SESSIONS -->
+    {#
+        DM-5. The class meetings behind the register below, under the same
+        filters - so an instructor sees each of their sessions as a row, not
+        only the marks inside them.
+    #}
+    <h2>Sessions</h2>
+
+    <table class="subject-table">
+
+        <thead>
+
+            <tr>
+                <th>Date</th>
+                <th>Subject</th>
+                <th>Section</th>
+                <th>Instructor</th>
+                <th>Started</th>
+                <th>Ended</th>
+                <th>Present</th>
+                <th>Late</th>
+                <th>Absent</th>
+            </tr>
+
+        </thead>
+
+        <tbody>
+
+        {% for class_session in class_sessions %}
+
+            <tr>
+                <td>{{ class_session.session_date }}</td>
+                <td>{{ class_session.subject_code }} - {{ class_session.subject_name }}</td>
+                <td>{{ class_session.section or "—" }}</td>
+                <td>{{ class_session.instructor or "Unassigned" }}</td>
+                <td>{{ class_session.started_at.strftime('%H:%M') }}</td>
+                <td>
+                    {% if class_session.ended_at %}
+                        {{ class_session.ended_at.strftime('%H:%M') }}
+                    {% else %}
+                        <span class="warning-text">Not ended</span>
+                    {% endif %}
+                </td>
+                <td>{{ class_session.present }}</td>
+                <td>{{ class_session.late }}</td>
+                <td>{{ class_session.absent }}</td>
+            </tr>
+
+        {% else %}
+
+            <tr>
+                <td colspan="9" class="no-records">
+                    No sessions found.
+                </td>
+            </tr>
+
+        {% endfor %}
+
+        </tbody>
+
+    </table>
+
+    {% if class_sessions|length >= session_limit %}
+        <p class="hint">
+            Showing the {{ session_limit }} most recent sessions. Choose a date
+            or a subject to see earlier ones.
+        </p>
+    {% endif %}
+
     <!-- REPORT TABLE -->
+    <h2>Attendance Records</h2>
+
     <table class="subject-table">
 
         <thead>
@@ -81,6 +195,7 @@
                 <th>Student ID</th>
                 <th>Name</th>
                 <th>Subject Code</th>
+                <th>Instructor</th>
                 <th>Time In</th>
                 <th>Status</th>
                 <th>Correction</th>
@@ -103,6 +218,8 @@
                 <td>{{ record.student_name }}</td>
 
                 <td>{{ record.subject_code }}</td>
+
+                <td>{{ record.instructor or "Unassigned" }}</td>
 
                 {#
                     An absence has no arrival time, so `time_in` is NULL on
@@ -160,7 +277,7 @@
 
             <tr>
 
-                <td colspan="7" class="no-records">
+                <td colspan="8" class="no-records">
                     No attendance records found.
                 </td>
 

@@ -31,93 +31,50 @@
                 value="{{ student.name }}"
                 required>
 
-            <!-- College Department -->
-            <label for="college_department"><strong>College Department</strong></label>
+            {#
+                Migration 009. The department is the program's, so there is
+                one control for both, grouped by department.
 
-            <select
-                id="college_department"
-                name="college_department"
-                required>
-
-                <option value="College of Computing"
-                    {% if student.college_department == "College of Computing" %}selected{% endif %}>
-                    College of Computing
-                </option>
-
-                <option value="College of Engineering"
-                    {% if student.college_department == "College of Engineering" %}selected{% endif %}>
-                    College of Engineering
-                </option>
-
-                <option value="College of Business"
-                    {% if student.college_department == "College of Business" %}selected{% endif %}>
-                    College of Business
-                </option>
-
-                <option value="College of Education"
-                    {% if student.college_department == "College of Education" %}selected{% endif %}>
-                    College of Education
-                </option>
-
-            </select>
-
+                ⚠️ The year level used to compare `student.year_level == "1"` -
+                an int against a string - so no option was ever selected, the
+                browser fell back to the first one, and saving any edit quietly
+                moved the student to 1st year. Both sides are ints now.
+            #}
             <!-- Program -->
-            <label for="program"><strong>Program</strong></label>
-
+            <label for="program_id"><strong>Program</strong></label>
             <select
-                id="program"
-                name="program"
+                id="program_id"
+                name="program_id"
                 required>
 
-                <option value="BSCS"
-                    {% if student.program == "BSCS" %}selected{% endif %}>
-                    BSCS
-                </option>
-
-                <option value="BSIT"
-                    {% if student.program == "BSIT" %}selected{% endif %}>
-                    BSIT
-                </option>
-
-                <option value="BSIS"
-                    {% if student.program == "BSIS" %}selected{% endif %}>
-                    BSIS
-                </option>
-
-                <option value="BSEd"
-                    {% if student.program == "BSEd" %}selected{% endif %}>
-                    BSEd
-                </option>
+                <option value="">Select Program</option>
+                {% for department, offered in programs|groupby('department_name') %}
+                    <optgroup label="{{ department }}">
+                        {% for program in offered %}
+                            <option value="{{ program.id }}"
+                                {% if student.program_id == program.id %}selected{% endif %}>
+                                {{ program.program_code }} - {{ program.program_name }}
+                            </option>
+                        {% endfor %}
+                    </optgroup>
+                {% endfor %}
 
             </select>
 
             <!-- Year Level -->
             <label for="year_level"><strong>Year Level</strong></label>
-
             <select
                 id="year_level"
                 name="year_level"
                 required>
 
-                <option value="1"
-                    {% if student.year_level == "1" %}selected{% endif %}>
-                    1st Year
-                </option>
-
-                <option value="2"
-                    {% if student.year_level == "2" %}selected{% endif %}>
-                    2nd Year
-                </option>
-
-                <option value="3"
-                    {% if student.year_level == "3" %}selected{% endif %}>
-                    3rd Year
-                </option>
-
-                <option value="4"
-                    {% if student.year_level == "4" %}selected{% endif %}>
-                    4th Year
-                </option>
+                <option value="">Select Year Level</option>
+                {% for year in year_levels %}
+                    <option value="{{ year }}"
+                        {% if student.year_level == year %}selected{% endif %}>
+                        Year {{ year }}
+                    </option>
+                {% endfor %}
 
             </select>
 
@@ -128,7 +85,8 @@
                 type="text"
                 id="section"
                 name="section"
-                value="{{ student.section }}"
+                value="{{ student.section or '' }}"
+                maxlength="100"
                 required>
 
             <!-- Student Password -->

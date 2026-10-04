@@ -62,13 +62,21 @@ def no_database(monkeypatch):
         yield object()
 
     monkeypatch.setattr(subjects_module, "db_cursor", fake_cursor)
+
+    # The subject form offers instructor accounts to choose from (DM-4), so
+    # rendering it reads them. None here: nothing in this file is about the
+    # list.
+    monkeypatch.setattr(
+        subjects_module.instructors_repo, "all_instructors", lambda _cursor: []
+    )
+
     return subjects_module
 
 
 COMPLETE_FORM = {
     "subject_code": "SEC-TEST-101",
     "subject_name": "Nothing In Particular",
-    "instructor": "",
+    "instructor_id": "",
     "day": "Monday",
     "course": "BSIT",
     "section": "A",
@@ -110,6 +118,7 @@ def test_editing_a_subject_that_exists_still_renders(
             "subject_code": "SEC-TEST-101",
             "subject_name": "Nothing In Particular",
             "instructor": "",
+            "instructor_id": None,
             "day": "Monday",
             "course": "BSIT",
             "section": "A",
@@ -157,7 +166,7 @@ def test_the_optional_fields_stay_optional(client, no_database, monkeypatch):
         lambda _cursor, *values: inserted.append(values),
     )
 
-    form = dict(COMPLETE_FORM, instructor="", time_in="", time_out="")
+    form = dict(COMPLETE_FORM, instructor_id="", time_in="", time_out="")
 
     sign_in(client)
     response = client.post("/add_subject", data=form, follow_redirects=False)
