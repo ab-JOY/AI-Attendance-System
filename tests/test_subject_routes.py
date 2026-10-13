@@ -70,15 +70,29 @@ def no_database(monkeypatch):
         subjects_module.instructors_repo, "all_instructors", lambda _cursor: []
     )
 
+    # ...and the programs a subject can be taught to (DM-7).
+    monkeypatch.setattr(
+        subjects_module.academics_repo, "programs", lambda _cursor: []
+    )
+
+    # The section the form names, resolved without a database. SECTION_ID is
+    # what the routes are then expected to hand the repository.
+    monkeypatch.setattr(
+        subjects_module, "section_id_for", lambda _cursor, _placement: SECTION_ID
+    )
+
     return subjects_module
 
+
+SECTION_ID = 41
 
 COMPLETE_FORM = {
     "subject_code": "SEC-TEST-101",
     "subject_name": "Nothing In Particular",
     "instructor_id": "",
     "day": "Monday",
-    "course": "BSIT",
+    "program_id": "5",
+    "year_level": "4",
     "section": "A",
     "time_in": "08:00",
     "time_out": "10:00",
@@ -122,6 +136,11 @@ def test_editing_a_subject_that_exists_still_renders(
             "day": "Monday",
             "course": "BSIT",
             "section": "A",
+            "section_id": SECTION_ID,
+            "program_id": 5,
+            "year_level": 4,
+            "typed_course": "BSIT",
+            "typed_section": "A",
             "time_in": "08:00",
             "time_out": "10:00",
         },
@@ -203,3 +222,98 @@ def test_a_database_failure_is_a_500_with_context(
         "the log does not say which subject failed - the catch-all handler "
         "records only the URL, which is R14"
     )
+
+
+# ---------------------------------------------------------------------------
+# DM-7 - a subject is taught to a section
+#
+# Course and Section were two text boxes. What was typed in them linked the
+# subject to no program, so the Classes list on the registration form could
+# only offer every subject to every student. The form takes a program, a year
+# level and a section now - a student's placement, parsed by the same function
+# - and the routes hand the repository the `sections.id` that names.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("route", ["/add_subject", "/update_subject/7"])
+def test_the_section_reaches_the_repository_in_its_place(
+    client, no_database, monkeypatch, route
+):
+    """
+    ⚠️ Positional, so pinned by position. `insert()` and `update()` take the
+    section id between the day and the times; one place to the left and it is
+    written as the day, on a statement that succeeds.
+    """
+    written = []
+
+    monkeypatch.setattr(
+        no_database.subjects_repo, "insert",
+        lambda _cursor, *values: written.append(values),
+    )
+    monkeypatch.setattr(
+        no_database.subjects_repo, "update",
+        lambda _cursor, _id, *values: written.append(values),
+    )
+
+    sign_in(client)
+    response = client.post(route, data=COMPLETE_FORM, follow_redirects=False)
+
+    assert response.status_code == 302
+    assert written == [(
+        "SEC-TEST-101", "Nothing In Particular", None, "Monday",
+        SECTION_ID, "08:00", "10:00",
+    )]
+
+
+@pytest.mark.parametrize(
+    "missing, named",
+    [
+        ("program_id", "program"),
+        ("year_level", "year level"),
+        ("section", "Section"),
+    ],
+)
+def test_a_subject_with_no_section_is_refused_by_name(
+    client, no_database, monkeypatch, missing, named
+):
+    """
+    Required, unlike the instructor and the times: a subject for no section is
+    a subject for no program, which is the state this change exists to end.
+    """
+    written = []
+
+    monkeypatch.setattr(
+        no_database.subjects_repo, "insert",
+        lambda _cursor, *values: written.append(values),
+    )
+
+    form = dict(COMPLETE_FORM, **{missing: ""})
+
+    sign_in(client)
+    response = client.post("/add_subject", data=form)
+
+    assert response.status_code == 400
+    assert named in response.get_data(as_text=True)
+    assert written == []
+
+
+def test_a_program_deleted_under_the_form_is_refused_not_written(
+    client, no_database, monkeypatch
+):
+    """`section_id_for()` answers None when the program is gone."""
+    written = []
+
+    monkeypatch.setattr(
+        no_database, "section_id_for", lambda _cursor, _placement: None
+    )
+    monkeypatch.setattr(
+        no_database.subjects_repo, "insert",
+        lambda _cursor, *values: written.append(values),
+    )
+
+    sign_in(client)
+    response = client.post("/add_subject", data=COMPLETE_FORM)
+
+    assert response.status_code == 400
+    assert "no longer exists" in response.get_data(as_text=True)
+    assert written == [], "a subject was written with no section"

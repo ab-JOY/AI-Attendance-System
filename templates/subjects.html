@@ -59,19 +59,45 @@
                 <option value="Friday">Friday</option>
             </select>
 
-            <label for="course">Course</label>
-            <input
-                type="text"
-                id="course"
-                name="course"
-                placeholder="Course"
-                required>
+            {#
+                DM-7. Which section the subject is taught to: a program, a
+                year level and a section, the same three fields as where a
+                student belongs. These were two text boxes, Course and
+                Section, and what was typed in them linked the subject to no
+                program - so the Classes list on the registration form could
+                only offer every subject to every student.
+
+                Type the section the way it is typed for its students: the
+                class list is filled from the students of that section.
+            #}
+            <label for="program_id">Program</label>
+            <select id="program_id" name="program_id" required>
+                <option value="">Select Program</option>
+                {% for department, offered in programs|groupby('department_name') %}
+                    <optgroup label="{{ department }}">
+                        {% for program in offered %}
+                            <option value="{{ program.id }}">
+                                {{ program.program_code }} - {{ program.program_name }}
+                            </option>
+                        {% endfor %}
+                    </optgroup>
+                {% endfor %}
+            </select>
+
+            <label for="year_level">Year Level</label>
+            <select id="year_level" name="year_level" required>
+                <option value="">Select Year Level</option>
+                {% for year in year_levels %}
+                    <option value="{{ year }}">Year {{ year }}</option>
+                {% endfor %}
+            </select>
 
             <label for="section">Section</label>
             <input
                 type="text"
                 id="section"
                 name="section"
+                maxlength="100"
                 placeholder="Section"
                 required>
 
@@ -106,7 +132,8 @@
             <th>Subject</th>
             <th>Instructor</th>
             <th>Day</th>
-            <th>Course</th>
+            <th>Program</th>
+            <th>Year</th>
             <th>Section</th>
             <th>Time In</th>
             <th>Time Out</th>
@@ -126,8 +153,16 @@
                 {% endif %}
             </td>
             <td>{{ subject.day }}</td>
-            <td>{{ subject.course }}</td>
-            <td>{{ subject.section }}</td>
+            <td>{{ subject.course or "—" }}</td>
+            <td>{{ subject.year_level or "—" }}</td>
+            <td>
+                {{ subject.section or "—" }}
+                {# Typed before the form offered a list, and matching no one
+                   section: shown, and said so. Edit links it. #}
+                {% if not subject.section_id %}
+                    <span class="hint">(not linked)</span>
+                {% endif %}
+            </td>
             <td>{{ subject.time_in }}</td>
             <td>{{ subject.time_out }}</td>
 

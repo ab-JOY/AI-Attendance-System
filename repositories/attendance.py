@@ -25,20 +25,27 @@ same thing for the same reason.
 from __future__ import annotations
 
 from repositories.students import ACADEMIC_JOIN
+from repositories.subjects import offering_join, offering_section
+
+# The section an offering is taught to, read through `subjects.section_id`
+# (migration 010) and falling back to the typed text for an offering that is
+# not linked. `subjects` is aliased `sub` in every query in this file.
+OFFERING_SECTION = f"{offering_section('sub')} AS section"
+OFFERING_JOIN = offering_join("sub")
 
 # The register row as every screen wants to see it: the *joined* student name,
 # never a copy stored on the attendance row. There used to be a
 # `student_name` column here - a copy taken at write time that `update_student`
 # never refreshed - so a renamed student appeared under their old name for
 # ever.
-REGISTER_COLUMNS = """
+REGISTER_COLUMNS = f"""
     a.id,
     a.attendance_date,
     a.student_id,
     s.name AS student_name,
     sub.subject_code,
     sub.subject_name,
-    sub.section,
+    {OFFERING_SECTION},
     COALESCE(i.fullname, sub.instructor) AS instructor,
     a.time_in,
     a.status,
@@ -56,11 +63,12 @@ REGISTER_COLUMNS = """
 # The student's placement comes through `students.ACADEMIC_JOIN` - the same
 # LEFT JOINs the student lists use, so the register and the roster cannot
 # disagree about where somebody belongs. `section` above is the *offering's*
-# typed section; `student_section` is the student's own.
+# section; `student_section` is the student's own.
 REGISTER_JOIN = f"""
     FROM attendance a
     JOIN students s ON s.student_id = a.student_id
     JOIN subjects sub ON sub.id = a.subject_id
+    {OFFERING_JOIN}
     LEFT JOIN instructors i ON i.id = sub.instructor_id
     {ACADEMIC_JOIN}
 """
@@ -430,13 +438,14 @@ def sessions_filtered(cursor, selected_date=None, subject_id=None,
             ses.started_by,
             sub.subject_code,
             sub.subject_name,
-            sub.section,
+            {OFFERING_SECTION},
             COALESCE(i.fullname, sub.instructor) AS instructor,
             COALESCE(SUM(a.status = 'Present'), 0) AS present,
             COALESCE(SUM(a.status = 'Late'), 0) AS late,
             COALESCE(SUM(a.status = 'Absent'), 0) AS absent
         FROM attendance_sessions ses
         JOIN subjects sub ON sub.id = ses.subject_id
+        {OFFERING_JOIN}
         LEFT JOIN instructors i ON i.id = sub.instructor_id
         {marks}
         WHERE 1=1
@@ -618,7 +627,7 @@ def record(cursor, attendance_id):
             sub.instructor_id,
             sub.subject_code,
             sub.subject_name,
-            sub.section,
+            {OFFERING_SECTION},
             a.time_in,
             a.status
         {REGISTER_JOIN}

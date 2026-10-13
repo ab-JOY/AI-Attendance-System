@@ -62,6 +62,55 @@ def _manage_students_page(cursor, records, filters=None, query=""):
     )
 
 
+def class_groups(offerings):
+    """
+    The offerings as the Classes list shows them: one group per section (DM-7).
+
+    Each group carries the program, year level and section its subjects are
+    taught to, which is what lets the form show a student only their own
+    program's subjects and pick out their own section's. The section is the
+    group's heading, so it is not repeated after every subject name.
+
+    Offerings linked to no section come last, in one group with no program:
+    they belong to no program, so they are offered to every one.
+    """
+    groups = {}
+
+    for offering in offerings:
+        groups.setdefault(offering["section_id"], []).append(offering)
+
+    unlinked = groups.pop(None, [])
+
+    listed = [
+        {
+            "program_id": subjects[0]["program_id"],
+            "year_level": subjects[0]["year_level"],
+            "section": subjects[0]["section"],
+            "label": (
+                f"{subjects[0]['course']} - Year {subjects[0]['year_level']}"
+                f" - Section {subjects[0]['section']}"
+            ),
+            "subjects": subjects,
+        }
+        for subjects in groups.values()
+    ]
+
+    listed.sort(key=lambda group: (
+        group["program_id"], group["year_level"], group["section"].lower()
+    ))
+
+    if unlinked:
+        listed.append({
+            "program_id": None,
+            "year_level": None,
+            "section": None,
+            "label": "Not linked to a section yet - offered to every program",
+            "subjects": unlinked,
+        })
+
+    return listed
+
+
 @students_bp.route('/students')
 @role_required('admin')
 def students():
@@ -76,7 +125,7 @@ def students():
     return render_template(
         'students.html',
         students=records,
-        subjects=offerings,
+        class_groups=class_groups(offerings),
         programs=programs,
         year_levels=academics_repo.YEAR_LEVELS,
     )

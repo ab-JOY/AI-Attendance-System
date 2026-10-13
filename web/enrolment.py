@@ -381,8 +381,18 @@ def enrol_finish():
                     # recognised by the model and refused by the register,
                     # which is the whole finding; a partial write must not be
                     # able to produce it.
+                    #
+                    # DM-7. Only the subjects of the student's own program:
+                    # the form shows no others, and this is what refuses one
+                    # that was named anyway. An Unassigned student has no
+                    # program to compare with and is not narrowed.
                     live = subjects_repo.existing_ids(
-                        cursor, chosen_subject_ids
+                        cursor,
+                        chosen_subject_ids,
+                        program_id=(
+                            placement["program_id"]
+                            if section_id is not None else None
+                        ),
                     )
 
                     enrolments_repo.enrol_many(cursor, student_id, live)
@@ -390,12 +400,13 @@ def enrol_finish():
                     missing = set(chosen_subject_ids) - set(live)
 
                     if missing:
-                        # Deleted between the form and the end of the capture.
-                        # Not fatal - the student and the classes that do exist
-                        # are still correct - but it must not pass silently.
+                        # Deleted between the form and the end of the capture,
+                        # or not offered to this program. Not fatal - the
+                        # student and the classes that are theirs are still
+                        # correct - but it must not pass silently.
                         logger.warning(
                             "Enrolled %s into %d of %d chosen subjects; %s no "
-                            "longer exist",
+                            "longer exist or are not offered to their program",
                             student_id, len(live), len(chosen_subject_ids),
                             sorted(missing),
                         )

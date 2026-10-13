@@ -205,3 +205,142 @@ def test_the_instructor_list_draws_one_heading_per_department(client, monkeypatc
 
     assert headings_of(client.get("/manage_instructors")) == expected
     assert headings_of(client.get("/instructors")) == expected
+
+
+# ---------------------------------------------------------------------------
+# DM-7 - the Classes list on the registration form
+#
+# A subject is taught to a section, so the list is one group per section and
+# each group says which program it belongs to. static/js/students.js shows the
+# chosen program's groups and selects the student's own; what is pinned here
+# is everything that script reads, and that the section is the group's heading
+# rather than a suffix on every subject name.
+# ---------------------------------------------------------------------------
+
+
+def offering(subject_id, code, section_id, program_id=None, course=None,
+             year=None, section=None):
+    return {
+        "id": subject_id,
+        "subject_code": code,
+        "subject_name": "A Subject",
+        "course": course,
+        "section": section,
+        "time_in": None,
+        "section_id": section_id,
+        "program_id": program_id,
+        "year_level": year,
+    }
+
+
+OFFERINGS = [
+    offering(1, "SEC-TEST-101", 12, 5, "BSCS", 4, "B"),
+    offering(2, "SEC-TEST-102", 11, 5, "BSCS", 1, "B"),
+    offering(3, "SEC-TEST-103", 12, 5, "BSCS", 4, "B"),
+    offering(4, "SEC-TEST-201", 20, 6, "BSN", 2, "A"),
+    offering(5, "SEC-TEST-999", None, None, "typed course", None, "typed"),
+]
+
+
+class ClassPicker(HTMLParser):
+    """The <optgroup>s of the class picker, with the options inside each."""
+
+    def __init__(self):
+        super().__init__()
+        self.groups = []
+        self._in_picker = False
+        self._in_option = False
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+
+        if tag == "select":
+            self._in_picker = "data-class-picker" in attrs
+        elif tag == "optgroup" and self._in_picker:
+            self.groups.append({**attrs, "options": []})
+        elif tag == "option" and self._in_picker:
+            self._in_option = True
+            self.groups[-1]["options"].append([attrs["value"], ""])
+
+    def handle_endtag(self, tag):
+        if tag == "select":
+            self._in_picker = False
+        elif tag == "option":
+            self._in_option = False
+
+    def handle_data(self, data):
+        if self._in_option:
+            self.groups[-1]["options"][-1][1] += data
+
+
+def class_picker(client, monkeypatch, offerings):
+    import web.students as students_module
+
+    monkeypatch.setattr(
+        students_module.subjects_repo, "for_selection", lambda _cursor: offerings
+    )
+
+    response = client.get("/students")
+
+    assert response.status_code == 200, response.get_data(as_text=True)[:400]
+
+    parser = ClassPicker()
+    parser.feed(response.get_data(as_text=True))
+
+    return parser.groups
+
+
+def test_the_classes_are_grouped_by_the_section_each_is_taught_to(
+    client, student_lists, monkeypatch
+):
+    groups = class_picker(client, monkeypatch, OFFERINGS)
+
+    assert [
+        (
+            group["label"],
+            group["data-program-id"],
+            group["data-year-level"],
+            group["data-section"],
+            [value for value, _text in group["options"]],
+        )
+        for group in groups
+    ] == [
+        ("BSCS - Year 1 - Section B", "5", "1", "B", ["2"]),
+        ("BSCS - Year 4 - Section B", "5", "4", "B", ["1", "3"]),
+        ("BSN - Year 2 - Section A", "6", "2", "A", ["4"]),
+        # No program: static/js/students.js offers it to every one.
+        (
+            "Not linked to a section yet - offered to every program",
+            "", "", "", ["5"],
+        ),
+    ]
+
+
+def test_a_subject_is_named_without_its_section(client, student_lists, monkeypatch):
+    """
+    The section is the heading. It used to be printed after every subject
+    name - "(4B)" - which was the only way to tell two offerings of one
+    subject apart, and was typed text that matched nothing.
+    """
+    groups = class_picker(client, monkeypatch, OFFERINGS)
+
+    names = [
+        " ".join(text.split())
+        for group in groups
+        for _value, text in group["options"]
+    ]
+
+    assert names == [
+        "SEC-TEST-102 - A Subject",
+        "SEC-TEST-101 - A Subject",
+        "SEC-TEST-103 - A Subject",
+        "SEC-TEST-201 - A Subject",
+        "SEC-TEST-999 - A Subject",
+    ]
+
+
+def test_the_registration_page_loads_the_script_that_filters_the_classes(
+    client, student_lists
+):
+    """Without it every program's subjects are listed, as before."""
+    assert "js/students.js" in client.get("/students").get_data(as_text=True)

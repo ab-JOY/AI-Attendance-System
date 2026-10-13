@@ -63,21 +63,55 @@
                 <option value="Friday">Friday</option>
             </select>
 
-            <label for="course">Course</label>
-            <input
-                type="text"
-                id="course"
-                name="course"
-                value="{{ subject.course }}"
-                required>
+            {#
+                DM-7. Which section the subject is taught to - a program, a
+                year level and a section, chosen rather than typed as a Course
+                and a Section that linked it to no program.
+            #}
+            <label for="program_id">Program</label>
+            <select id="program_id" name="program_id" required>
+                <option value="">Select Program</option>
+                {% for department, offered in programs|groupby('department_name') %}
+                    <optgroup label="{{ department }}">
+                        {% for program in offered %}
+                            <option value="{{ program.id }}"
+                                {% if subject.program_id == program.id %}selected{% endif %}>
+                                {{ program.program_code }} - {{ program.program_name }}
+                            </option>
+                        {% endfor %}
+                    </optgroup>
+                {% endfor %}
+            </select>
+
+            <label for="year_level">Year Level</label>
+            <select id="year_level" name="year_level" required>
+                <option value="">Select Year Level</option>
+                {% for year in year_levels %}
+                    <option value="{{ year }}"
+                        {% if subject.year_level == year %}selected{% endif %}>
+                        Year {{ year }}
+                    </option>
+                {% endfor %}
+            </select>
 
             <label for="section">Section</label>
             <input
                 type="text"
                 id="section"
                 name="section"
-                value="{{ subject.section }}"
+                value="{{ subject.section or '' }}"
+                maxlength="100"
                 required>
+
+            {% if not subject.section_id %}
+                <p class="hint">
+                    Previously typed as course
+                    "{{ subject.typed_course or '' }}", section
+                    "{{ subject.typed_section or '' }}", which did not name
+                    one section. Choose the program and year level to link
+                    this subject to its section.
+                </p>
+            {% endif %}
 
             <label for="time_in">Time In</label>
             <input

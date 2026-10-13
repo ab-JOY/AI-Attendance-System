@@ -70,12 +70,11 @@ export default function StudentRegistrationScreen({ navigation }) {
       !formData.first_name ||
       !formData.last_name ||
       !formData.password ||
-      !formData.college_department ||
       !formData.program ||
       !formData.year_level ||
       !formData.section
     ) {
-      setError('Student number, first name, last name, password, college, program, year level, and section are required.');
+      setError('Student number, first name, last name, password, program, year level, and section are required.');
       return;
     }
 
@@ -105,34 +104,48 @@ export default function StudentRegistrationScreen({ navigation }) {
     }
   };
 
-  const [colleges, setColleges] = useState([
-    'College of Computing',
-    'College of Engineering',
-    'College of Business',
-    'College of Education',
-  ]);
+  // Every program with its full name and the college it belongs to, from
+  // /api/colleges_programs `structure`. The picker shows the name - "BSCS" on
+  // its own told a new student nothing - and the college is the program's, so
+  // it is shown rather than asked for: the two pickers used to be independent
+  // and a student could choose a college that does not own their program.
+  //
+  // The two below are only what is offered when the server cannot be reached.
   const [programs, setPrograms] = useState([
-    'BSCS',
-    'BSIT',
-    'BSIS',
-    'BSEd',
+    {
+      program: 'BSCS',
+      program_name: 'Bachelor of Science in Computer Science',
+      college_department: 'College of Computing and Information Technology',
+    },
+    {
+      program: 'BSIT',
+      program_name: 'Bachelor of Science in Information Technology',
+      college_department: 'College of Computing and Information Technology',
+    },
   ]);
 
   useEffect(() => {
-    // Fetch dynamic colleges and programs from DB
     client.get('/api/colleges_programs')
       .then(res => {
-        if (res.data.success) {
-          if (res.data.colleges && res.data.colleges.length > 0) {
-            setColleges(res.data.colleges);
-          }
-          if (res.data.programs && res.data.programs.length > 0) {
-            setPrograms(res.data.programs);
-          }
+        if (res.data.success && res.data.structure && res.data.structure.length > 0) {
+          setPrograms(res.data.structure);
         }
       })
       .catch(err => console.warn('Could not fetch options:', err));
   }, []);
+
+  const programLabel = (entry) => `${entry.program} - ${entry.program_name}`;
+  const chosenProgram = programs.find((entry) => entry.program === formData.program);
+
+  // The server takes the program's code; the label is only what is shown.
+  const selectProgram = (label) => {
+    const entry = programs.find((candidate) => programLabel(candidate) === label);
+
+    if (entry) {
+      updateForm('program', entry.program);
+      updateForm('college_department', entry.college_department);
+    }
+  };
 
   return (
     <KeyboardAvoidingView
@@ -180,17 +193,14 @@ export default function StudentRegistrationScreen({ navigation }) {
 
         <Text style={styles.sectionTitle}>Academic Information</Text>
         <Dropdown
-          placeholder="Select College"
-          value={formData.college_department}
-          options={colleges}
-          onSelect={(val) => updateForm('college_department', val)}
-        />
-        <Dropdown
           placeholder="Select Program"
-          value={formData.program}
-          options={programs}
-          onSelect={(val) => updateForm('program', val)}
+          value={chosenProgram ? programLabel(chosenProgram) : ''}
+          options={programs.map(programLabel)}
+          onSelect={selectProgram}
         />
+        {chosenProgram ? (
+          <Text style={styles.collegeText}>{chosenProgram.college_department}</Text>
+        ) : null}
         <Input
           placeholder="Year Level"
           value={formData.year_level}
@@ -229,6 +239,11 @@ const styles = StyleSheet.create({
     ...typography.h3,
     marginTop: spacing.md,
     marginBottom: spacing.sm,
+  },
+  collegeText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    marginBottom: spacing.md,
   },
   registerButton: {
     marginTop: spacing.xl,

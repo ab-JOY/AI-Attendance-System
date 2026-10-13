@@ -305,7 +305,8 @@ def test_a_fresh_database_is_seeded_with_the_structure(scratch_database):
         )
         programs = cursor.fetchone()[0]
 
-    assert (departments, programs) == (9, 9)
+    # Nine from 009, and Information Technology from 010 (DM-8).
+    assert (departments, programs) == (9, 10)
 
 
 # ===========================================================================
@@ -730,7 +731,8 @@ def test_a_subject_is_assigned_to_an_instructor_account(client, two_instructors)
         "subject_name": "Integration Testing",
         "instructor_id": str(two_instructors["mine"]),
         "day": "Monday",
-        "course": "BSCS",
+        "program_id": str(program_id_of("BSCS")),
+        "year_level": "4",
         "section": "B",
         "time_in": "08:00",
         "time_out": "10:00",
@@ -928,3 +930,321 @@ def test_the_sessions_table_follows_the_placement_filter(mixed_register):
     assert int(whole["present"]) == 2
     assert int(first_years["present"]) == 1
     assert nobody == []
+
+
+# ===========================================================================
+# Migration 010 - a subject is taught to a section (DM-7, DM-8)
+# ===========================================================================
+
+
+def program_id_of(code):
+    from infra.db import db_cursor
+    from repositories import academics as academics_repo
+
+    with db_cursor() as cursor:
+        return academics_repo.program_id_for_code(cursor, code)
+
+
+def make_offering(cursor, subject_code, program="BSCS", year_level=4,
+                  section="B", **overrides):
+    """A subject linked to a section, as the subject form writes one."""
+    from repositories import academics as academics_repo
+
+    subject_id = make_subject(
+        cursor, subject_code=subject_code, course=None, section=None, **overrides
+    )
+
+    section_id = academics_repo.section_for(
+        cursor, academics_repo.program_id_for_code(cursor, program),
+        year_level, section,
+    )
+
+    cursor.execute(
+        "UPDATE subjects SET section_id = %s WHERE id = %s",
+        (section_id, subject_id),
+    )
+
+    return subject_id
+
+
+def section_of_subject(cursor, subject_id):
+    """`(program_code, year_level, section_name)` the subject is linked to."""
+    cursor.execute(
+        """
+        SELECT p.program_code, sec.year_level, sec.section_name
+        FROM subjects s
+        JOIN sections sec ON sec.id = s.section_id
+        JOIN programs p ON p.id = sec.program_id
+        WHERE s.id = %s
+        """,
+        (subject_id,),
+    )
+
+    return cursor.fetchone()
+
+
+def test_010_links_a_subject_to_the_one_section_its_text_names(database_at_008):
+    """
+    The deployed shape: `course` BSCS, `section` 4B, and exactly one BSCS
+    section called 4B - which the typed text never said was fourth year.
+    """
+    cursor = database_at_008.cursor
+    legacy_student(cursor, "INT-TEST-0001", "College of Computing", "BSCS", 4, "4B")
+    subject = make_subject(cursor, course=" BSCS ", section="4b")
+    database_at_008.migrate()
+
+    assert section_of_subject(cursor, subject) == ("BSCS", 4, "4B")
+
+
+def test_010_does_not_link_a_section_name_two_year_levels_share(database_at_008):
+    """
+    "BSCS, section B" with a first-year B and a second-year B names neither.
+    Linking it to one would fill that subject's class list from the wrong
+    year, so it is left for a person - and its typed text is left with it.
+    """
+    cursor = database_at_008.cursor
+    legacy_student(cursor, "INT-TEST-0001", "", "BSCS", 1, "B")
+    legacy_student(cursor, "INT-TEST-0002", "", "BSCS", 2, "B")
+    subject = make_subject(cursor, course="BSCS", section="B")
+    stranger = make_subject(
+        cursor, subject_code="INT-TEST-202", course="BSCS", section="Z"
+    )
+    database_at_008.migrate()
+
+    cursor.execute(
+        "SELECT id, section_id, course, section FROM subjects ORDER BY id"
+    )
+
+    assert cursor.fetchall() == [
+        (subject, None, "BSCS", "B"),
+        (stranger, None, "BSCS", "Z"),
+    ]
+
+
+def test_010_gives_bsit_to_information_technology(database_at_008):
+    """
+    DM-8. `BSIT` was Industrial Technology and there was no Information
+    Technology. The code is unique, so Industrial Technology is re-coded - and
+    keeps its row, so a student already placed under it has not been moved
+    into a different program by a rename.
+    """
+    cursor = database_at_008.cursor
+    legacy_student(cursor, "INT-TEST-0001", "", "BSIT", 2, "A")
+    database_at_008.migrate()
+
+    cursor.execute(
+        """
+        SELECT p.program_code, p.program_name, d.department_code
+        FROM programs p
+        JOIN departments d ON d.id = p.department_id
+        WHERE p.program_name LIKE '%Technology'
+        ORDER BY p.program_code
+        """
+    )
+
+    assert cursor.fetchall() == [
+        ("BSINDTECH", "Bachelor of Science in Industrial Technology", "CIT"),
+        ("BSIT", "Bachelor of Science in Information Technology", "CCIT"),
+    ]
+
+    assert placement_of(cursor, "INT-TEST-0001") == ("CIT", "BSINDTECH", 2, "A")
+
+
+def test_the_subject_form_links_the_offering_to_a_section(client, scratch_database):
+    """
+    The route end to end: the form names a program, a year and a section, the
+    section is found or created, and every picker then reads the program code
+    and section name back under the keys it always used.
+    """
+    from infra.db import db_cursor
+    from repositories import subjects as subjects_repo
+
+    sign_in_as(client)
+
+    response = client.post("/add_subject", data={
+        "subject_code": "INT-TEST-303",
+        "subject_name": "Integration Testing",
+        "instructor_id": "",
+        "day": "Monday",
+        "program_id": str(program_id_of("BSN")),
+        "year_level": "2",
+        "section": "C",
+        "time_in": "08:00",
+        "time_out": "10:00",
+    })
+
+    assert response.status_code == 302
+
+    with db_cursor(dictionary=True) as cursor:
+        (offering,) = subjects_repo.for_selection(cursor)
+        (counted,) = subjects_repo.for_selection_with_class_list_size(cursor)
+        (listed,) = subjects_repo.all_subjects(cursor)
+
+        cursor.execute("SELECT course, section FROM subjects")
+        typed = cursor.fetchone()
+
+    assert (offering["course"], offering["year_level"], offering["section"]) == (
+        "BSN", 2, "C"
+    )
+    assert offering["program_id"] == program_id_of("BSN")
+    assert counted["enrolled"] == 0
+    assert (listed["course"], listed["section"], listed["day"]) == ("BSN", "C", "Monday")
+    assert typed == {"course": None, "section": None}, (
+        "the typed columns were written again; the section is the fact"
+    )
+
+
+def test_an_unlinked_subject_still_reads_its_typed_text(scratch_database):
+    """What migration 010 could not link keeps showing what was typed."""
+    from infra.db import db_cursor
+    from repositories import subjects as subjects_repo
+
+    with db_cursor(dictionary=True, commit=True) as cursor:
+        make_subject(cursor, course="BSCS", section="B")
+
+    with db_cursor(dictionary=True) as cursor:
+        (offering,) = subjects_repo.for_selection(cursor)
+
+    assert (offering["course"], offering["section"]) == ("BSCS", "B")
+    assert offering["section_id"] is None and offering["program_id"] is None
+
+
+def test_only_the_subjects_of_a_students_program_can_be_chosen(scratch_database):
+    """
+    The guard behind the Classes list. A nursing subject named in a request
+    for a computer science student is dropped; a subject linked to no section
+    belongs to no program and is offered to both.
+    """
+    from infra.db import db_cursor
+    from repositories import subjects as subjects_repo
+
+    with db_cursor(commit=True) as cursor:
+        computing = make_offering(cursor, "INT-TEST-101", program="BSCS")
+        nursing = make_offering(cursor, "INT-TEST-202", program="BSN")
+        unlinked = make_subject(cursor, subject_code="INT-TEST-303")
+
+    asked = [computing, nursing, unlinked, 999999999]
+
+    with db_cursor() as cursor:
+        anybody = subjects_repo.existing_ids(cursor, asked)
+        for_computing = subjects_repo.existing_ids(
+            cursor, asked, program_id=program_id_of("BSCS")
+        )
+        for_nursing = subjects_repo.existing_ids(
+            cursor, asked, program_id=program_id_of("BSN")
+        )
+
+    assert anybody == [computing, nursing, unlinked]
+    assert for_computing == [computing, unlinked]
+    assert for_nursing == [nursing, unlinked]
+
+
+def test_a_class_list_offers_the_subjects_own_program_its_section_first(
+    scratch_database,
+):
+    from infra.db import db_cursor
+    from repositories import enrolments as enrolments_repo
+    from repositories import subjects as subjects_repo
+
+    with db_cursor(dictionary=True, commit=True) as cursor:
+        subject_id = make_offering(cursor, "INT-TEST-101", "BSCS", 4, "B")
+        make_student(cursor, "INT-TEST-0001", name="Zed Own Section",
+                     program="BSCS", year_level=4, section="B")
+        make_student(cursor, "INT-TEST-0002", name="Abe Other Section",
+                     program="BSCS", year_level=1, section="A")
+        make_student(cursor, "INT-TEST-0003", name="Ann Other Program",
+                     program="BSN", year_level=4, section="B")
+        make_student(cursor, "INT-TEST-0004", name="Already Enrolled",
+                     program="BSCS", year_level=4, section="B")
+        make_enrolment(cursor, "INT-TEST-0004", subject_id)
+
+    with db_cursor(dictionary=True) as cursor:
+        subject = subjects_repo.summary(cursor, subject_id)
+        offered = enrolments_repo.not_enrolled_in(
+            cursor, subject_id,
+            program_id=subject["program_id"], section_id=subject["section_id"],
+        )
+        everybody = enrolments_repo.not_enrolled_in(cursor, subject_id)
+
+    assert [(row["student_id"], int(row["own_section"])) for row in offered] == [
+        ("INT-TEST-0001", 1),
+        ("INT-TEST-0002", 0),
+    ]
+    assert {row["student_id"] for row in everybody} == {
+        "INT-TEST-0001", "INT-TEST-0002", "INT-TEST-0003",
+    }
+
+
+def test_adding_a_section_enrols_exactly_that_section(client, scratch_database):
+    """
+    One button for the usual class list. It adds the offering's own section -
+    not the same section name in another year, not another program - and a
+    second press adds nobody and says so.
+    """
+    from infra.db import db_cursor
+
+    with db_cursor(commit=True) as cursor:
+        subject_id = make_offering(cursor, "INT-TEST-101", "BSCS", 4, "B")
+        make_student(cursor, "INT-TEST-0001", program="BSCS", year_level=4, section="B")
+        make_student(cursor, "INT-TEST-0002", program="BSCS", year_level=4, section="B")
+        make_student(cursor, "INT-TEST-0003", program="BSCS", year_level=1, section="B")
+        make_student(cursor, "INT-TEST-0004", program="BSN", year_level=4, section="B")
+        make_enrolment(cursor, "INT-TEST-0001", subject_id)
+
+    sign_in_as(client)
+
+    first = client.post(
+        "/enrol_section", data={"subject_id": str(subject_id)},
+        follow_redirects=True,
+    )
+    again = client.post(
+        "/enrol_section", data={"subject_id": str(subject_id)},
+        follow_redirects=True,
+    )
+
+    with db_cursor() as cursor:
+        cursor.execute(
+            "SELECT student_id FROM enrolments WHERE subject_id = %s "
+            "ORDER BY student_id",
+            (subject_id,),
+        )
+        enrolled = [row[0] for row in cursor.fetchall()]
+
+    assert enrolled == ["INT-TEST-0001", "INT-TEST-0002"]
+    assert "1 student of section B was added" in first.get_data(as_text=True)
+    assert "already on the class list" in again.get_data(as_text=True)
+
+
+def test_a_subject_with_no_section_cannot_have_one_added(client, scratch_database):
+    from infra.db import db_cursor
+
+    with db_cursor(commit=True) as cursor:
+        subject_id = make_subject(cursor)
+        make_student(cursor, "INT-TEST-0001")
+
+    sign_in_as(client)
+
+    response = client.post("/enrol_section", data={"subject_id": str(subject_id)})
+
+    assert response.status_code == 400
+
+    with db_cursor() as cursor:
+        cursor.execute("SELECT COUNT(*) FROM enrolments")
+        assert cursor.fetchone()[0] == 0
+
+
+def test_the_register_reports_the_offerings_linked_section(scratch_database):
+    """Reports and the export read `section` through the same link."""
+    from infra.db import db_cursor
+    from repositories import attendance as attendance_repo
+
+    with db_cursor(dictionary=True, commit=True) as cursor:
+        subject_id = make_offering(cursor, "INT-TEST-101", "BSCS", 4, "B")
+        make_student(cursor, "INT-TEST-0001", program="BSCS", year_level=1, section="A")
+        make_enrolment(cursor, "INT-TEST-0001", subject_id)
+        make_attendance(cursor, "INT-TEST-0001", subject_id)
+
+    with db_cursor(dictionary=True) as cursor:
+        (row,) = attendance_repo.filtered(cursor)
+
+    assert (row["section"], row["student_section"]) == ("B", "A")

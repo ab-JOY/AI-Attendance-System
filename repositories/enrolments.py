@@ -42,11 +42,30 @@ def enrolled_in(cursor, subject_id):
     return cursor.fetchall()
 
 
-def not_enrolled_in(cursor, subject_id):
-    """Everyone who could be added to it."""
+def not_enrolled_in(cursor, subject_id, program_id=None, section_id=None):
+    """
+    Everyone who could be added to it.
+
+    With `program_id`, only that program's students: an offering is taught to
+    a section of one program (migration 010), and a class list drawn from the
+    whole school was how a first-year ended up on a fourth-year register. None
+    is an offering linked to no section, which is offered everybody.
+
+    `section_id` is the offering's own section and only orders the list - its
+    students come first, flagged `own_section`, because they are the ones the
+    operator is looking for.
+    """
+    offered = ""
+    values = [section_id, subject_id]
+
+    if program_id is not None:
+        offered = "AND sec.program_id = %s"
+        values.append(program_id)
+
     cursor.execute(
         f"""
-        SELECT {ROSTER_COLUMNS}
+        SELECT {ROSTER_COLUMNS},
+               COALESCE(s.section_id = %s, 0) AS own_section
         FROM students s
         {ACADEMIC_JOIN}
         WHERE NOT EXISTS (
@@ -54,12 +73,35 @@ def not_enrolled_in(cursor, subject_id):
             WHERE e.student_id = s.student_id
             AND e.subject_id = %s
         )
-        ORDER BY s.name ASC
+        {offered}
+        ORDER BY own_section DESC, sec.year_level, sec.section_name, s.name
         """,
-        (subject_id,)
+        tuple(values)
     )
 
     return cursor.fetchall()
+
+
+def enrol_section(cursor, subject_id, section_id):
+    """
+    Add every student of one section to one offering. Returns how many were
+    added - the students already on the list are not counted.
+
+    One statement, so the list is the whole section or it is unchanged.
+    `INSERT IGNORE` rather than `ON DUPLICATE KEY UPDATE`: an ignored duplicate
+    is not an affected row, and the count is what the operator is told.
+    """
+    cursor.execute(
+        """
+        INSERT IGNORE INTO enrolments (student_id, subject_id)
+        SELECT s.student_id, %s
+        FROM students s
+        WHERE s.section_id = %s
+        """,
+        (subject_id, section_id)
+    )
+
+    return cursor.rowcount
 
 
 def enrol(cursor, student_id, subject_id):

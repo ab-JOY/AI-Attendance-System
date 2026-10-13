@@ -144,6 +144,7 @@ PROTECTED_GET_ROUTES = [
 
 PROTECTED_POST_ROUTES = [
     "/enrol_student",
+    "/enrol_section",
     "/unenrol_student",
     "/enrol",
     "/enrol/start",
@@ -222,6 +223,7 @@ ADMIN_ONLY_GET_ROUTES = [
 
 ADMIN_ONLY_POST_ROUTES = [
     "/enrol_student",
+    "/enrol_section",
     "/unenrol_student",
     "/enrol",
     "/enrol/start",

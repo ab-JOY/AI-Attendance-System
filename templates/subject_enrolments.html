@@ -8,8 +8,10 @@
     <p>
         <strong>{{ subject.subject_code }}</strong> —
         {{ subject.subject_name }}
-        {% if subject.section %}
-            (section {{ subject.section }}{% if subject.course %}, {{ subject.course }}{% endif %})
+        {% if subject.section_id %}
+            ({{ subject.course }}, Year {{ subject.year_level }}, Section {{ subject.section }})
+        {% elif subject.section %}
+            (section {{ subject.section }}{% if subject.course %}, {{ subject.course }}{% endif %} — not linked to a section)
         {% endif %}
         {% if subject.time_in %}
             · starts {{ subject.time_in }}
@@ -68,6 +70,44 @@
 
     <h2 style="margin-top:36px;">Add a student</h2>
 
+    {#
+        DM-7. The subject is taught to a section, so its usual class list is
+        that section - one button - and the table below is for everybody else
+        in the same program: an irregular student, or one repeating the
+        subject. Students of other programs are not offered.
+    #}
+    {% if subject.section_id %}
+        {% set own = available|selectattr('own_section')|list %}
+
+        <p class="hint">
+            Listing {{ subject.course }} students only, Section
+            {{ subject.section }} first. A student with no program is not
+            listed until one is set from Manage Students.
+        </p>
+
+        {% if own %}
+            <form
+                action="{{ url_for('subjects.enrol_section') }}"
+                method="POST"
+                style="margin:12px 0;"
+            >
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="subject_id" value="{{ subject.id }}">
+
+                <button type="submit">
+                    Add all {{ own|length }} of Year {{ subject.year_level }},
+                    Section {{ subject.section }}
+                </button>
+            </form>
+        {% endif %}
+    {% else %}
+        <p class="hint">
+            This subject is not linked to a section yet, so every student is
+            listed. Edit the subject and choose its program, year level and
+            section to list only its own program.
+        </p>
+    {% endif %}
+
     {% if available %}
         <table class="subject-table">
             <tr>
@@ -103,7 +143,13 @@
             {% endfor %}
         </table>
     {% else %}
-        <p role="status">Every student is already enrolled in this subject.</p>
+        <p role="status">
+            {% if subject.section_id %}
+                Every {{ subject.course }} student is already enrolled in this subject.
+            {% else %}
+                Every student is already enrolled in this subject.
+            {% endif %}
+        </p>
     {% endif %}
 
     <p style="margin-top:24px;">

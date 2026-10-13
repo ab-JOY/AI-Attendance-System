@@ -23,31 +23,36 @@ from flask import (
 )
 
 from infra.db import db_cursor
+from repositories import academics as academics_repo
 from repositories import enrolments as enrolments_repo
 from repositories import instructors as instructors_repo
 from repositories import subjects as subjects_repo
 from security.access import role_required
 from security.paths import UnsafeStudentPathError, validate_student_id
 from web.errors import error_page
-from web.placement import optional_id
+from web.placement import optional_id, parse_placement, section_id_for
 
 logger = logging.getLogger(__name__)
 
 subjects_bp = Blueprint("subjects", __name__)
 
 
-# The eight fields both the add and update forms submit, in the order
-# subjects_repo.insert() and update() take them.
+# The text fields both the add and update forms submit. Which section the
+# offering is taught to arrives beside them as a placement - program, year
+# level and section - and is resolved to a `sections.id` inside the write's
+# transaction (DM-7).
 SUBJECT_FIELDS = (
     'subject_code',
     'subject_name',
     'instructor_id',
     'day',
-    'course',
-    'section',
     'time_in',
     'time_out',
 )
+
+# Where the section id goes among them, in the order subjects_repo.insert()
+# and update() take their arguments: after `day`.
+SECTION_AT = SUBJECT_FIELDS.index('time_in')
 
 # The two that identify the offering. The rest may legitimately be blank - a
 # subject with no assigned instructor, or no scheduled time, is a real state
@@ -58,7 +63,13 @@ REQUIRED_SUBJECT_FIELDS = ('subject_code', 'subject_name')
 
 def _subject_form():
     """
-    `(values, None)` from the form, or `(None, error_page)`.
+    `(values, placement, None)` from the form, or `(None, None, error_page)`.
+
+    `placement` is the section the offering is taught to, as
+    `web.placement.parse_placement()` returns it - the same three fields, and
+    the same rules, as where a student belongs. Required: an offering for no
+    section is for no program, and the Classes list on the registration form
+    could then only offer it to everybody.
 
     ⚠️ This used to be `request.form['subject_code']` and seven more like it. A
     missing field raised `BadRequestKeyError`, which Flask turns into a bare
@@ -78,7 +89,7 @@ def _subject_form():
     instructor_at = SUBJECT_FIELDS.index('instructor_id')
 
     if values[instructor_at] and optional_id(values[instructor_at]) is None:
-        return None, error_page(400, "Choose an instructor from the list.")
+        return None, None, error_page(400, "Choose an instructor from the list.")
 
     values = (
         *values[:instructor_at],
@@ -93,14 +104,35 @@ def _subject_form():
     ]
 
     if missing:
-        return None, error_page(
+        return None, None, error_page(
             400,
             "These fields are required: " + ", ".join(
                 field.replace('_', ' ') for field in missing
             ) + ".",
         )
 
-    return values, None
+    placement, problem = parse_placement(request.form)
+
+    if problem is not None:
+        return None, None, error_page(400, problem)
+
+    return values, placement, None
+
+
+def _with_section(cursor, values, placement):
+    """
+    The repository's arguments: `values` with the section id in its place.
+
+    None when the chosen program no longer exists. Resolved here, under the
+    caller's cursor, so a section created for this offering and an offering
+    that then failed to save cannot leave an empty section behind.
+    """
+    section_id = section_id_for(cursor, placement)
+
+    if section_id is None:
+        return None
+
+    return (*values[:SECTION_AT], section_id, *values[SECTION_AT:])
 
 
 @subjects_bp.route('/subjects')
@@ -110,27 +142,37 @@ def subjects():
         with db_cursor(dictionary=True) as cursor:
             records = subjects_repo.all_subjects(cursor)
             instructors = instructors_repo.all_instructors(cursor)
+            programs = academics_repo.programs(cursor)
 
     except mysql.connector.Error:
         logger.exception("Could not load the subjects list")
         return error_page(500)
 
     return render_template(
-        "subjects.html", subjects=records, instructors=instructors
+        "subjects.html",
+        subjects=records,
+        instructors=instructors,
+        programs=programs,
+        year_levels=academics_repo.YEAR_LEVELS,
     )
 
 
 @subjects_bp.route('/add_subject', methods=['POST'])
 @role_required('admin')
 def add_subject():
-    values, failure = _subject_form()
+    values, placement, failure = _subject_form()
 
     if failure is not None:
         return failure
 
     try:
         with db_cursor(commit=True) as cursor:
-            subjects_repo.insert(cursor, *values)
+            arguments = _with_section(cursor, values, placement)
+
+            if arguments is None:
+                return error_page(400, "That program no longer exists.")
+
+            subjects_repo.insert(cursor, *arguments)
 
     except mysql.connector.IntegrityError:
         # The foreign key refused it: the chosen instructor account was
@@ -165,6 +207,10 @@ def edit_subject(id):
                 instructors_repo.all_instructors(cursor)
                 if subject is not None else []
             )
+            programs = (
+                academics_repo.programs(cursor)
+                if subject is not None else []
+            )
 
     except mysql.connector.Error:
         logger.exception("Could not load subject %s for editing", id)
@@ -180,21 +226,30 @@ def edit_subject(id):
         return error_page(404, "That subject could not be found.")
 
     return render_template(
-        "edit_subject.html", subject=subject, instructors=instructors
+        "edit_subject.html",
+        subject=subject,
+        instructors=instructors,
+        programs=programs,
+        year_levels=academics_repo.YEAR_LEVELS,
     )
 
 
 @subjects_bp.route('/update_subject/<int:id>', methods=['POST'])
 @role_required('admin')
 def update_subject(id):
-    values, failure = _subject_form()
+    values, placement, failure = _subject_form()
 
     if failure is not None:
         return failure
 
     try:
         with db_cursor(commit=True) as cursor:
-            subjects_repo.update(cursor, id, *values)
+            arguments = _with_section(cursor, values, placement)
+
+            if arguments is None:
+                return error_page(400, "That program no longer exists.")
+
+            subjects_repo.update(cursor, id, *arguments)
 
     except mysql.connector.IntegrityError:
         logger.warning("Refused update of subject %s: no such instructor", id)
@@ -259,7 +314,16 @@ def subject_enrolments(subject_id):
                 return error_page(404, "That subject could not be found.")
 
             enrolled = enrolments_repo.enrolled_in(cursor, subject_id)
-            available = enrolments_repo.not_enrolled_in(cursor, subject_id)
+
+            # DM-7. Only the students of the offering's own program can be
+            # added, its own section first. An offering linked to no section
+            # has no program, and is offered everybody as before.
+            available = enrolments_repo.not_enrolled_in(
+                cursor,
+                subject_id,
+                program_id=subject['program_id'],
+                section_id=subject['section_id'],
+            )
 
     except mysql.connector.Error:
         logger.exception("Could not load the class list for subject %s", subject_id)
@@ -326,6 +390,66 @@ def enrol_student():
     logger.info("Enrolled %s into subject %s", student_id, subject_id)
 
     flash(f"{student_id} was added to the class list.", "success")
+
+    return redirect(url_for('subjects.subject_enrolments', subject_id=subject_id))
+
+
+@subjects_bp.route('/enrol_section', methods=['POST'])
+@role_required('admin')
+def enrol_section():
+    """
+    Add every student of the offering's own section to its class list (DM-7).
+
+    The offering names a section and so does each student, so the usual class
+    list - everybody in that section - is one statement rather than one click
+    per student. Students from other sections are still added one at a time,
+    which is how an irregular student gets onto the list.
+    """
+    subject_id = optional_id(request.form.get('subject_id'))
+
+    if subject_id is None:
+        return error_page(400, "That subject could not be identified.")
+
+    try:
+        with db_cursor(dictionary=True, commit=True) as cursor:
+            subject = subjects_repo.summary(cursor, subject_id)
+
+            if subject is None:
+                return error_page(404, "That subject could not be found.")
+
+            if subject['section_id'] is None:
+                return error_page(
+                    400,
+                    "This subject is not linked to a section yet. Edit the "
+                    "subject and choose its program, year level and section.",
+                )
+
+            added = enrolments_repo.enrol_section(
+                cursor, subject_id, subject['section_id']
+            )
+
+    except mysql.connector.Error:
+        logger.exception("Could not enrol a section into subject %s", subject_id)
+        return error_page(500)
+
+    logger.info(
+        "Enrolled section %s into subject %s: %d added",
+        subject['section_id'], subject_id, added,
+    )
+
+    if added:
+        flash(
+            f"{added} student{'s' if added != 1 else ''} of section "
+            f"{subject['section']} "
+            f"{'were' if added != 1 else 'was'} added to the class list.",
+            "success",
+        )
+    else:
+        flash(
+            f"Every student of section {subject['section']} was already on "
+            "the class list.",
+            "success",
+        )
 
     return redirect(url_for('subjects.subject_enrolments', subject_id=subject_id))
 

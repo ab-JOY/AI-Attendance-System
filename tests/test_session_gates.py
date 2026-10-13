@@ -472,8 +472,14 @@ def test_the_picker_selects_the_same_columns_as_every_other_picker():
 
     sql, _params = cursor.queries[0]
 
-    for column in subjects_repo.SELECTION_COLUMNS.split(","):
-        assert f"s.{column.strip()}" in sql
+    # ScriptedCursor records its SQL with the whitespace collapsed.
+    assert " ".join(subjects_repo.SELECTION_COLUMNS.split()) in sql
+
+    # ...and groups by the keys those columns hang off, not by a second copy
+    # of the list: the course and section are read through two joins now
+    # (migration 010), and an expression cannot be named in a GROUP BY the way
+    # a column can.
+    assert f"GROUP BY {subjects_repo.SELECTION_GROUP}" in sql
 
 
 # ---------------------------------------------------------------------------

@@ -73,6 +73,7 @@ class Recorder:
     def __init__(self):
         self.events = []
         self.existing_subject_ids = []
+        self.offered_to = []
         self.student_exists = False
         self.class_count = 0
 
@@ -129,9 +130,12 @@ def wired(monkeypatch):
             ("rename", cursor, None)
         ),
     )
+    def existing_ids(cursor, ids, program_id=None):
+        log.offered_to.append(program_id)
+        return [i for i in ids if i in log.existing_subject_ids]
+
     monkeypatch.setattr(
-        enrolment_module.subjects_repo, "existing_ids",
-        lambda cursor, ids: [i for i in ids if i in log.existing_subject_ids],
+        enrolment_module.subjects_repo, "existing_ids", existing_ids
     )
     monkeypatch.setattr(
         enrolment_module.enrolments_repo, "enrol_many",
@@ -316,6 +320,50 @@ def test_a_subject_deleted_during_the_capture_is_dropped(
     enrolled = next(e for e in wired.events if e[0] == "enrol_many")
 
     assert enrolled[2] == [3]
+
+
+def test_the_chosen_subjects_are_checked_against_the_students_program(
+    client, monkeypatch, wired
+):
+    """
+    DM-7. The Classes list shows only the chosen program's subjects, but the
+    ids come back from a browser - so the write asks for the ones offered to
+    the program the student is being placed in, not merely the ones that exist.
+    """
+    import web.enrolment as enrolment_module
+
+    monkeypatch.setattr(
+        enrolment_module, "section_id_for", lambda cursor, placement: 41
+    )
+
+    wired.existing_subject_ids = [3]
+    wired.class_count = 1
+    sign_in(client)
+
+    finish(client, monkeypatch, {
+        "program_id": 5, "year_level": 4, "section": "B", "subject_ids": [3],
+    })
+
+    assert wired.offered_to == [5], (
+        "the subjects were checked for existence only, so a subject of "
+        "another program named in the request would be enrolled into"
+    )
+
+
+def test_an_unassigned_student_is_not_narrowed_to_a_program(
+    client, monkeypatch, wired
+):
+    """
+    No usable placement means no program to compare with. Narrowing to "no
+    program" would drop every subject, on a write that is already degraded.
+    """
+    wired.existing_subject_ids = [3]
+    wired.class_count = 1
+    sign_in(client)
+
+    finish(client, monkeypatch, {"subject_ids": [3]})
+
+    assert wired.offered_to == [None]
 
 
 def test_a_recapture_does_not_touch_the_class_list(client, monkeypatch, wired):

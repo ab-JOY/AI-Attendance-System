@@ -58,7 +58,7 @@
                 {% for program in programs %}
                     <option value="{{ program.id }}"
                         {% if filters.program_id == program.id %}selected{% endif %}>
-                        {{ program.program_code }}
+                        {{ program.program_code }} - {{ program.program_name }}
                     </option>
                 {% endfor %}
             </select>

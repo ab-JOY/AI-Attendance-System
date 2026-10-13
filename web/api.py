@@ -261,11 +261,15 @@ def api_subjects():
     with db_cursor(dictionary=True) as cursor:
         if user.get("role") == "student":
             cursor.execute(
-                """
+                f"""
                 SELECT s.id, s.subject_code, s.subject_name,
                        COALESCE(i.fullname, s.instructor) AS instructor,
-                       s.day, s.course, s.section, s.time_in, s.time_out
+                       s.day,
+                       {subjects_repo.offering_course()} AS course,
+                       {subjects_repo.offering_section()} AS section,
+                       s.time_in, s.time_out
                 FROM subjects s
+                {subjects_repo.OFFERING_JOIN}
                 JOIN enrolments e ON e.subject_id = s.id
                 LEFT JOIN instructors i ON i.id = s.instructor_id
                 WHERE e.student_id = %s
@@ -490,14 +494,16 @@ def api_attendance_history():
         with db_cursor(dictionary=True) as cursor:
             if user.get("role") == "student":
                 # Students see only their own attendance
-                query = """
+                query = f"""
                     SELECT a.id, a.attendance_date, a.student_id,
                            s.name AS student_name, sub.subject_code,
-                           sub.subject_name, sub.section,
+                           sub.subject_name,
+                           {subjects_repo.offering_section('sub')} AS section,
                            a.time_in, a.status
                     FROM attendance a
                     JOIN students s ON s.student_id = a.student_id
                     JOIN subjects sub ON sub.id = a.subject_id
+                    {subjects_repo.offering_join('sub')}
                     WHERE a.student_id = %s
                 """
                 values = [user["user_id"]]

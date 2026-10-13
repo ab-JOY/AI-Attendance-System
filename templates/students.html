@@ -111,6 +111,20 @@
                 with the capture and are applied with the student row at the
                 end, in one transaction (FS-9).
             #}
+            {#
+                DM-7. One group per section a subject is taught to, so the
+                section is the heading rather than a suffix on every subject
+                name - and each group says which program it belongs to, which
+                is what static/js/students.js reads: only the chosen program's
+                groups are shown, and the group for the student's own year
+                level and section is selected for them.
+
+                ⚠️ The filter is a convenience. /enrol/finish is what refuses
+                a subject of another program (`subjects_repo.existing_ids`).
+
+                A group with no program is a subject not linked to a section
+                yet. It belongs to no program, so it is offered to all of them.
+            #}
             <label for="subject_ids">
                 Classes
                 <span class="hint">
@@ -121,19 +135,31 @@
                 id="subject_ids"
                 name="subject_ids"
                 multiple
-                size="5"
+                size="6"
+                data-class-picker
                 aria-describedby="subject_ids_help">
 
-                {% for subject in subjects %}
-                    <option value="{{ subject.id }}">
-                        {{ subject.subject_code }} - {{ subject.subject_name }}
-                        {% if subject.section %}({{ subject.section }}){% endif %}
-                    </option>
+                {% for group in class_groups %}
+                    <optgroup
+                        label="{{ group.label }}"
+                        data-program-id="{{ group.program_id or '' }}"
+                        data-year-level="{{ group.year_level or '' }}"
+                        data-section="{{ group.section or '' }}">
+                        {% for subject in group.subjects %}
+                            <option value="{{ subject.id }}">
+                                {{ subject.subject_code }} - {{ subject.subject_name }}
+                            </option>
+                        {% endfor %}
+                    </optgroup>
                 {% endfor %}
 
             </select>
 
             <p id="subject_ids_help" class="hint">
+                Only the subjects of the chosen program are listed, under the
+                year level and section each is taught to. The subjects of the
+                student's own section are selected for you; change the
+                selection for a student who takes a class with another section.
                 A student who is in no class is recognised by the camera but
                 cannot have attendance recorded. This can be set later from
                 Subjects → Class List.
@@ -245,4 +271,5 @@
 
 {% block scripts %}
 <script src="{{ url_for('static', filename='js/training.js') }}" defer></script>
+<script src="{{ url_for('static', filename='js/students.js') }}" defer></script>
 {% endblock %}

@@ -2,18 +2,63 @@
 
 from __future__ import annotations
 
-# The columns every subject *picker* needs: the attendance dropdown and the
-# report filter. Written once because the two used to carry slightly different
-# column lists for no reason anybody could state.
-SELECTION_COLUMNS = "id, subject_code, subject_name, course, section, time_in"
 
-# The same columns, qualified, for the one picker query that joins. Derived
-# rather than written out a second time: a column added above and forgotten
-# here would give the attendance dropdown a different shape from every other
-# subject picker, which is the drift SELECTION_COLUMNS exists to prevent.
-QUALIFIED_SELECTION_COLUMNS = ", ".join(
-    f"s.{column.strip()}" for column in SELECTION_COLUMNS.split(",")
-)
+# Which section an offering is taught to (migration 010, DM-7).
+#
+# `subjects.section_id` is the fact, and the program and year level are the
+# section's - the same shape as a student's placement, so "which subjects are
+# for this program" is a comparison of two keys rather than of two typed
+# strings.
+#
+# ⚠️ **`course` and `section` keep their names, deliberately.** They are the
+# program code and the section name read through the joins, falling back to
+# what was typed before the form offered a list - which is all an offering
+# migration 010 could not link has. Every reader used those two keys already.
+#
+# ⚠️ **Never `SELECT s.*` beside these**, for the reason
+# `students.ACADEMIC_COLUMNS` gives: the typed columns are still on the table
+# under the same names, and a dictionary cursor keeps whichever came last.
+#
+# `osec` / `op`, not `sec` / `p`: the register joins an offering's section and
+# a student's in one query, and the student's already has those aliases.
+def offering_join(subject="s"):
+    """The LEFT JOINs that reach an offering's section and program."""
+    return f"""
+        LEFT JOIN sections osec ON osec.id = {subject}.section_id
+        LEFT JOIN programs op ON op.id = osec.program_id
+    """
+
+
+def offering_course(subject="s"):
+    return f"COALESCE(op.program_code, {subject}.course)"
+
+
+def offering_section(subject="s"):
+    return f"COALESCE(osec.section_name, {subject}.section)"
+
+
+OFFERING_JOIN = offering_join()
+
+# The columns every subject *picker* needs: the attendance dropdown, the
+# report filter, the Classes list on the registration form. Written once
+# because the pickers used to carry slightly different column lists for no
+# reason anybody could state.
+SELECTION_COLUMNS = f"""
+    s.id,
+    s.subject_code,
+    s.subject_name,
+    {offering_course()} AS course,
+    {offering_section()} AS section,
+    s.time_in,
+    s.section_id,
+    osec.program_id,
+    osec.year_level
+"""
+
+# What a query that counts across a join groups by. The three primary keys,
+# not the column list: every selected column depends on one of them, and
+# MySQL 8's ONLY_FULL_GROUP_BY accepts nothing less from an outer join.
+SELECTION_GROUP = "s.id, osec.id, op.id"
 
 
 # Who teaches an offering, as every screen shows it: the linked account's name,
@@ -42,8 +87,10 @@ def _owned_by(instructor_id, prefix="WHERE"):
 def all_subjects(cursor):
     """Every offering, newest first, for the management screen."""
     cursor.execute(f"""
-        SELECT s.*, {INSTRUCTOR_NAME} AS instructor_name
+        SELECT {SELECTION_COLUMNS}, s.instructor_id, s.day, s.time_out,
+               {INSTRUCTOR_NAME} AS instructor_name
         FROM subjects s
+        {OFFERING_JOIN}
         LEFT JOIN instructors i ON i.id = s.instructor_id
         ORDER BY s.id DESC
     """)
@@ -80,10 +127,11 @@ def for_selection(cursor, instructor_id=None):
     owned, values = _owned_by(instructor_id)
 
     cursor.execute(f"""
-        SELECT {QUALIFIED_SELECTION_COLUMNS}
+        SELECT {SELECTION_COLUMNS}
         FROM subjects s
+        {OFFERING_JOIN}
         {owned}
-        ORDER BY s.subject_code, s.section
+        ORDER BY s.subject_code, osec.year_level, section
     """, values)
 
     return cursor.fetchall()
@@ -110,12 +158,13 @@ def for_selection_with_class_list_size(cursor, instructor_id=None):
     owned, values = _owned_by(instructor_id)
 
     cursor.execute(f"""
-        SELECT {QUALIFIED_SELECTION_COLUMNS}, COUNT(e.subject_id) AS enrolled
+        SELECT {SELECTION_COLUMNS}, COUNT(e.subject_id) AS enrolled
         FROM subjects s
+        {OFFERING_JOIN}
         LEFT JOIN enrolments e ON e.subject_id = s.id
         {owned}
-        GROUP BY {QUALIFIED_SELECTION_COLUMNS}
-        ORDER BY s.subject_code, s.section
+        GROUP BY {SELECTION_GROUP}
+        ORDER BY s.subject_code, osec.year_level, section
     """, values)
 
     return cursor.fetchall()
@@ -125,17 +174,35 @@ def for_report_filter(cursor, instructor_id=None):
     owned, values = _owned_by(instructor_id)
 
     cursor.execute(f"""
-        SELECT s.id, s.subject_code, s.subject_name, s.course, s.section
+        SELECT {SELECTION_COLUMNS}
         FROM subjects s
+        {OFFERING_JOIN}
         {owned}
-        ORDER BY s.subject_code, s.section
+        ORDER BY s.subject_code, osec.year_level, section
     """, values)
 
     return cursor.fetchall()
 
 
 def get(cursor, subject_id):
-    cursor.execute("SELECT * FROM subjects WHERE id=%s", (subject_id,))
+    """
+    One offering as the edit form needs it, or None.
+
+    `typed_course` and `typed_section` are the legacy text, under their own
+    names: the form shows them for an offering that is not linked to a section
+    yet, so whoever links it can see what was meant.
+    """
+    cursor.execute(
+        f"""
+        SELECT {SELECTION_COLUMNS}, s.instructor, s.instructor_id, s.day,
+               s.time_out, s.course AS typed_course, s.section AS typed_section
+        FROM subjects s
+        {OFFERING_JOIN}
+        WHERE s.id = %s
+        """,
+        (subject_id,)
+    )
+
     return cursor.fetchone()
 
 
@@ -144,7 +211,9 @@ def summary(cursor, subject_id):
     cursor.execute(
         f"""
         SELECT {SELECTION_COLUMNS}
-        FROM subjects WHERE id = %s
+        FROM subjects s
+        {OFFERING_JOIN}
+        WHERE s.id = %s
         """,
         (subject_id,)
     )
@@ -152,9 +221,10 @@ def summary(cursor, subject_id):
     return cursor.fetchone()
 
 
-def existing_ids(cursor, subject_ids):
+def existing_ids(cursor, subject_ids, program_id=None):
     """
-    Which of these offerings still exist, in the order they were given.
+    Which of these offerings still exist, in the order they were given - and,
+    with `program_id`, are offered to that program (DM-7).
 
     ⚠️ **The placeholders are generated from the *count*, never from the
     values.** `IN (%s)` takes one parameter, so a list needs one marker per id;
@@ -166,15 +236,33 @@ def existing_ids(cursor, subject_ids):
     registration form and the end of a two-minute capture, and a foreign-key
     error at that point would roll back a student whose images are already on
     disk.
+
+    ⚠️ **The program check is the guard; the filtered Classes list is the
+    convenience.** The form only shows the chosen program's subjects, but the
+    ids come back from a browser. An offering linked to no section belongs to
+    no program, so it is offered to every one - refusing it would make a
+    subject migration 010 could not link impossible to enrol into.
     """
     if not subject_ids:
         return []
 
     placeholders = ", ".join(["%s"] * len(subject_ids))
+    offered = ""
+    values = tuple(subject_ids)
+
+    if program_id is not None:
+        offered = "AND (s.section_id IS NULL OR osec.program_id = %s)"
+        values += (program_id,)
 
     cursor.execute(
-        f"SELECT id FROM subjects WHERE id IN ({placeholders})",
-        tuple(subject_ids),
+        f"""
+        SELECT s.id
+        FROM subjects s
+        LEFT JOIN sections osec ON osec.id = s.section_id
+        WHERE s.id IN ({placeholders})
+        {offered}
+        """,
+        values,
     )
 
     found = {
@@ -195,30 +283,35 @@ def code_of(cursor, subject_id):
     return cursor.fetchone()
 
 
-def insert(cursor, subject_code, subject_name, instructor_id, day, course,
-           section, time_in, time_out):
+def insert(cursor, subject_code, subject_name, instructor_id, day,
+           section_id, time_in, time_out):
     """
     Create an offering.
 
     `instructor_id` is an `instructors.id` or None. It used to be a typed name
     written to `subjects.instructor`, which linked the offering to nobody - so
     nothing could be scoped to the instructor who teaches it (DM-4).
+
+    `section_id` is the section it is taught to, already resolved by the caller
+    through `academics.section_for()` in this same transaction (DM-7). It used
+    to be a typed course and a typed section, which linked it to no program.
     """
     cursor.execute("""
         INSERT INTO subjects
-        (subject_code, subject_name, instructor_id, day, course, section, time_in, time_out)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-    """, (subject_code, subject_name, instructor_id, day, course, section, time_in, time_out))
+        (subject_code, subject_name, instructor_id, day, section_id, time_in, time_out)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+    """, (subject_code, subject_name, instructor_id, day, section_id, time_in, time_out))
 
 
 def update(cursor, subject_id, subject_code, subject_name, instructor_id, day,
-           course, section, time_in, time_out):
+           section_id, time_in, time_out):
     """
     Update an offering.
 
-    ⚠️ `subjects.instructor` - the legacy typed name - is left alone. It is
-    what the screens fall back to when no account is chosen, and blanking it
-    here would erase the only record of who an unlinked offering belonged to.
+    ⚠️ `subjects.instructor`, `course` and `section` - the legacy typed text -
+    are left alone. Nothing reads them for an offering that has an account and
+    a section, and blanking them here would erase the only record of what an
+    unlinked offering was typed as.
     """
     cursor.execute("""
         UPDATE subjects
@@ -226,12 +319,11 @@ def update(cursor, subject_id, subject_code, subject_name, instructor_id, day,
             subject_name=%s,
             instructor_id=%s,
             day=%s,
-            course=%s,
-            section=%s,
+            section_id=%s,
             time_in=%s,
             time_out=%s
         WHERE id=%s
-    """, (subject_code, subject_name, instructor_id, day, course, section,
+    """, (subject_code, subject_name, instructor_id, day, section_id,
           time_in, time_out, subject_id))
 
 

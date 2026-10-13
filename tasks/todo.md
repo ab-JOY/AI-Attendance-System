@@ -1037,9 +1037,71 @@ the admin and - within their own classes - for an instructor. Fast suite
    students resolved. On a database where a student's typed program is not in
    `programs`, 009 leaves that student *Unassigned* and the text is the only
    record of what was typed, so the drop wants a check first.
-2. **`subjects.course` / `subjects.section` are still free text.** Linking an
-   offering to a `sections` row would let a class list be filled from the
-   section. Not done: it was not asked for and it changes the subject form.
+2. ~~**`subjects.course` / `subjects.section` are still free text.**~~
+   **Done 2026-10-14, asked for by the user — §11 (DM-7).** The two typed
+   columns are still on the table, unread for a linked offering; dropping
+   them is §11's open item 1.
 3. **DM-6** — close or delete the three stale sessions.
 4. **Instructor departments are unset.** 009 does not guess one from the
    subjects an instructor teaches; set them on Manage Instructors.
+
+---
+
+## 11. Phase 7b — a subject belongs to a section, and BSIT is Information Technology
+
+**Raised 2026-10-14 by the user:** *"add in the student management where the
+student will select the program add bachelor of science in information
+technology also fix the bscs it should be bachelor of science in computer
+science and also the selection on classes should only apply like specific sub
+for specific program and remove the section in choosing the subject make a
+better way to implement the subject with the section."*
+
+| Finding | Evidence |
+|---|---|
+| **DM-7** an offering belongs to no program | `subjects.course` and `subjects.section` were typed text. The Classes list on the registration form offered all 3 subjects to every student of every program, and told offerings apart by printing the typed section after the name |
+| **DM-8** `BSIT` is Industrial Technology, and there is no Information Technology | `programs` row 4, under CIT; nothing under CCIT but BSCS. `program_code` is unique, so the two cannot share the code |
+| — the mobile app and the Manage Students filter show a bare code | `BSCS`, with no name. The server already held "Bachelor of Science in Computer Science" and sent it in `structure`, which the app did not read |
+
+### Plan
+
+- [x] **Migration 010** — `subjects.section_id` → `sections`, backfilled where
+      the typed course and section name exactly one section; Industrial
+      Technology re-coded `BSINDTECH`; `BSIT` added as Information Technology
+      under CCIT. **Additive only**, like 009.
+- [x] Subject form takes program, year level and section (the student
+      placement, same parser) instead of two text boxes.
+- [x] Every reader of a subject's `course` / `section` reads through the link,
+      falling back to the typed text for an unlinked offering.
+- [x] Classes list: one group per section, only the chosen program's groups
+      shown, the student's own section selected; the server refuses a subject
+      of another program.
+- [x] Class List screen: only the subject's own program, own section first, and
+      one button to add the whole section.
+- [x] Program names shown in full on the Manage Students filter and the mobile
+      registration screen.
+- [x] Tests, mutation run, rehearsal on a copy, live migration with a dump
+      first, handover.
+
+### Review
+
+**Landed 2026-10-14.** Migration 010 applied to the deployed database after a
+rehearsal on a copy: 3 of 3 subjects linked, every pre-existing row unchanged
+(row counts and content hash of nine tables, before against after). Fast suite
+**1472 → 1487**, integration **73 → 83**, 19 of 19 mutations caught, `ruff`
+unchanged at 18 (all `web/api.py`, pre-existing). See
+[`handover-phase-7b.md`](handover-phase-7b.md).
+
+### Open, the user's
+
+1. **Drop `subjects.course` and `subjects.section`.** Safe on this database -
+   all three subjects are linked. Elsewhere an unlinked subject's typed text is
+   the only record of what was meant, so the drop wants a check first (same
+   shape as §7.7.1).
+2. **`BSIT` changed meaning.** Decided without asking: the alternative was a
+   second code for Information Technology beside `BSIT` = Industrial
+   Technology. Reversing it is two `UPDATE`s; nobody on this database is in
+   either program.
+3. **The section names on this database still read like test data** - three
+   first-year "B" students are on the class lists of two fourth-year "4B"
+   subjects. Not touched.
+4. **Run the mobile registration screen.** Still no React Native harness here.
