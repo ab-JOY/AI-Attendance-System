@@ -1032,11 +1032,14 @@ the admin and - within their own classes - for an instructor. Fast suite
 
 ### §7.7 — open, the user's
 
-1. **Drop the legacy columns** `students.college_department`, `program`,
-   `year_level`, `section` (migration 010). Safe on this database — all 4
-   students resolved. On a database where a student's typed program is not in
-   `programs`, 009 leaves that student *Unassigned* and the text is the only
-   record of what was typed, so the drop wants a check first.
+1. ~~**Drop the legacy columns** `students.college_department`, `program`,
+   `year_level`, `section`.~~ **Decided the other way by the user,
+   2026-10-14 (DM-9):** shown the NULLs in phpMyAdmin and offered the drop,
+   they asked for the columns to be filled instead. Migration 011 backfills
+   them from each student's section and
+   `repositories/students.py::_copy_placement()` keeps them filled on every
+   insert and edit. They are a copy that nothing reads; `section_id` is still
+   the fact. See `handover-phase-7b.md` §8.
 2. ~~**`subjects.course` / `subjects.section` are still free text.**~~
    **Done 2026-10-14, asked for by the user — §11 (DM-7).** The two typed
    columns are still on the table, unread for a linked offering; dropping

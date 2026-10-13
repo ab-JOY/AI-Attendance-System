@@ -115,12 +115,12 @@ export default function StudentRegistrationScreen({ navigation }) {
     {
       program: 'BSCS',
       program_name: 'Bachelor of Science in Computer Science',
-      college_department: 'College of Computing and Information Technology',
+      college_department: 'College of Communication and Information Technology',
     },
     {
       program: 'BSIT',
       program_name: 'Bachelor of Science in Information Technology',
-      college_department: 'College of Computing and Information Technology',
+      college_department: 'College of Communication and Information Technology',
     },
   ]);
 

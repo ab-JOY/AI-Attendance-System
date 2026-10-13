@@ -361,7 +361,7 @@ def test_the_roster_reports_placement_under_the_old_key_names(scratch_database):
         placed["program"],
         placed["year_level"],
         placed["section"],
-    ) == ("College of Computing and Information Technology", "BSCS", 4, "B")
+    ) == ("College of Communication and Information Technology", "BSCS", 4, "B")
 
     assert unassigned["student_id"] == "INT-TEST-0002", "Unassigned sorts last"
     assert unassigned["section"] is None
@@ -1248,3 +1248,103 @@ def test_the_register_reports_the_offerings_linked_section(scratch_database):
         (row,) = attendance_repo.filtered(cursor)
 
     assert (row["section"], row["student_section"]) == ("B", "A")
+
+
+# ===========================================================================
+# Migration 011 - the placement written out as text (DM-9)
+# ===========================================================================
+
+
+def placement_text_of(cursor, student_id):
+    """The four text columns as stored - not the joins the application reads."""
+    cursor.execute(
+        """
+        SELECT s.college_department, s.program, s.year_level, s.section
+        FROM students s WHERE s.student_id = %s
+        """,
+        (student_id,),
+    )
+
+    return tuple(cursor.fetchone())
+
+
+def test_011_writes_a_placed_students_section_out_as_text(database_at_008):
+    """
+    The deployed shape: `College of Computing` was typed, which is no
+    department. The text now names the department the program belongs to.
+    """
+    cursor = database_at_008.cursor
+    legacy_student(cursor, "INT-TEST-0001", "College of Computing", "BSCS", 4, "4B")
+    database_at_008.migrate()
+
+    assert placement_text_of(cursor, "INT-TEST-0001") == (
+        "College of Communication and Information Technology", "BSCS", 4, "4B"
+    )
+
+
+def test_a_new_student_has_their_placement_written_as_text(scratch_database):
+    from infra.db import db_cursor
+    from repositories import academics as academics_repo
+    from repositories import students as students_repo
+
+    with db_cursor(commit=True) as cursor:
+        program_id = academics_repo.program_id_for_code(cursor, "BSCS")
+        section_id = academics_repo.section_for(cursor, program_id, 2, "C")
+
+        students_repo.insert(
+            cursor, "INT-TEST-0001", "Integration Test Subject",
+            {"section_id": section_id},
+        )
+        students_repo.insert(
+            cursor, "INT-TEST-0002", "Integration Test Subject", {}
+        )
+
+        assert placement_text_of(cursor, "INT-TEST-0001") == (
+            "College of Communication and Information Technology", "BSCS", 2, "C"
+        )
+        assert placement_text_of(cursor, "INT-TEST-0002") == (None,) * 4
+
+
+def test_an_edit_rewrites_the_text_and_reports_only_its_own_change(
+    scratch_database,
+):
+    """
+    The copy is a second UPDATE, and the edit screen reads the first one's row
+    count to tell a no-op edit from a student who does not exist. The two
+    counts differ both ways here: an edit that changes nothing while the copy
+    fills the text in, and a rename the copy has nothing to add to.
+    """
+    from infra.db import db_cursor
+    from repositories import academics as academics_repo
+    from repositories import students as students_repo
+
+    name = "Integration Test Subject"
+
+    with db_cursor(commit=True) as cursor:
+        # Seeded without the text, as a student registered between 009 and 011.
+        make_student(cursor, "INT-TEST-0001", name, "BSCS", 4, "B")
+
+        program_id = academics_repo.program_id_for_code(cursor, "BSCS")
+        same = academics_repo.section_for(cursor, program_id, 4, "B")
+
+        unchanged = students_repo.update_details(cursor, "INT-TEST-0001", name, same)
+
+        assert placement_text_of(cursor, "INT-TEST-0001") == (
+            "College of Communication and Information Technology", "BSCS", 4, "B"
+        )
+
+        renamed = students_repo.update_details(
+            cursor, "INT-TEST-0001", "Integration Test Renamed", same
+        )
+
+        program_id = academics_repo.program_id_for_code(cursor, "BSN")
+        moved = students_repo.update_details(
+            cursor, "INT-TEST-0001", "Integration Test Renamed",
+            academics_repo.section_for(cursor, program_id, 1, "A"),
+        )
+
+        assert placement_text_of(cursor, "INT-TEST-0001") == (
+            "College of Nursing", "BSN", 1, "A"
+        )
+
+    assert (unchanged, renamed, moved) == (0, 1, 1)

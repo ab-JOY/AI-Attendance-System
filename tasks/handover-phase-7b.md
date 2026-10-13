@@ -139,7 +139,7 @@ the live migration. Restore with
 - **The section is the group heading**, not a suffix on each subject. The
   attendance dropdown, the report filter and the mobile API still print the
   section after the subject name — they were not asked about, and two
-  offerings of one subject have to be told apart there.
+  offerings of one subject have to be told apart there. 
 - **Class List:** an offering with a section lists only its program's
   students. ⚠️ **An Unassigned student cannot be added to a linked subject**
   until they are given a program from Manage Students; the page says so.
@@ -222,3 +222,68 @@ work's:** `.gitignore`, `.vscode/settings.json`, `config/settings.py`,
   decision; the test-shaped section names on this database.
 - Everything still open in `handover-phase-7.md` §7 except §7.7.2, which this
   sprint did.
+
+---
+
+## 8. Added the same day — the four text columns on `students` are filled again (DM-9)
+
+**Asked for by the user**, looking at `students` in phpMyAdmin: 8 of 12 rows
+had NULL in `college_department`, `program`, `year_level` and `section`, and
+the other 4 said `College of Computing`. Nothing was lost — 009 stopped
+writing those columns and every student resolved through `section_id` — but
+the table read as if eight students had chosen nothing. Offered the drop
+(`todo.md` §7.7.1), the user chose to have them filled.
+
+| Change | Files |
+|---|---|
+| Migration **011** backfills the four columns from each student's section | `migrations/011_student_placement_text.sql` |
+| `_copy_placement()` does the same after `insert()`, `update_details()` and `update_details_and_password()` | `repositories/students.py` |
+| Three integration tests | `tests/integration/test_academic_structure.py` |
+
+**Applied to the deployed database** (dump first:
+`logs/db-backups/attendancesystem_db_before_011.sql`). Measured afterwards:
+12 of 12 students have all four columns, 0 rows where the text disagrees with
+the joins, `schema_migrations` at 011.
+
+| Gate | Result |
+|---|---|
+| `pytest` (fast) | 1487 passed, 89 skipped |
+| `pytest tests/integration` (scratch DB) | **86 passed** (was 83) |
+| `ruff check .` | 18, unchanged |
+| Mutations, from a copy (L13) | 4 of 4 caught — the first draft of the row-count test let one survive and was rewritten |
+
+- ⚠️ **The columns are a copy and nothing reads them.** Every screen and the
+  API still read the joins. Do not start reading the text.
+- ⚠️ **`college_department` holds the department's full name**, the value the
+  joins alias under that key — not the code. The user wrote "it should be
+  CCIT"; taken as naming the college, not the stored string (my reading, L35).
+  One word in `_copy_placement()` and in 011 if they meant the code.
+- ⚠️ **A migration that renames a department, re-codes a program or renames a
+  section must re-run 011's `UPDATE`.** No code path edits those rows today;
+  010's re-code is the kind of change that would leave the copy stale.
+- ⚠️ **`update_details()` returns the row count of its own `UPDATE`, read
+  before the copy runs.** The edit route uses it to tell a no-op from a
+  missing student, and the two counts differ both ways.
+- **An Unassigned student keeps whatever text they had** (inner joins), NULL
+  for one registered since 009. The columns are still nullable for that reason.
+- **Not run in a browser.** The edit and registration routes were not driven;
+  the repository functions they call were, against a scratch database.
+
+**Correction to §0 and §7 above:** "nothing is committed" is no longer true.
+Phase 7b is commit `96d62cd`; `git status` at the start of this work showed
+only the five files of the user's. **This section's work is not committed.**
+
+### 8.1 CCIT renamed (migration 012)
+
+**Asked for by the user:** CCIT is the **College of Communication and
+Information Technology**, not "Computing". Migration 012 renames the
+`departments` row (same id 5, same code) and re-runs 011's copy, as §8 warned
+a rename must. Applied to the deployed database after a dump
+(`attendancesystem_db_before_012.sql`): 12 of 12 students carry the new name,
+0 rows where the text disagrees with the joins. The mobile screen's offline
+fallback list was changed to match (not run). Fast suite 1487 passed,
+integration 86 passed, the missing re-copy caught as a mutation.
+
+- 009 still seeds the old name; a fresh install gets the new one from 012.
+- The user tested §8's registration and edit in a browser and reported it
+  working. Their report, not re-run here.

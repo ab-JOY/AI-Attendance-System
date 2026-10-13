@@ -13,9 +13,14 @@ from __future__ import annotations
 # `program`, `year_level` and `section`, and keeping those keys is what let
 # the storage change without touching any of them.
 #
-# ⚠️ **Never `SELECT s.*` beside these.** The legacy columns are still on the
-# table until the contract migration (todo.md §7.7), under the same names, and
-# a dictionary cursor would hand back whichever of the two came last.
+# ⚠️ **Never `SELECT s.*` beside these.** The four text columns are still on
+# the table, under the same names, and a dictionary cursor would hand back
+# whichever of the two came last.
+#
+# ⚠️ **Those four columns are a copy, and nothing reads them** (DM-9, migration
+# 011). They are filled in from the section by `_copy_placement()` on every
+# write below, so that the table says where a student belongs when it is
+# opened on its own - in phpMyAdmin, in a dump. `section_id` is the fact.
 ACADEMIC_COLUMNS = """
     s.section_id,
     sec.program_id,
@@ -151,6 +156,30 @@ def exists(cursor, student_id):
     return cursor.fetchone() is not None
 
 
+def _copy_placement(cursor, student_id):
+    """
+    Write the student's section out as text, into the four legacy columns.
+
+    Inner joins, so an Unassigned student is left alone: on a database where
+    migration 009 could not place somebody, those columns are the only record
+    of what was typed for them.
+    """
+    cursor.execute(
+        """
+        UPDATE students s
+        JOIN sections sec ON sec.id = s.section_id
+        JOIN programs p ON p.id = sec.program_id
+        JOIN departments d ON d.id = p.department_id
+        SET s.college_department = d.department_name,
+            s.program = p.program_code,
+            s.year_level = sec.year_level,
+            s.section = sec.section_name
+        WHERE s.student_id = %s
+        """,
+        (student_id,),
+    )
+
+
 def insert(cursor, student_id, name, record):
     """
     Create a student.
@@ -177,6 +206,8 @@ def insert(cursor, student_id, name, record):
         ),
     )
 
+    _copy_placement(cursor, student_id)
+
 
 def rename(cursor, student_id, name):
     cursor.execute(
@@ -198,7 +229,13 @@ def update_details(cursor, student_id, name, section_id):
         (name, section_id, student_id),
     )
 
-    return cursor.rowcount
+    # Read before the copy below replaces it: the caller tells "nothing
+    # changed" from "no such student" by this count.
+    changed = cursor.rowcount
+
+    _copy_placement(cursor, student_id)
+
+    return changed
 
 
 def update_details_and_password(cursor, student_id, name, section_id,
@@ -213,7 +250,11 @@ def update_details_and_password(cursor, student_id, name, section_id,
         (name, section_id, password_hash, student_id),
     )
 
-    return cursor.rowcount
+    changed = cursor.rowcount
+
+    _copy_placement(cursor, student_id)
+
+    return changed
 
 
 def delete(cursor, student_id):
