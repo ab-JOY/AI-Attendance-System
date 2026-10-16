@@ -1,6 +1,6 @@
 import logging
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
 from typing import NamedTuple
 
@@ -14,6 +14,7 @@ from infra.camera import CameraReader
 from infra.db import db_cursor
 from repositories import attendance as attendance_repo
 from security.paths import UnsafeStudentPathError, validate_student_id
+from services.punctuality import derive_status
 from vision.geometry import FaceBox, get_face_box
 from vision.landmarks import LEFT_EYE_OUTER, NOSE_TIP, RIGHT_EYE_OUTER
 from vision.liveness import LivenessChallenge, LivenessConfig
@@ -641,29 +642,6 @@ class ActiveSubject(NamedTuple):
     subject_code: str
 
 
-def derive_status(arrival, scheduled_start):
-    """
-    "Present" or "Late", from the subject's scheduled start time (FS-8).
-
-    Everything this system has ever recorded is "Present": `subjects.time_in`
-    was a VARCHAR while `attendance.time_in` is a TIME, so there was nothing
-    sound to compare. Migration 005 made it a real TIME.
-
-    A subject with no scheduled start cannot make anyone late, so the answer is
-    Present - that is a statement about missing data, not punctuality.
-    """
-    if scheduled_start is None:
-        return "Present"
-
-    # MySQL hands back a TIME as a timedelta from midnight.
-    if isinstance(scheduled_start, timedelta):
-        scheduled = (datetime.min + scheduled_start).time()
-    else:
-        scheduled = scheduled_start
-
-    return "Late" if arrival > scheduled else "Present"
-
-
 class NotRecorded(Enum):
     """
     Why a recognised face produced no attendance row, and what to show.
@@ -761,7 +739,8 @@ def save_attendance(student_id, subject):
     in the database is not being in the class. Without this, any recognised
     face is recorded against whatever subject happens to be running.
 
-    **FS-8 - Late is derived** from the subject's scheduled start.
+    **FS-8 - Late is derived** from the subject's scheduled start, after a
+    grace window set by the class's length (`services/punctuality.py`).
 
     ⚠️ **The duplicate branch upgrades an Absent and touches nothing else.** It
     was `id = id` - a no-op - which was right while the only row that could
@@ -783,7 +762,8 @@ def save_attendance(student_id, subject):
         with db_cursor(dictionary=True, commit=True) as cursor:
             cursor.execute(
                 """
-                SELECT s.student_id, s.name, sub.time_in AS scheduled_start
+                SELECT s.student_id, s.name, sub.time_in AS scheduled_start,
+                       sub.time_out AS scheduled_end
                 FROM students s
                 JOIN enrolments e
                     ON e.student_id = s.student_id
@@ -832,7 +812,11 @@ def save_attendance(student_id, subject):
             # crossing midnight could compare one date and store another.
             now = datetime.now()
 
-            resolved = derive_status(now.time(), enrolled["scheduled_start"])
+            resolved = derive_status(
+                now.time(),
+                enrolled["scheduled_start"],
+                enrolled["scheduled_end"],
+            )
 
             cursor.execute(
                 """

@@ -348,6 +348,35 @@ def test_status_is_derived_from_the_scheduled_start(hours_from_now, expected):
     )
 
 
+@pytest.mark.parametrize(
+    ("minutes_ago", "expected"),
+    [
+        (10, "Present"),   # inside a one-hour class's 15 minutes
+        (20, "Late"),      # past them
+    ],
+)
+def test_a_one_hour_class_has_a_fifteen_minute_grace_window(minutes_ago, expected):
+    """
+    The window is set by the class's length, so `time_out` has to make the
+    round trip as well - read back as a timedelta beside `time_in`.
+
+    Reported 2026-10-16: with no window, a student recognised twenty seconds
+    after the start was recorded Late.
+    """
+    from recognize_face import save_attendance
+
+    start = _subject_time_offset_from_now(-minutes_ago / 60)
+    end = _subject_time_offset_from_now(-minutes_ago / 60 + 1)
+
+    with db_cursor(commit=True) as cursor:
+        subject_id = make_subject(cursor, time_in=start, time_out=end)
+        make_student(cursor, STUDENT)
+        make_enrolment(cursor, STUDENT, subject_id)
+
+    assert save_attendance(STUDENT, active_subject(subject_id)) == expected
+    assert attendance_rows(STUDENT)[0]["status"] == expected
+
+
 def test_a_subject_with_no_scheduled_start_makes_nobody_late():
     """A statement about missing data, not about punctuality."""
     from recognize_face import save_attendance

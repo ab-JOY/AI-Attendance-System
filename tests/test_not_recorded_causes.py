@@ -162,7 +162,8 @@ def test_the_write_upgrades_an_absent_row_and_nothing_else(scripted):
     Only Absent is overwritten: a Present must never be restamped with a later
     arrival time, and a Late must never be quietly promoted.
     """
-    cursor = scripted([{"student_id": STUDENT, "name": "T", "scheduled_start": None}])
+    cursor = scripted([{"student_id": STUDENT, "name": "T", "scheduled_start": None,
+                       "scheduled_end": None}])
 
     save_attendance(STUDENT, SUBJECT)
 
@@ -184,7 +185,8 @@ def test_status_is_the_last_assignment_in_the_upgrade(scripted):
     first and the other two would test a column that already says Present,
     keeping the absentee's NULL `time_in` on a student who did arrive.
     """
-    cursor = scripted([{"student_id": STUDENT, "name": "T", "scheduled_start": None}])
+    cursor = scripted([{"student_id": STUDENT, "name": "T", "scheduled_start": None,
+                       "scheduled_end": None}])
 
     save_attendance(STUDENT, SUBJECT)
 

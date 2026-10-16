@@ -45,6 +45,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from config.settings import settings  # noqa: E402
 from infra.db import db_cursor  # noqa: E402
+from services.punctuality import late_after  # noqa: E402
 
 PASS = "PASS"
 FAIL = "FAIL"
@@ -296,9 +297,9 @@ def check_demo_content(cursor):
 
 
 def check_subject_schedule(cursor, subject_id):
-    """R3: no grace period, so a start time in the past marks everyone Late."""
+    """R3: once the grace window has passed, everyone recognised is Late."""
     cursor.execute(
-        "SELECT subject_code, time_in FROM subjects WHERE id = %s", (subject_id,)
+        "SELECT subject_code, time_in, time_out FROM subjects WHERE id = %s", (subject_id,)
     )
     row = cursor.fetchone()
 
@@ -319,16 +320,18 @@ def check_subject_schedule(cursor, subject_id):
             f"{row['subject_code']} has no scheduled start, so nobody is Late",
         )
 
-    if isinstance(scheduled, timedelta):
-        scheduled = (datetime.min + scheduled).time()
+    deadline = late_after(scheduled, row["time_out"])
+    now = datetime.now()
+    since_midnight = now - now.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    if scheduled <= datetime.now().time():
+    if deadline <= since_midnight:
         return Result(
             "the demo subject starts later today",
             FAIL,
-            f"{row['subject_code']} started at {scheduled}, which has passed",
-            "derive_status() has no grace period, so every student recognised "
-            "from now on is recorded as Late. Move the scheduled start.",
+            f"{row['subject_code']} started at {scheduled} and its grace "
+            f"window closed at {deadline}",
+            "Every student recognised from now on is recorded as Late. "
+            "Move the scheduled start.",
         )
 
     return Result(
