@@ -1652,3 +1652,30 @@ shape the thesis; "should the dropdown be grouped" is not one.
 - **A question is for something only they can know or only they may decide** -
   what the machine did last night ([L15](#l15)), which calibration to accept
   (§7). Not for a choice between two designs I can describe.
+
+---
+
+## L36 - On Windows a test that reads the model can make the operator's retrain fail
+
+**2026-10-16, reported by the user from the Manage Students page.**
+
+While I was verifying a camera change, the user pressed Retrain. It failed
+with `PermissionError: [WinError 32]` on `os.replace(trainer.yml ->
+trainer.yml.bak)` in `train_model.write_model_atomically()`. The old model was
+left intact, and a retrain six minutes later, with nothing else running,
+succeeded. The smoke test, the stream benchmark and the full suite each load
+the 245 MB `trainer.yml` (~5 s open). Windows refuses to rename a file another
+process has open, so any concurrent reader (a test, a benchmark, another
+session's checks) can break a retrain. The user then had the unrelated camera
+change reverted, because the failure appeared right after testing it.
+
+**How to apply:**
+
+- **Before running anything that loads `trainer/` - the smoke test, the full
+  suite, `eval_heldout_accuracy.py`, a benchmark - tell the user it holds the
+  model for seconds and not to retrain meanwhile.** On this machine the user
+  is testing in the real app while I work.
+- **When a failure appears during or right after my runs, check whether my
+  runs caused it before it is blamed on the code change.** Here the trainer
+  directory's timestamps (`.tmp` left from the failed run, a later successful
+  `.bak`) told the story in one `ls`.

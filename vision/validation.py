@@ -363,7 +363,7 @@ def frontality_reason(
     ⚠️ **This used to be the last two checks of `rejection_reason()`, and
     living there is what made the liveness challenge unpassable.**
 
-    `recognize_face._stream_frames()` calls the geometry gate *before*
+    `recognize_face.recognise_frame()` calls the geometry gate *before*
     `tracker.assign()`, and a rejected frame hits a bare `continue`. So while
     these two checks decided whether a face was **seen at all**, a student
     obeying "Turn LEFT" was dropped the moment their nose passed

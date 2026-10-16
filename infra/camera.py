@@ -219,6 +219,29 @@ class CameraReader:
             # overlays onto what it is handed.
             return True, self._frame.copy()
 
+    def peek(self, after_sequence: int = 0, timeout: float = DEFAULT_READ_TIMEOUT_SECONDS):
+        """
+        Wait for a frame newer than `after_sequence`. `(sequence, frame)`.
+
+        For the video stream, which shows every camera frame while recognition
+        takes the ones it has time for through `read()`. **It does not count as
+        a delivery**, so it cannot take a frame away from `read()` - two
+        consumers of `read()` would each see roughly half the frames.
+
+        Returns `(after_sequence, None)` on timeout or once the reader stops.
+        """
+        with self._condition:
+            if self._sequence == after_sequence and self._running:
+                self._condition.wait_for(
+                    lambda: self._sequence != after_sequence or not self._running,
+                    timeout=timeout,
+                )
+
+            if self._frame is None or self._sequence == after_sequence:
+                return after_sequence, None
+
+            return self._sequence, self._frame.copy()
+
     # -- lifecycle ---------------------------------------------------------
 
     def stop(self) -> None:

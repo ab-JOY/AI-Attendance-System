@@ -1,4 +1,5 @@
 import logging
+import threading
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import NamedTuple
@@ -13,7 +14,7 @@ from infra.camera import CameraReader
 from infra.db import db_cursor
 from repositories import attendance as attendance_repo
 from security.paths import UnsafeStudentPathError, validate_student_id
-from vision.geometry import get_face_box
+from vision.geometry import FaceBox, get_face_box
 from vision.landmarks import LEFT_EYE_OUTER, NOSE_TIP, RIGHT_EYE_OUTER
 from vision.liveness import LivenessChallenge, LivenessConfig
 from vision.quality import RECOGNITION_QUALITY, quality_issue
@@ -534,7 +535,7 @@ def face_passes_geometry_gate(
 
     ⚠️ It used to be `is_valid_face_candidate()`, which also applies the
     profile's two frontality checks, and that is what made the liveness
-    challenge unpassable. This gate runs in `_stream_frames()` *before*
+    challenge unpassable. This gate runs in `recognise_frame()` *before*
     `tracker.assign()`, so refusing a turned head here does not merely skip a
     recognition attempt - it drops the frame entirely, which means the track's
     `last_seen` is never refreshed and `expire_old_tracks()` deletes it 1.5 s
@@ -1756,15 +1757,38 @@ def open_video_stream():
 
 def generate_frames(token):
     """
-    The MJPEG stream: one part per frame, for as long as the session runs.
+    The MJPEG stream: every camera frame, for as long as the session runs.
 
-    Ends when the session stops, when the camera goes away, or when the client
-    disconnects (which closes the generator). In every case the `finally`
-    gives up the viewer slot and **nothing here releases the camera** - that
-    was RE-10, where one browser tab closing ended the session for everyone.
+    ⚠️ **Recognition and the picture run at different speeds, on purpose.**
+    This used to be one loop: read a frame, recognise it, draw on it, send it.
+    Recognition costs 48-147 ms a frame (docs/benchmarks.md §3), so the
+    picture played at recognition's rate - measured 4.9 fps - and looked
+    choppy beside enrolment, which shows the browser's own camera. Now
+    `run_recognition()` runs on a thread doing exactly what the loop did, and
+    this generator sends each new camera frame with the latest results drawn
+    on it (measured 28.9 fps from a 30 fps source). The boxes can trail a
+    moving face by one recognition frame. No recognition decision depends on
+    this generator.
+
+    Ends when the session stops, when the camera goes away, when recognition
+    stops, or when the client disconnects (which closes the generator). In
+    every case the `finally` stops recognition and gives up the viewer slot,
+    and **nothing here releases the camera** - that was RE-10, where one
+    browser tab closing ended the session for everyone.
     """
+    latest = _LatestOverlays()
+    stop = threading.Event()
+
+    worker = threading.Thread(
+        target=_recognition_worker,
+        args=(token, latest.publish, stop.is_set),
+        name="recognition",
+        daemon=True,
+    )
+    worker.start()
+
     try:
-        for part in _stream_frames():
+        for part in _stream_frames(latest, worker):
             # The heartbeat that lets an abandoned slot be reclaimed. The
             # `finally` below is the tidy path and it is not reliable: a
             # generator's `finally` runs when it is closed or collected, and
@@ -1775,11 +1799,138 @@ def generate_frames(token):
             session.note_viewer_frame(token)
             yield part
     finally:
+        stop.set()
+
+        # Joined before the slot is released, so the next stream's
+        # recognition cannot start while this one is part way through a frame.
+        # `read()` gives up after 1 s, so this does not wait for long.
+        worker.join(timeout=3.0)
+
+        if worker.is_alive():
+            logger.warning(
+                "Recognition did not stop within 3 s of its stream closing. "
+                "It stops on its own once its slot is taken, but the next "
+                "stream's first frame waits for it."
+            )
+
         session.release_viewer(token)
 
 
-def _stream_frames():
+class FaceOverlay(NamedTuple):
+    """What `draw_face_result()` draws for one face: its arguments after the frame."""
+
+    box: FaceBox
+    student_name: str
+    status: str
+    confidence: float
+    track_id: int
+
+
+class _LatestOverlays:
+    """The most recent recognition results, shared by the two threads."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._overlays = None
+
+    def publish(self, overlays):
+        with self._lock:
+            self._overlays = overlays
+
+    def get(self):
+        """None until the first frame is recognised, then the latest list."""
+        with self._lock:
+            return self._overlays
+
+
+def draw_overlays(frame, overlays):
+    """Draw one frame's recognition results onto any frame."""
+    if overlays is None:
+        # Nothing recognised yet. Saying "No valid face detected" here would
+        # be a claim about a frame nobody has looked at.
+        return
+
+    if not overlays:
+        cv2.putText(
+            frame,
+            "No valid face detected",
+            (20, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 0, 255),
+            2
+        )
+        return
+
+    for overlay in overlays:
+        draw_face_result(frame, *overlay)
+
+
+def _stream_frames(latest, worker):
+    """Each new camera frame, with the latest results drawn on it."""
+    sequence = 0
+
     while True:
+        context = session.snapshot()
+
+        if not context.running:
+            break
+
+        if context.reader is None or context.detector is None:
+            break
+
+        # A stream showing a moving picture over boxes that never change would
+        # look like it was working. If recognition has stopped, so does this.
+        if not worker.is_alive():
+            break
+
+        sequence, frame = context.reader.peek(sequence)
+
+        if frame is None:
+            continue
+
+        draw_overlays(frame, latest.get())
+
+        part = encode_frame(frame)
+
+        if part is None:
+            continue
+
+        yield part
+
+    # RE-10 was three lines here: `if cap is not None: cap.release()`. The
+    # camera is shared session state, and a generator ends whenever its client
+    # goes away - so closing one browser tab released the camera underneath
+    # every other viewer and ended the session for the whole room. Teardown
+    # belongs to stop_camera(), which is the only thing that knows the session
+    # is actually over.
+
+
+# One frame of recognition at a time, whichever stream asked for it. With
+# `holds_viewer()` checked inside it, an old stream's recognition and its
+# replacement's can never touch the tracker at the same time.
+_recognition_lock = threading.Lock()
+
+
+def _recognition_worker(token, publish, stopped):
+    """`run_recognition()` on its thread. Logs a crash instead of losing it."""
+    try:
+        run_recognition(token, publish, stopped)
+    except Exception:
+        logger.exception(
+            "Recognition stopped with an error. The video stream ends with it."
+        )
+
+
+def run_recognition(token, publish, stopped=lambda: False):
+    """
+    The recognition loop: every frame recognition has time for, in order.
+
+    `publish` gets each frame's list of `FaceOverlay`s. Runs until the session
+    stops, the camera goes away, `stopped()` is true, or `token` no longer owns
+    the stream.
+    """
+    while not stopped() and session.holds_viewer(token):
         context = session.snapshot()
 
         if not context.running:
@@ -1798,98 +1949,84 @@ def _stream_frames():
             # noticed.
             continue
 
-        frame_height, frame_width = frame.shape[:2]
+        with _recognition_lock:
+            if not session.holds_viewer(token):
+                break
 
-        results = detect_faces(context, frame)
+            overlays = recognise_frame(context, frame)
 
-        used_track_ids = set()
-        claimed_student_ids = set()
-        displayed_face_count = 0
+        publish(overlays)
 
-        for face_landmarks in results.multi_face_landmarks or []:
-            raw_box = get_face_box(
-                face_landmarks,
-                frame_width,
-                frame_height
-            )
 
-            if not face_passes_geometry_gate(
-                face_landmarks,
-                frame_width,
-                frame_height,
-                raw_box
-            ):
-                # Invalid object-like detections are ignored
-                # completely and receive no visible box.
-                continue
+def recognise_frame(context, frame):
+    """
+    Detect, track, predict and decide for one frame. Returns its overlays.
 
-            track_id = context.tracker.assign(raw_box, used_track_ids)
-            used_track_ids.add(track_id)
+    The body of the old single loop, unchanged except that it returns what
+    to draw instead of drawing it.
+    """
+    frame_height, frame_width = frame.shape[:2]
 
-            state = context.tracker.state_for(track_id)
-            state.note_valid_frame()
+    results = detect_faces(context, frame)
 
-            # Do not draw or recognize a newly detected object
-            # until it has remained a geometrically valid face
-            # for several consecutive frames.
-            if state.is_provisional:
-                continue
+    used_track_ids = set()
+    claimed_student_ids = set()
+    overlays = []
 
-            displayed_face_count += 1
+    for face_landmarks in results.multi_face_landmarks or []:
+        raw_box = get_face_box(
+            face_landmarks,
+            frame_width,
+            frame_height
+        )
 
-            label, confidence, issue = predict_identity(
-                context,
-                frame,
-                face_landmarks,
-                state,
-                track_id
-            )
-
-            student_id, student_name, status, state = resolve_track_identity(
-                context,
-                state=state,
-                label=label,
-                confidence=confidence,
-                issue=issue,
-                face_landmarks=face_landmarks,
-                box=raw_box,
-                frame_width=frame_width,
-                frame_height=frame_height,
-                claimed_student_ids=claimed_student_ids
-            )
-
-            context.tracker.replace_state(track_id, state)
-
-            draw_face_result(
-                frame,
-                raw_box,
-                student_name,
-                status,
-                confidence,
-                track_id
-            )
-
-        if displayed_face_count == 0:
-            cv2.putText(
-                frame,
-                "No valid face detected",
-                (20, 40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (0, 0, 255),
-                2
-            )
-
-        part = encode_frame(frame)
-
-        if part is None:
+        if not face_passes_geometry_gate(
+            face_landmarks,
+            frame_width,
+            frame_height,
+            raw_box
+        ):
+            # Invalid object-like detections are ignored
+            # completely and receive no visible box.
             continue
 
-        yield part
+        track_id = context.tracker.assign(raw_box, used_track_ids)
+        used_track_ids.add(track_id)
 
-    # RE-10 was three lines here: `if cap is not None: cap.release()`. The
-    # camera is shared session state, and a generator ends whenever its client
-    # goes away - so closing one browser tab released the camera underneath
-    # every other viewer and ended the session for the whole room. Teardown
-    # belongs to stop_camera(), which is the only thing that knows the session
-    # is actually over.
+        state = context.tracker.state_for(track_id)
+        state.note_valid_frame()
+
+        # Do not draw or recognize a newly detected object
+        # until it has remained a geometrically valid face
+        # for several consecutive frames.
+        if state.is_provisional:
+            continue
+
+        label, confidence, issue = predict_identity(
+            context,
+            frame,
+            face_landmarks,
+            state,
+            track_id
+        )
+
+        student_id, student_name, status, state = resolve_track_identity(
+            context,
+            state=state,
+            label=label,
+            confidence=confidence,
+            issue=issue,
+            face_landmarks=face_landmarks,
+            box=raw_box,
+            frame_width=frame_width,
+            frame_height=frame_height,
+            claimed_student_ids=claimed_student_ids
+        )
+
+        context.tracker.replace_state(track_id, state)
+
+        overlays.append(
+            FaceOverlay(raw_box, student_name, status, confidence, track_id)
+        )
+
+    return overlays

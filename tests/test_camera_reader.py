@@ -282,6 +282,90 @@ def test_read_returns_a_copy_the_caller_may_draw_on(stopped_readers):
     )
 
 
+def test_peek_does_not_take_a_frame_from_read():
+    """
+    The video stream peeks every frame while recognition reads. If a peek
+    counted as a delivery, recognition would be handed only the frames the
+    stream had not already looked at.
+    """
+    released = threading.Event()
+
+    class OneFrameCapture:
+        def __init__(self):
+            self.reads = 0
+
+        def read(self):
+            self.reads += 1
+
+            if self.reads > 1:
+                released.wait(2.0)
+                return False, None
+
+            return True, frame(7)
+
+    reader = CameraReader(OneFrameCapture(), target_fps=1000.0)
+
+    try:
+        sequence, image = reader.peek(0, timeout=2.0)
+        assert image is not None
+        assert int(image[0, 0, 0]) == 7
+
+        ok, image = reader.read(timeout=0.5)
+        assert ok, "a peek took the frame that read() should have had"
+        assert reader.frames_delivered == 1
+    finally:
+        released.set()
+        reader.stop()
+
+
+def test_peek_waits_for_a_newer_frame(stopped_readers):
+    """Every peek after the first returns a frame the stream has not shown."""
+    capture = CountingCapture()
+    reader = make_reader(stopped_readers, capture, target_fps=1000.0)
+
+    sequences = []
+    sequence = 0
+
+    for _ in range(5):
+        sequence, image = reader.peek(sequence, timeout=2.0)
+        assert image is not None, "a frame was not delivered in time"
+        sequences.append(sequence)
+
+    assert sequences == sorted(set(sequences)), (
+        f"a peek returned a frame already shown: {sequences}"
+    )
+
+
+def test_peek_returns_a_copy_the_caller_may_draw_on(stopped_readers):
+    """The stream draws boxes onto what peek() hands it, like read()."""
+    capture = CountingCapture()
+    reader = make_reader(stopped_readers, capture, target_fps=1000.0)
+
+    sequence, first = reader.peek(0, timeout=2.0)
+    first[:] = 200
+
+    with reader._condition:
+        assert not np.array_equal(reader._frame, first), (
+            "the stream was handed the producer's buffer"
+        )
+
+
+def test_peek_times_out_rather_than_hanging(stopped_readers):
+    class DeadCapture:
+        def read(self):
+            time.sleep(0.01)
+            return False, None
+
+    reader = make_reader(stopped_readers, DeadCapture())
+
+    started = time.monotonic()
+    sequence, image = reader.peek(0, timeout=0.2)
+    waited = time.monotonic() - started
+
+    assert (sequence, image) == (0, None)
+    assert 0.15 < waited < 1.5, f"timeout was not honoured ({waited:.2f}s)"
+
+
 def test_frames_captured_can_exceed_frames_delivered(stopped_readers):
     """
     A camera ahead of the recogniser is normal and healthy. The counters exist

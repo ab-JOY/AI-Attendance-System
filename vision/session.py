@@ -544,6 +544,18 @@ class RecognitionSession:
             if self._viewer == token:
                 self._viewer_heartbeat_at = self._clock()
 
+    def holds_viewer(self, token: int) -> bool:
+        """
+        Whether `token` is still the stream that owns this running session.
+
+        Recognition runs on its own thread, so it does not stop when its stream
+        stops being read. After `acquire_viewer()` takes over an abandoned slot,
+        this check is what makes the old stream's recognition stop, so two
+        threads never advance one tracker.
+        """
+        with self._lock:
+            return self._running and self._viewer == token
+
     def release_viewer(self, token: int) -> None:
         """
         Give up a stream slot. Deliberately does not touch the camera (RE-10).

@@ -226,7 +226,7 @@ def test_a_turned_head_is_still_structurally_a_face():
     **a face** - which is a different question, and conflating the two is what
     broke liveness.
 
-    `recognize_face._stream_frames()` calls its gate before
+    `recognize_face.recognise_frame()` calls its gate before
     `tracker.assign()`, and a refused frame hits a bare `continue`. So while
     frontality lived inside the one gate, a student obeying "Turn LEFT" was
     not merely un-recognised: their frame was dropped, their box vanished,

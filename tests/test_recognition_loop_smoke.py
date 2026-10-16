@@ -55,6 +55,7 @@ from __future__ import annotations
 import glob
 import itertools
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -84,6 +85,9 @@ BACKGROUND_GREY = 60
 # Frontal stage, left-turn stage. Derived from the numbering above.
 FRONTAL_IMAGES = range(1, 26)
 LEFT_TURN_IMAGES = range(32, 41)
+
+# How many parts of the video stream the driven session reads before closing it.
+STREAM_PARTS = 5
 
 
 def _requirements_present() -> bool:
@@ -116,31 +120,38 @@ class ScriptedCameraReader:
     """
     Stands in for `CameraReader`: hands out a fixed list of frames, once each.
 
-    When the script runs out it clears `attendance_running`, which is how the
-    real loop is asked to stop, so `generate_frames()` terminates the way it
-    does in production rather than by having the test abandon the generator
-    part way through.
+    `exhausted()` is what the fixtures pass to `run_recognition()` as
+    `stopped`, so recognition reads exactly the script and stops. `peek()` is
+    the video stream's side: it shows the last frame handed out, as a fresh
+    frame each time, the way a live camera keeps producing pictures.
     """
 
     def __init__(self, frames):
         self._frames = list(frames)
         self._index = 0
+        self._peeks = 0
         self.reads = 0
 
-        # Set after construction: what it has to call is the session, and the
-        # session needs this reader to exist first.
-        self.on_exhausted = lambda: None
+    def exhausted(self):
+        return self._index >= len(self._frames)
 
-    def read(self):
-        self.reads += 1
-
-        if self._index >= len(self._frames):
-            self.on_exhausted()
+    def read(self, timeout=None):
+        if self.exhausted():
+            # The real reader blocks for up to a second here. Not spinning
+            # keeps a stream test's recognition thread from burning a core.
+            time.sleep(0.01)
             return False, None
 
+        self.reads += 1
         frame = self._frames[self._index]
         self._index += 1
         return True, frame.copy()
+
+    def peek(self, after_sequence=0, timeout=None):
+        time.sleep(0.01)
+        self._peeks += 1
+        frame = self._frames[max(self._index - 1, 0)]
+        return self._peeks, frame.copy()
 
     def stop(self):
         pass
@@ -372,21 +383,29 @@ def driven_session(
             pytest.skip("no LBPH model loaded - run train_model.py first")
 
         token = session.acquire_viewer()
-        stream = module.generate_frames(token)
 
-        # Consume exactly the script, then close the stream - which is what a
+        # Recognition over exactly the script, in this thread, so every
+        # assertion about tracking and attendance reads one deterministic run.
+        # `generate_frames()` would run the same function on a thread, racing
+        # the script.
+        overlays = []
+        module.run_recognition(token, overlays.append, reader.exhausted)
+
+        # Then the stream, for a few parts, then closed - which is what a
         # browser tab closing does to the generator. Deliberately *not*
-        # stop()ping the session to end the loop: stop() resets the tracker,
-        # and the tracker is what most of the assertions below read. Closing
-        # the stream instead is also the RE-10 case, so the camera state after
-        # this line is evidence rather than incidental.
-        parts = list(itertools.islice(stream, len(scripted_frames)))
+        # stop()ping the session to end it: stop() resets the tracker, and the
+        # tracker is what most of the assertions below read. Closing the
+        # stream instead is also the RE-10 case, so the camera state after this
+        # line is evidence rather than incidental.
+        stream = module.generate_frames(token)
+        parts = list(itertools.islice(stream, STREAM_PARTS))
         stream.close()
 
         yield {
             "module": module,
             "session": session,
             "student_id": student_id,
+            "overlays": overlays,
             "parts": parts,
             "recorder": recorder,
             "capture": capture,
@@ -545,16 +564,12 @@ def interrupted_session(recognition_module, enrolled_student, interrupted_frames
             pytest.skip("no LBPH model loaded - run train_model.py first")
 
         token = session.acquire_viewer()
-        stream = module.generate_frames(token)
-
-        parts = list(itertools.islice(stream, len(interrupted_frames)))
-        stream.close()
+        module.run_recognition(token, lambda _overlays: None, reader.exhausted)
 
         yield {
             "module": module,
             "session": session,
             "student_id": student_id,
-            "parts": parts,
             "recorder": recorder,
             "tracker": session.tracker,
         }
@@ -652,8 +667,9 @@ def test_every_frame_is_a_well_formed_mjpeg_part(driven_session):
     """
     parts = driven_session["parts"]
 
-    assert len(parts) == 60, (
-        f"expected one part per scripted frame, got {len(parts)}"
+    assert len(parts) == STREAM_PARTS, (
+        f"expected {STREAM_PARTS} parts before the stream was closed, got "
+        f"{len(parts)}"
     )
 
     for index, part in enumerate(parts):
@@ -674,10 +690,98 @@ def test_every_frame_is_a_well_formed_mjpeg_part(driven_session):
 
 
 def test_the_loop_consumed_every_scripted_frame(driven_session):
-    """One read per frame, no frame silently dropped or re-read."""
+    """One read and one set of results per frame, none dropped or re-read."""
     reader = driven_session["reader"]
 
     assert reader.reads == 60
+    assert len(driven_session["overlays"]) == 60
+
+
+def test_the_confirmed_face_is_drawn_with_its_name(driven_session):
+    """The results the stream draws name the student the tracker confirmed."""
+    tracker = driven_session["tracker"]
+    state = next(iter(tracker.states.values()))
+
+    last = driven_session["overlays"][-1]
+
+    assert len(last) == 1, f"expected one face on the last frame, got {last}"
+    assert last[0].student_name == state.student_name
+
+
+def test_the_picture_does_not_wait_for_recognition(driven_session, monkeypatch):
+    """
+    ⚠️ **The reason the stream and recognition were split.** One loop sent a
+    frame only after recognising it, so the picture played at recognition's
+    48-147 ms a frame and looked choppy. Here recognition takes half a second a
+    frame, and the stream must keep sending pictures anyway.
+    """
+    module = driven_session["module"]
+    session = driven_session["session"]
+
+    def slow_recognition(token, publish, stopped):
+        while not stopped():
+            time.sleep(0.5)
+            publish([])
+
+    monkeypatch.setattr(module, "run_recognition", slow_recognition)
+
+    token = session.acquire_viewer()
+    stream = module.generate_frames(token)
+
+    try:
+        started = time.monotonic()
+        parts = list(itertools.islice(stream, 10))
+        elapsed = time.monotonic() - started
+    finally:
+        stream.close()
+
+    assert len(parts) == 10
+    assert elapsed < 1.0, (
+        f"10 parts took {elapsed:.2f} s against recognition at 0.5 s a frame - "
+        "the stream is waiting for recognition again"
+    )
+    assert not session.has_viewer, "closing the stream did not free the slot"
+
+
+def test_recognition_stops_once_its_stream_loses_the_slot(
+    driven_session, scripted_frames, monkeypatch
+):
+    """
+    Recognition runs on a thread, so an abandoned stream's recognition does not
+    stop when its stream stops being read. When `acquire_viewer()` takes the
+    slot over, it has to stop, or two threads advance one tracker - the
+    double-counted votes the single-viewer rule exists to prevent.
+
+    The reader has frames to give and `recognise_frame` is replaced by a
+    recorder, so a missing check shows up as a recognised frame rather than as
+    a loop that had nothing to read anyway.
+    """
+    module = driven_session["module"]
+    session = driven_session["session"]
+
+    monkeypatch.setattr(
+        session, "_reader", ScriptedCameraReader(scripted_frames[:3])
+    )
+    recognised = []
+    monkeypatch.setattr(
+        module,
+        "recognise_frame",
+        lambda context, frame: recognised.append(frame) or [],
+    )
+
+    current = session.acquire_viewer()
+
+    try:
+        deadline = time.monotonic() + 0.5
+        module.run_recognition(
+            current - 1, lambda _overlays: None, lambda: time.monotonic() > deadline
+        )
+    finally:
+        session.release_viewer(current)
+
+    assert recognised == [], (
+        f"a stream that lost its slot recognised {len(recognised)} frame(s)"
+    )
 
 
 # ---------------------------------------------------------------------------

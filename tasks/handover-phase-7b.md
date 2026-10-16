@@ -287,3 +287,46 @@ integration 86 passed, the missing re-copy caught as a mutation.
 - 009 still seeds the old name; a fresh install gets the new one from 012.
 - The user tested §8's registration and edit in a browser and reported it
   working. Their report, not re-run here.
+
+---
+
+## 9. Added 2026-10-16 — the attendance video no longer plays at recognition speed
+
+**Asked for by the user:** the camera looked laggy while verifying, unlike
+enrolment; the way faces are verified was not to change. **Tested by the user
+in the real app and reported working.**
+
+**Cause:** `_stream_frames()` read a frame, recognised it, drew on it and sent
+it, so the MJPEG stream ran at recognition's rate. Enrolment is smooth because
+the browser shows its own camera.
+
+| Change | Files |
+|---|---|
+| `generate_frames()` starts a `recognition` thread running `run_recognition()`, and sends **every** camera frame with the latest `FaceOverlay`s drawn on it | `recognize_face.py` |
+| The old loop body is `recognise_frame()`, unchanged except that it returns overlays instead of drawing them | `recognize_face.py` |
+| `CameraReader.peek()`: newest frame **without** counting as a delivery, so the stream never takes a frame from recognition's `read()` | `infra/camera.py` |
+| `RecognitionSession.holds_viewer(token)`: an abandoned stream's recognition stops once its slot is taken over | `vision/session.py` |
+
+**Measured** (real pipeline on dataset composites, 30 fps source, writes
+stubbed, DB tripwired; a scratch script, not committed): before **4.9 fps**,
+frame gap p50 219 ms; after **28.9 fps**, p50 31 ms. Fast suite 1494 passed,
+89 skipped (+7 new) on the first application of this change; after it was
+reverted and re-applied unchanged, only the model-free tests were re-run
+(183 passed) - see L36 for why. Mutations: the stream waiting on recognition -
+caught; both slot checks removed - caught (either alone is covered by the
+other, on purpose).
+
+- ⚠️ **Recognition no longer stops when the browser stops reading.** It stops
+  on the stream's `finally`, on session stop, or on `holds_viewer()` going
+  false. `_recognition_lock` + the in-lock `holds_viewer()` check keeps two
+  threads off one tracker during a takeover. Do not remove it.
+- ⚠️ **Boxes can trail a moving face by one recognition frame.** Cosmetic; no
+  decision reads the drawn frame.
+- ⚠️ **If the recognition thread dies, the stream ends** and the exception is
+  logged - a moving picture with frozen boxes would look like it was working.
+- The smoke test drives `run_recognition()` synchronously for the
+  tracking/attendance assertions and `generate_frames()` only for stream shape.
+- ⚠️ **L36: tests that load `trainer.yml` make a concurrent retrain fail on
+  Windows** (`WinError 32` on the rename to `.bak`). Warn the user first.
+- A stray line typed at the end of `face_preprocessing.py` broke every import
+  of the recognition path; it was removed and the file matches HEAD.
