@@ -46,18 +46,9 @@
                 {% endfor %}
             </select>
 
-            <label for="day">Day</label>
-            <select
-                id="day"
-                name="day"
-                required>
-                <option value="">Select Day</option>
-                <option value="Monday">Monday</option>
-                <option value="Tuesday">Tuesday</option>
-                <option value="Wednesday">Wednesday</option>
-                <option value="Thursday">Thursday</option>
-                <option value="Friday">Friday</option>
-            </select>
+            {% with days=[] %}
+                {% include "day_picker.html" %}
+            {% endwith %}
 
             {#
                 DM-7. Which section the subject is taught to: a program, a
@@ -131,7 +122,7 @@
             <th>Code</th>
             <th>Subject</th>
             <th>Instructor</th>
-            <th>Day</th>
+            <th>Days</th>
             <th>Program</th>
             <th>Year</th>
             <th>Section</th>

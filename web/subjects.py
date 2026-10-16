@@ -10,6 +10,7 @@ is recorded, which is the same class of decision as adding a student.
 from __future__ import annotations
 
 import logging
+from datetime import time, timedelta
 
 import mysql.connector
 from flask import (
@@ -60,6 +61,66 @@ SECTION_AT = SUBJECT_FIELDS.index('time_in')
 # instructor_id nullable on purpose).
 REQUIRED_SUBJECT_FIELDS = ('subject_code', 'subject_name')
 
+# The days a class can meet, in week order. A PRMSU subject meets on two days
+# at the same time - Monday and Wednesday, say - so the form offers one box
+# per day and `subjects.day` (VARCHAR(100), display only) holds them joined:
+# "Monday, Wednesday". Nothing filters or computes on the column, so the text
+# form needed no migration, and every single-day value already in it is the
+# one-day case of the same format.
+WEEKDAYS = (
+    'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday',
+)
+DAY_SEPARATOR = ', '
+
+
+def meeting_days(stored):
+    """The days in a stored `subjects.day`, as a list. `[]` for NULL."""
+    return [day.strip() for day in (stored or '').split(',') if day.strip()]
+
+
+def _days_from(form):
+    """
+    `(stored_text, None)` from the ticked day boxes, or `(None, message)`.
+
+    Stored in week order whatever order the browser sent them, so the same
+    schedule is always the same text.
+    """
+    chosen = set(form.getlist('day'))
+
+    if not chosen:
+        return None, "Choose at least one day the class meets."
+
+    unknown = chosen.difference(WEEKDAYS)
+
+    if unknown:
+        return None, f"Not a day the form offers: {', '.join(sorted(unknown))}."
+
+    return DAY_SEPARATOR.join(day for day in WEEKDAYS if day in chosen), None
+
+
+@subjects_bp.app_template_filter('time_box')
+def time_box(value):
+    """
+    A stored TIME as `<input type="time">` needs it: `HH:MM`, or `''`.
+
+    ⚠️ MySQL hands a TIME back as a timedelta, and `str()` of seven and a half
+    hours is `7:30:00` - no leading zero. The browser rejects that as invalid
+    and shows the box **empty**, so editing any subject that starts before
+    10:00 opened with blank times.
+    """
+    if value is None or value == '':
+        return ''
+
+    if isinstance(value, timedelta):
+        minutes = int(value.total_seconds()) // 60
+        return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+    if isinstance(value, time):
+        return value.strftime('%H:%M')
+
+    hours, _, rest = str(value).partition(':')
+    return f"{int(hours):02d}:{rest[:2]}"
+
 
 def _subject_form():
     """
@@ -80,6 +141,22 @@ def _subject_form():
     """
     values = tuple(
         request.form.get(field, '').strip() for field in SUBJECT_FIELDS
+    )
+
+    days, problem = _days_from(request.form)
+
+    if problem is not None:
+        return None, None, error_page(400, problem)
+
+    # ⚠️ A blank time must reach the database as NULL. This server is not in
+    # strict mode, so `''` into a TIME column is stored as 00:00:00 on an
+    # INSERT reporting success - and a class starting at midnight records
+    # every student Late.
+    values = tuple(
+        days if field == 'day'
+        else (value or None) if field in ('time_in', 'time_out')
+        else value
+        for field, value in zip(SUBJECT_FIELDS, values, strict=True)
     )
 
     # DM-4. The instructor is an account chosen from a list, not a typed name:
@@ -151,6 +228,7 @@ def subjects():
     return render_template(
         "subjects.html",
         subjects=records,
+        weekdays=WEEKDAYS,
         instructors=instructors,
         programs=programs,
         year_levels=academics_repo.YEAR_LEVELS,
@@ -228,6 +306,8 @@ def edit_subject(id):
     return render_template(
         "edit_subject.html",
         subject=subject,
+        weekdays=WEEKDAYS,
+        days=meeting_days(subject.get("day")),
         instructors=instructors,
         programs=programs,
         year_levels=academics_repo.YEAR_LEVELS,

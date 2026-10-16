@@ -29,13 +29,14 @@ from tests.conftest import PROJECT_ROOT
 
 TEMPLATES = PROJECT_ROOT / "templates"
 
-# Pages, as opposed to the layout and the two partials that are included in
-# one. Only pages extend base.html.
+# Pages, as opposed to the layout and the partials that are included in one.
+# Only pages extend base.html.
 PARTIALS = {
     "base.html",
     "sidebar.html",
     "training_status.html",
     "student_group_row.html",
+    "day_picker.html",
 }
 
 

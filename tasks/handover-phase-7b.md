@@ -330,3 +330,32 @@ other, on purpose).
   Windows** (`WinError 32` on the rename to `.bak`). Warn the user first.
 - A stray line typed at the end of `face_preprocessing.py` broke every import
   of the recognition path; it was removed and the file matches HEAD.
+
+---
+
+## 10. Added 2026-10-16 — a grace window before Late (FS-19)
+
+User-reported: Late was `arrival > time_in`, no window (measured: THS2 11:45:00,
+Late at 11:45:20). Now `services/punctuality.py` — 15 minutes for a class under
+90 minutes long, 30 for 90 minutes or more, 15 when `time_out` is missing.
+`save_attendance()` selects `sub.time_out AS scheduled_end`; preflight R3 uses
+`late_after()`. Details and the open questions (labs, two meeting days, old rows
+not re-derived): `todo.md` §12.
+
+- ⚠️ **Keep the policy out of `recognize_face.py`.** It is pure so preflight
+  can import it without the ~9 s recognition import.
+- ⚠️ **Fake cursors for `save_attendance()` must carry `scheduled_end`**
+  (`tests/test_not_recorded_causes.py`) — the row is indexed, not `.get()`.
+- **Also fixed the same day, at the user's request** (`todo.md` §12 open 2):
+  - A subject meets on several days: checkboxes in `templates/day_picker.html`
+    (a partial — listed in `tests/test_templates.py::PARTIALS`), parsed by
+    `web/subjects.py::_days_from()`, stored `Monday, Wednesday` in week order.
+    ⚠️ `subjects.day` is free text read only for display; if anything ever
+    needs to *query* by day, that is the moment for a `subject_days` table.
+  - Edit's time boxes go through the `time_box` filter (`HH:MM`). The raw
+    timedelta rendered `7:30:00`, which the browser shows **blank**.
+  - A blank time is written as NULL. `''` into TIME on this non-strict server
+    is stored as 00:00:00, i.e. a midnight start and everyone Late.
+  - Verified: route tests (+16, two mutations caught), fast suite 1537 passed,
+    integration 88 passed; the live `/edit_subject/1` renders `07:00`/`08:00`
+    with Monday ticked. **Not clicked through in a browser.**

@@ -1108,3 +1108,42 @@ unchanged at 18 (all `web/api.py`, pre-existing). See
    first-year "B" students are on the class lists of two fourth-year "4B"
    subjects. Not touched.
 4. **Run the mobile registration screen.** Still no React Native harness here.
+
+---
+
+## 12. FS-19 — Late with no grace window (2026-10-16)
+
+**Raised 2026-10-16 by the user:** students recognised before or just after
+the start were marked Late. PRMSU's rule: a one-hour class gives 15 minutes
+after the start to be Present, a one-and-a-half-hour class 30 minutes.
+
+| Finding | Evidence |
+|---|---|
+| **FS-19** `derive_status()` had no grace window | `arrival > scheduled_start` → Late. Deployed register: THS2 scheduled 11:45:00, **Late at 11:45:20**. Stored schedules were correct (no midnight `time_in`), so the rule, not the data, was the defect. `scripts/preflight.py` R3 had already named it ("no grace period") |
+
+### Review
+
+- [x] `services/punctuality.py` (new, pure): window from `time_out - time_in`
+      — under 90 min → 15 min, 90 min or more → 30 min; unknown or
+      non-positive length → 15. Present up to and including the last second.
+- [x] `save_attendance()` reads `time_out` and delegates; the inline
+      `derive_status()` is gone from `recognize_face.py`.
+- [x] Preflight R3 uses the same deadline (`late_after()`).
+- [x] Fast suite **1521 passed, 91 skipped**; `test_attendance_schema.py`
+      integration **21 passed** (+2 round-trip cases through `time_out`);
+      two mutations (zero window, no long window) both caught.
+
+### Open, the user's
+
+1. **Classes of 2-3 hours (laboratories) get 30 minutes.** The user named 60
+   and 90 minutes only; the cut is at 90. One constant, `LONG_CLASS_FROM`.
+2. ~~**A subject has one `day`.**~~ ✅ **Fixed 2026-10-16** at the user's
+   request: one checkbox per day, Monday-Saturday (`templates/day_picker.html`),
+   stored in week order as `Monday, Wednesday` in the existing
+   `subjects.day` VARCHAR(100) - display-only, so no migration. Same pass: the
+   Edit form's times render `HH:MM` (`time_box` filter) instead of `7:30:00`,
+   which the browser showed blank; and a blank time is written as NULL, not
+   `''`, which this non-strict server stores as midnight - everyone Late.
+3. **Rows already written stay as they are.** Earlier Lates inside what is
+   now the window were not re-derived; the FS-10 correction screen can fix
+   any that matter.

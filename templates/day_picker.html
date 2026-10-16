@@ -1,0 +1,22 @@
+{#
+    The days a class meets. A PRMSU subject meets on two days at the same
+    time - Monday and Wednesday, say - so this is one box per day rather than
+    one dropdown. Stored as "Monday, Wednesday" (web/subjects.py, WEEKDAYS).
+
+    Expects `weekdays`, and `days` - the ones already chosen, empty on Add.
+    At least one is required; a checkbox group cannot say so in HTML, so the
+    server does.
+#}
+<fieldset class="day-picker">
+    <legend>Days</legend>
+    {% for weekday in weekdays %}
+        <label>
+            <input
+                type="checkbox"
+                name="day"
+                value="{{ weekday }}"
+                {% if weekday in days %}checked{% endif %}>
+            {{ weekday }}
+        </label>
+    {% endfor %}
+</fieldset>

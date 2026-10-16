@@ -53,15 +53,7 @@
                 </p>
             {% endif %}
 
-            <label for="day">Day</label>
-            <select id="day" name="day" required>
-                <option value="{{ subject.day }}" selected>{{ subject.day }}</option>
-                <option value="Monday">Monday</option>
-                <option value="Tuesday">Tuesday</option>
-                <option value="Wednesday">Wednesday</option>
-                <option value="Thursday">Thursday</option>
-                <option value="Friday">Friday</option>
-            </select>
+            {% include "day_picker.html" %}
 
             {#
                 DM-7. Which section the subject is taught to - a program, a
@@ -118,7 +110,7 @@
                 type="time"
                 id="time_in"
                 name="time_in"
-                value="{{ subject.time_in }}"
+                value="{{ subject.time_in|time_box }}"
                 required>
 
             <label for="time_out">Time Out</label>
@@ -126,7 +118,7 @@
                 type="time"
                 id="time_out"
                 name="time_out"
-                value="{{ subject.time_out }}"
+                value="{{ subject.time_out|time_box }}"
                 required>
 
             <button type="submit">Update Subject</button>

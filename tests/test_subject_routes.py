@@ -25,6 +25,7 @@ No database: every case here is decided before or instead of a query.
 from __future__ import annotations
 
 import contextlib
+from datetime import time, timedelta
 
 import mysql.connector
 import pytest
@@ -317,3 +318,153 @@ def test_a_program_deleted_under_the_form_is_refused_not_written(
     assert response.status_code == 400
     assert "no longer exists" in response.get_data(as_text=True)
     assert written == [], "a subject was written with no section"
+
+
+# ---------------------------------------------------------------------------
+# A subject meets on more than one day, and the edit form keeps its times
+#
+# Reported by the user 2026-10-16. A PRMSU subject meets twice a week at the
+# same time - Monday and Wednesday, say - and the form had one Day dropdown.
+# And `edit_subject.html` rendered `value="{{ subject.time_in }}"` from the
+# timedelta MySQL returns: `7:30:00`, which `<input type="time">` rejects, so
+# every subject starting before 10:00 opened for editing with blank times.
+# ---------------------------------------------------------------------------
+
+
+def _written(no_database, monkeypatch):
+    written = []
+
+    monkeypatch.setattr(
+        no_database.subjects_repo, "insert",
+        lambda _cursor, *values: written.append(values),
+    )
+    monkeypatch.setattr(
+        no_database.subjects_repo, "update",
+        lambda _cursor, _id, *values: written.append(values),
+    )
+
+    return written
+
+
+DAY_AT = 3
+
+
+@pytest.mark.parametrize("route", ["/add_subject", "/update_subject/7"])
+def test_the_days_are_stored_in_week_order(
+    client, no_database, monkeypatch, route
+):
+    """Whatever order the browser sends them, one schedule is one text."""
+    written = _written(no_database, monkeypatch)
+    form = dict(COMPLETE_FORM, day=["Wednesday", "Monday"])
+
+    sign_in(client)
+    response = client.post(route, data=form, follow_redirects=False)
+
+    assert response.status_code == 302
+    assert written[0][DAY_AT] == "Monday, Wednesday"
+
+
+@pytest.mark.parametrize(
+    ("days", "named"),
+    [
+        ([], "at least one day"),
+        (["Monday", "Funday"], "Funday"),
+    ],
+    ids=["none ticked", "not a day"],
+)
+def test_a_bad_set_of_days_is_refused_by_name(
+    client, no_database, monkeypatch, days, named
+):
+    written = _written(no_database, monkeypatch)
+    form = {key: value for key, value in COMPLETE_FORM.items() if key != "day"}
+    form["day"] = days
+
+    sign_in(client)
+    response = client.post("/add_subject", data=form)
+
+    assert response.status_code == 400
+    assert named in response.get_data(as_text=True)
+    assert written == []
+
+
+def test_a_blank_time_is_written_as_null_not_midnight(
+    client, no_database, monkeypatch
+):
+    """
+    ⚠️ This server is not in strict mode: `''` into a TIME column is stored as
+    00:00:00 on an INSERT reporting success, and a class that starts at
+    midnight records every student Late.
+    """
+    written = _written(no_database, monkeypatch)
+    form = dict(COMPLETE_FORM, time_in="", time_out="")
+
+    sign_in(client)
+    client.post("/add_subject", data=form)
+
+    assert written[0][-2:] == (None, None)
+
+
+def test_the_edit_form_shows_a_morning_subject_as_it_is_stored(
+    client, no_database, monkeypatch
+):
+    monkeypatch.setattr(
+        no_database.subjects_repo,
+        "get",
+        lambda _cursor, _id: {
+            "id": 1,
+            "subject_code": "SEC-TEST-101",
+            "subject_name": "Nothing In Particular",
+            "instructor": "",
+            "instructor_id": None,
+            "day": "Monday, Wednesday",
+            "course": "BSIT",
+            "section": "A",
+            "section_id": SECTION_ID,
+            "program_id": 5,
+            "year_level": 4,
+            "typed_course": "BSIT",
+            "typed_section": "A",
+            # What MySQL hands back for a TIME.
+            "time_in": timedelta(hours=7, minutes=30),
+            "time_out": timedelta(hours=8, minutes=30),
+        },
+    )
+
+    sign_in(client)
+    body = client.get("/edit_subject/1").get_data(as_text=True)
+
+    assert 'value="07:30"' in body, "a browser shows `7:30:00` as blank"
+    assert 'value="08:30"' in body
+
+    checked = {
+        day for day in ("Monday", "Tuesday", "Wednesday", "Thursday",
+                        "Friday", "Saturday")
+        if f'value="{day}"\n                checked' in body
+    }
+    assert checked == {"Monday", "Wednesday"}
+
+
+@pytest.mark.parametrize(
+    ("stored", "shown"),
+    [
+        (timedelta(hours=7, minutes=30), "07:30"),
+        (timedelta(hours=13, minutes=5), "13:05"),
+        (time(7, 30), "07:30"),
+        ("7:30:00", "07:30"),
+        ("08:00", "08:00"),
+        (None, ""),
+    ],
+    ids=["timedelta", "afternoon", "time", "text", "already hh:mm", "null"],
+)
+def test_time_box_gives_the_browser_hh_mm(stored, shown):
+    from web.subjects import time_box
+
+    assert time_box(stored) == shown
+
+
+def test_meeting_days_reads_back_what_the_form_stores():
+    from web.subjects import meeting_days
+
+    assert meeting_days("Monday, Wednesday") == ["Monday", "Wednesday"]
+    assert meeting_days("Friday") == ["Friday"]
+    assert meeting_days(None) == []

@@ -253,6 +253,34 @@ select:focus{
     border-color:#0A1F8F;
 }
 
+/* The days a subject meets: one box per day, on one wrapping row. The rule
+   above gives every input the full width, which a checkbox must not take. */
+.day-picker{
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px 18px;
+    margin:10px 0;
+    padding:10px 12px;
+    border:2px solid #ddd;
+    border-radius:10px;
+}
+
+.day-picker legend{
+    padding:0 6px;
+}
+
+.day-picker label{
+    display:flex;
+    align-items:center;
+    gap:6px;
+    font-weight:normal;
+}
+
+.day-picker input{
+    width:auto;
+    margin:0;
+}
+
 /* ===================================
    BUTTONS
 =================================== */
