@@ -399,3 +399,47 @@ no confirmed-first sort; no adopt guard; sequential `map`.
 - ⚠️ On a 4-core machine the gain is up to ~4×, not 5×.
 - Not done: FaceMesh's own cost with 5 faces and the full loop's fps were not
   measured — that needs 5 real people (L25: composites are not detected).
+
+## CAM-2 - a connected webcam is always opened first (2026-10-16)
+
+**Reported:** with the EMEET USB webcam plugged in, sessions opened the
+laptop camera, and the camera was slow to open.
+
+**Two causes, both measured on the deployment machine:**
+
+1. `selected_camera.txt` held `1`, which is the built-in `ACER HD User
+   Facing`. The saved index was tried before any scan. DirectShow order here:
+   0 `EMEET SmartCam C960 Ultra` (USB), 1 `ACER HD User Facing` (built in),
+   2 `EMEET STUDIO CAMERA` (virtual, black).
+2. The EMEET fades in from black over ~0.5 s. The old fixed 9-frame probe
+   judged only the fade (brightness 1..24, median 6). On darker starts the log
+   shows it **rejected at mean 0.0**, and the session fell to the laptop.
+
+**Changes:**
+
+- `infra/camera_devices.py` (new, ctypes only, no dependency) names each
+  DirectShow index and asks Windows whether it is external
+  (`DEVPKEY_Device_InLocalMachineContainer` False). Built in vs USB cannot be
+  told apart by bus or by name; this property can. It takes 0.1 s, works off
+  the main thread, and returns `[]` off Windows or on any error. Selection
+  then falls back to the old behaviour.
+- `open_best_camera()`: explicit index, then **connected webcams** (the saved
+  one first if several are connected), then the saved index, then the scan.
+  It does not overwrite the saved index, so unplugging the webcam goes back to
+  the previous choice. Indices that already gave no picture are not reopened.
+- `probe_camera()`: the 9-frame window slides through warm-up for up to
+  `PROBE_DEADLINE_SECONDS` = 2.5 s / `PROBE_MAX_FRAMES` = 45. A healthy camera
+  still costs one window. The black virtual camera (1 s per read) went from
+  9.7 s to 3.6 s.
+- The picker shows device names, marks the connected webcam, and preselects
+  what the next session will open. `/cameras/select` says so when a manual
+  choice will be overridden by a connected webcam.
+
+**Measured:** `open_best_camera()` picks the EMEET in 1.1-1.6 s (5 runs). The
+picker scan took ~8 s, previously 11-13 s. `configure_camera()` was left
+alone: MJPG made configuring slower (1.2 s vs 0.6 s) with no fps gain.
+
+⚠️ The DirectShow index order is assumed to equal OpenCV's `CAP_DSHOW` order.
+Both enumerate `CLSID_VideoInputDeviceCategory` via `ICreateDevEnum`, and this
+was verified on this machine by frames and logs. If the backend ever changes to
+MSMF, the names will no longer line up with the indices.

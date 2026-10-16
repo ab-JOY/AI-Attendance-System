@@ -18,10 +18,13 @@ No camera required: `cv2.VideoCapture` is faked.
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import pytest
 
 import camera_utils
+from infra.camera_devices import CameraDevice
 from camera_utils import (
     MIN_FRAME_BRIGHTNESS,
     MIN_FRAME_DETAIL,
@@ -154,6 +157,9 @@ def no_saved_preference(monkeypatch, tmp_path):
     monkeypatch.setattr(
         camera_utils, "CONFIG_FILE", str(tmp_path / "selected_camera.txt")
     )
+    # And no named devices: the real list describes this machine's cameras,
+    # not the fakes. Tests that want a connected webcam say so.
+    monkeypatch.setattr(camera_utils, "list_camera_devices", lambda: [])
 
 
 # ---------------------------------------------------------------------------
@@ -594,3 +600,194 @@ def test_get_available_cameras_lists_only_usable_ones(monkeypatch):
     install_devices(monkeypatch, devices)
 
     assert camera_utils.get_available_cameras(max_tested=5) == [2, 3]
+
+
+# ---------------------------------------------------------------------------
+# A connected webcam comes first (CAM-2)
+# ---------------------------------------------------------------------------
+
+
+def connect_webcams(monkeypatch, *devices):
+    monkeypatch.setattr(camera_utils, "list_camera_devices", lambda: list(devices))
+
+
+def test_a_connected_webcam_beats_the_saved_laptop_camera(monkeypatch):
+    """
+    The deployment machine on 2026-10-16: EMEET webcam at index 0, built-in
+    ACER at index 1, and `selected_camera.txt` holding `1`. Both give a
+    picture. The webcam must win - and the saved choice must survive, so that
+    unplugging the webcam returns to it.
+    """
+    devices = {
+        0: FakeCapture([scene_frame(i) for i in range(PROBE_FRAMES)]),
+        1: FakeCapture([scene_frame(i) for i in range(PROBE_FRAMES)]),
+    }
+    opened = install_devices(monkeypatch, devices)
+    connect_webcams(
+        monkeypatch,
+        CameraDevice(0, "EMEET SmartCam C960 Ultra", external=True),
+        CameraDevice(1, "ACER HD User Facing", external=False),
+    )
+    camera_utils.save_camera_index(1)
+
+    assert open_best_camera() is devices[0], "the laptop camera was chosen"
+    assert 1 not in opened, "the laptop camera was opened for nothing"
+    assert camera_utils.get_saved_camera_index() == 1
+
+
+def test_a_webcam_at_a_higher_index_is_still_found_first(monkeypatch):
+    devices = {
+        0: FakeCapture([scene_frame(i) for i in range(PROBE_FRAMES)]),
+        2: FakeCapture([scene_frame(i) for i in range(PROBE_FRAMES)]),
+    }
+    install_devices(monkeypatch, devices)
+    connect_webcams(
+        monkeypatch,
+        CameraDevice(0, "Integrated Camera", external=False),
+        CameraDevice(2, "USB Webcam", external=True),
+    )
+
+    assert open_best_camera() is devices[2]
+
+
+def test_a_webcam_with_no_picture_falls_back_and_is_not_reopened(monkeypatch):
+    devices = {
+        0: FakeCapture([black_frame()]),
+        1: FakeCapture([scene_frame(i) for i in range(PROBE_FRAMES)]),
+    }
+    install_devices(monkeypatch, devices)
+    connect_webcams(monkeypatch, CameraDevice(0, "USB Webcam", external=True))
+    reads_before = []
+
+    original = camera_utils.open_and_probe
+
+    def counting(index):
+        reads_before.append(index)
+        return original(index)
+
+    monkeypatch.setattr(camera_utils, "open_and_probe", counting)
+
+    assert open_best_camera() is devices[1]
+    assert reads_before.count(0) == 1, "the dead webcam was probed twice"
+
+
+def test_a_frozen_webcam_does_not_beat_a_live_camera(monkeypatch):
+    devices = {
+        0: frozen_device(),
+        1: FakeCapture([scene_frame(i) for i in range(PROBE_FRAMES)]),
+    }
+    install_devices(monkeypatch, devices)
+    connect_webcams(monkeypatch, CameraDevice(0, "Capture card", external=True))
+
+    assert open_best_camera() is devices[1]
+
+
+def test_the_picker_reports_names_and_which_camera_is_plugged_in(monkeypatch):
+    devices = {
+        0: FakeCapture([scene_frame(i) for i in range(PROBE_FRAMES)]),
+        1: FakeCapture([scene_frame(i) for i in range(PROBE_FRAMES)]),
+    }
+    install_devices(monkeypatch, devices)
+    connect_webcams(
+        monkeypatch,
+        CameraDevice(0, "EMEET SmartCam C960 Ultra", external=True),
+        CameraDevice(1, "ACER HD User Facing", external=False),
+    )
+
+    cameras = camera_utils.describe_available_cameras(max_tested=3)
+
+    assert [(c["name"], c["external"]) for c in cameras] == [
+        ("EMEET SmartCam C960 Ultra", True),
+        ("ACER HD User Facing", False),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Warm-up, and the time a probe may take (CAM-2)
+# ---------------------------------------------------------------------------
+
+
+def scene_at_brightness(level, seed=0):
+    frame = scene_frame(seed).astype(np.float64)
+    return (frame * (level / frame.mean())).clip(0, 255).astype(np.uint8)
+
+
+def test_a_webcam_fading_in_from_black_is_accepted():
+    """
+    The EMEET's measured warm-up. Its first nine frames have brightness
+    1, 2, 3, 4, 6, 9, 11, 18, 24, then it settles near 85. On a darker start the
+    old fixed window judged only those and rejected the camera.
+    """
+    ramp = [0, 0, 1, 1, 2, 2, 3, 3, 4, 6, 9, 11, 18, 24, 35, 52, 60, 72, 78]
+    frames = [scene_at_brightness(level, i) for i, level in enumerate(ramp)]
+    frames += [scene_at_brightness(85, i) for i in range(PROBE_FRAMES)]
+
+    first_window = [frame_carries_a_picture(f)[1]["mean"] for f in frames[:PROBE_FRAMES]]
+    assert sorted(first_window)[PROBE_FRAMES // 2] < MIN_FRAME_BRIGHTNESS, (
+        "the fixture no longer reproduces a start the old probe would refuse"
+    )
+
+    ok, _reason, stats = probe_camera(FakeCapture(frames), index=0)
+
+    assert ok is True
+    assert stats["mean"] >= MIN_FRAME_BRIGHTNESS
+
+
+class SlowCapture(FakeCapture):
+    """A device that blocks on every read - the black virtual camera."""
+
+    def __init__(self, frames, seconds):
+        super().__init__(frames)
+        self.seconds = seconds
+
+    def read(self):
+        time.sleep(self.seconds)
+        return super().read()
+
+
+def test_a_slow_black_device_is_refused_at_the_deadline(monkeypatch):
+    """`EMEET STUDIO CAMERA` took 9.7 s to refuse: ~1 s per read, nine reads."""
+    monkeypatch.setattr(camera_utils, "PROBE_DEADLINE_SECONDS", 0.2)
+    capture = SlowCapture([black_frame()], seconds=0.1)
+
+    started = time.monotonic()
+    ok, reason, _stats = probe_camera(capture, index=2)
+
+    assert ok is False
+    assert reason == "frames carry no picture"
+    assert time.monotonic() - started < 0.6
+    assert capture.reads < PROBE_FRAMES
+
+
+def test_a_dead_device_that_reads_instantly_stops_at_the_frame_cap():
+    capture = FakeCapture([black_frame()])
+
+    ok, _reason, _stats = probe_camera(capture, index=0)
+
+    assert ok is False
+    assert capture.reads == camera_utils.PROBE_MAX_FRAMES
+
+
+def test_a_working_device_is_judged_on_one_window():
+    """Warm-up tolerance must not cost a healthy camera anything."""
+    capture = FakeCapture([scene_frame(i) for i in range(PROBE_FRAMES)])
+
+    assert probe_camera(capture, index=0)[0] is True
+    assert capture.reads == PROBE_FRAMES
+
+
+def test_with_two_webcams_the_saved_one_goes_first(monkeypatch):
+    devices = {
+        1: FakeCapture([scene_frame(i) for i in range(PROBE_FRAMES)]),
+        2: FakeCapture([scene_frame(i) for i in range(PROBE_FRAMES)]),
+    }
+    install_devices(monkeypatch, devices)
+    connect_webcams(
+        monkeypatch,
+        CameraDevice(0, "Integrated Camera", external=False),
+        CameraDevice(1, "Webcam A", external=True),
+        CameraDevice(2, "Webcam B", external=True),
+    )
+    camera_utils.save_camera_index(2)
+
+    assert open_best_camera() is devices[2]

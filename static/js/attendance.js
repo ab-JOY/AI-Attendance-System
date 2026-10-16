@@ -398,6 +398,16 @@
     function describeCamera(cameraInfo) {
         var text = "Camera " + cameraInfo.index;
 
+        if (cameraInfo.name) {
+            text += " - " + cameraInfo.name;
+        }
+
+        // CAM-2: a plugged-in webcam is always opened first, so say which
+        // one that is.
+        if (cameraInfo.external) {
+            text += " (connected webcam)";
+        }
+
         if (cameraInfo.width && cameraInfo.height) {
             text += " - " + cameraInfo.width + "x" + cameraInfo.height;
         }
@@ -421,12 +431,22 @@
             return;
         }
 
+        // Preselect what the next session will actually open: a connected
+        // webcam if there is one (CAM-2) - the saved one if several are -
+        // otherwise the saved choice.
+        var webcams = cameras.filter(function (c) { return c.external; });
+        var webcam = webcams.filter(function (c) {
+            return c.is_saved_default;
+        })[0] || webcams[0];
+
         cameras.forEach(function (cameraInfo) {
             var option = new Option(
                 describeCamera(cameraInfo),
                 String(cameraInfo.index)
             );
-            option.selected = cameraInfo.is_saved_default;
+            option.selected = webcam
+                ? cameraInfo === webcam
+                : cameraInfo.is_saved_default;
             cameraSelect.appendChild(option);
         });
 

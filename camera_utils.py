@@ -55,13 +55,15 @@ present a still test pattern, and refusing to open it would be this module
 deciding something it cannot actually know. So it is logged loudly and opened.
 """
 
-import contextlib
 import logging
 import os
 import time
+from collections import deque
 from statistics import median
 
 import cv2
+
+from infra.camera_devices import list_camera_devices
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +87,22 @@ CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "selected
 # particular need several reads before auto-exposure settles. An odd count so
 # the median is an actual observation rather than an average of two.
 PROBE_FRAMES = 9
+
+# How long a device may take to start producing a picture (CAM-2). The window
+# above *slides* until it passes or this runs out, because nine frames is not
+# always long enough to cover warm-up. Measured 2026-10-16 on the EMEET
+# SmartCam C960: it opens black and fades in over ~0.5 s of auto-exposure, so
+# its first nine frames had brightness 1, 2, 3, 4, 6, 9, 11, 18, 24 - median 6,
+# two units from rejection - and on darker starts the log shows it *was*
+# rejected at mean 0.0, which handed the session to the laptop camera.
+#
+# The deadline also bounds the opposite case. The black `EMEET STUDIO CAMERA`
+# virtual device blocks ~1 s per read, so a fixed nine-read probe of it took
+# 9.7 s; it is now refused when the deadline passes. The frame cap keeps a
+# device that returns black instantly (and every fake in the tests) from
+# spinning through the whole deadline.
+PROBE_DEADLINE_SECONDS = 2.5
+PROBE_MAX_FRAMES = 45
 
 # Is there any light at all? Measured: 0.00 on the dead device, 45.59 on the
 # working one. This is not an image-quality threshold - whether a *face* is
@@ -157,13 +175,27 @@ def probe_camera(cap, index=None):
     human-readable phrase otherwise, so the caller can log *why* a camera was
     passed over instead of only that it was.
     """
-    samples = []
-    distinct_frames = set()
+    # The last PROBE_FRAMES frames, and a fingerprint of each. A whole window is
+    # always judged, never a single frame. Two reasons: the decision is a
+    # median, and "are these frames all identical?" cannot be answered from
+    # one frame.
+    samples = deque(maxlen=PROBE_FRAMES)
+    fingerprints = deque(maxlen=PROBE_FRAMES)
+    deadline = time.monotonic() + PROBE_DEADLINE_SECONDS
 
-    # The whole window is read, not just up to the first good frame. Two
-    # reasons: the decision is a median, and "are these frames all identical?"
-    # cannot be answered from one frame.
-    for _ in range(PROBE_FRAMES):
+    def typical_of_window():
+        return {
+            key: median(sample[key] for sample in samples)
+            for key in ("mean", "stddev", "detail")
+        }
+
+    # Read until a full window carries a picture, or warm-up time runs out
+    # (CAM-2). The deadline applies to the first window too: a device that
+    # takes a second per read is judged on what it managed to deliver.
+    for attempt in range(PROBE_MAX_FRAMES):
+        if attempt > 0 and time.monotonic() >= deadline:
+            break
+
         ret, frame = cap.read()
 
         if not ret or frame is None:
@@ -176,21 +208,25 @@ def probe_camera(cap, index=None):
 
         samples.append(statistics)
 
-        with contextlib.suppress(AttributeError, TypeError):
-            distinct_frames.add(hash(frame.tobytes()))
+        try:
+            fingerprints.append(hash(frame.tobytes()))
+        except (AttributeError, TypeError):
+            fingerprints.append(object())  # unhashable: count it as distinct
+
+        if len(samples) == PROBE_FRAMES and statistics_carry_a_picture(
+            typical_of_window()
+        ):
+            break
 
     if not samples:
         return False, "no frames could be read", None
 
-    typical = {
-        key: median(sample[key] for sample in samples)
-        for key in ("mean", "stddev", "detail")
-    }
+    typical = typical_of_window()
 
     if not statistics_carry_a_picture(typical):
         return False, "frames carry no picture", typical
 
-    if len(distinct_frames) == 1 and len(samples) > 1:
+    if len(set(fingerprints)) == 1 and len(samples) > 1:
         logger.warning(
             "Camera %s returned %d identical frames - this is probably a still "
             "image or a stopped virtual camera, not a live feed. Usable only "
@@ -269,6 +305,7 @@ def describe_available_cameras(max_tested=5):
     warns about, measured at 14.9 s.
     """
     saved_index = get_saved_camera_index()
+    devices = {device.index: device for device in list_camera_devices()}
     cameras = []
 
     for index in range(max_tested):
@@ -283,9 +320,12 @@ def describe_available_cameras(max_tested=5):
         finally:
             cap.release()
 
+        device = devices.get(index)
         cameras.append(
             {
                 "index": index,
+                "name": device.name if device else None,
+                "external": bool(device and device.external),
                 "width": width,
                 "height": height,
                 "frozen": bool(statistics.get("frozen")),
@@ -399,8 +439,20 @@ def open_best_camera(preferred_index=None, max_tested=5):
     is used only if nothing live turns up. It is still opened rather than
     refused - a legitimate virtual-camera chain can present a static test
     pattern, and this module cannot know - but it does not get to be sticky.
+
+    **A connected webcam comes before the saved preference (CAM-2).** Asked
+    for on 2026-10-16: with an EMEET USB webcam plugged in, the system kept
+    opening the laptop's built-in camera, because the saved index pointed at
+    it. An index does not identify a device and shifts when cameras come and
+    go, so it is a weak thing to put first. Windows does know which devices
+    are plugged in rather than built in - see `infra/camera_devices.py` - so
+    every external webcam is tried before anything else. The saved index still
+    decides when no webcam is connected, or none of them gives a picture. It
+    is not overwritten here, so unplugging the webcam returns to the previous
+    choice.
     """
     logger.info("Searching for a camera that produces a picture")
+    refused = set()  # indices that gave no picture; not worth reopening
 
     # 1. Explicit request from the caller. Honoured even if frozen: an index
     #    passed in by hand is a decision, not a guess.
@@ -418,11 +470,45 @@ def open_best_camera(preferred_index=None, max_tested=5):
                 logger.info("Using camera %s (requested)", pref_idx)
                 return cap
 
-    # 2. The saved preference. Never frozen, because step 3 does not save one.
-    saved_idx = get_saved_camera_index()
+            refused.add(pref_idx)
 
-    if saved_idx is not None:
+    # 2. A webcam the operator has plugged in (CAM-2). Live only: a frozen one
+    #    waits for the scan's fallback like any other still image. With more
+    #    than one plugged in, the saved choice goes first among them.
+    saved_idx = get_saved_camera_index()
+    webcams = sorted(
+        (d for d in list_camera_devices() if d.external),
+        key=lambda d: d.index != saved_idx,
+    )
+
+    for device in webcams:
+        if device.index in refused:
+            continue
+
+        cap, statistics = open_and_probe(device.index)
+
+        if cap is None:
+            refused.add(device.index)
+        elif statistics.get("frozen"):
+            cap.release()
+        else:
+            logger.info(
+                "Using camera %s - %s (connected webcam)", device.index, device.name
+            )
+            return cap
+
+        logger.warning(
+            "Connected webcam %s - %s gave no live picture, trying the others",
+            device.index,
+            device.name,
+        )
+
+    # 3. The saved preference. Never frozen, because step 4 does not save one.
+    if saved_idx is not None and saved_idx not in refused:
         cap, statistics = open_and_probe(saved_idx)
+
+        if cap is None:
+            refused.add(saved_idx)
 
         if cap is not None and not statistics.get("frozen"):
             logger.info("Using camera %s (saved preference)", saved_idx)
@@ -442,11 +528,15 @@ def open_best_camera(preferred_index=None, max_tested=5):
                 saved_idx,
             )
 
-    # 3. Scan, keeping any frozen device as a fallback rather than taking it.
+    # 4. Scan, keeping any frozen device as a fallback rather than taking it.
+    #    Indices that already gave no picture above are not opened again.
     frozen_fallback = None
     frozen_index = None
 
     for index in range(max_tested):
+        if index in refused:
+            continue
+
         cap, statistics = open_and_probe(index)
 
         if cap is None:

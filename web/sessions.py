@@ -734,6 +734,23 @@ def select_camera():
 
     logger.info("Camera %s chosen for the next session", index)
 
+    # CAM-2: a connected webcam is opened ahead of the saved choice, so saying
+    # "will be used" about anything else would be untrue while one is in.
+    webcam = next(
+        (c for c in usable if c.get("external") and c["index"] != index), None
+    )
+
+    if webcam is not None and not chosen.get("external"):
+        return jsonify({
+            "success": True,
+            "message": (
+                f"Saved camera {index}. While the webcam "
+                f"{webcam.get('name') or webcam['index']} is connected it is "
+                f"used first; camera {index} will be used when it is unplugged."
+            ),
+            "cameras": usable,
+        })
+
     return jsonify({
         "success": True,
         "message": (
