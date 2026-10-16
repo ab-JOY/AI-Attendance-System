@@ -509,9 +509,6 @@ class FaceTracker:
         """
         self.expire_old_tracks()
 
-        center_x, center_y = box_center(box)
-        new_area = max(box_area(box), 1)
-
         best_track_id = None
         best_score = float("-inf")
 
@@ -519,46 +516,91 @@ class FaceTracker:
             if track_id in used_track_ids:
                 continue
 
-            old_box = data["box"]
-            old_center_x, old_center_y = box_center(old_box)
-            old_area = max(box_area(old_box), 1)
+            score = self._match_score(box, data["box"])
 
-            center_distance = (
-                (center_x - old_center_x) ** 2 + (center_y - old_center_y) ** 2
-            ) ** 0.5
-
-            overlap = box_iou(box, old_box)
-            size_similarity = min(new_area, old_area) / max(new_area, old_area)
-
-            distance_limit = max(
-                self.config.max_distance,
-                max(box[2] - box[0], box[3] - box[1]) * 0.85,
-            )
-
-            if size_similarity < self.config.min_size_similarity:
-                continue
-
-            if overlap < self.config.min_iou and center_distance > distance_limit:
-                continue
-
-            score = (
-                overlap * 2.0
-                + size_similarity
-                - center_distance / max(distance_limit, 1.0)
-            )
-
-            if score > best_score:
+            if score is not None and score > best_score:
                 best_score = score
                 best_track_id = track_id
 
-        if best_track_id is None:
-            best_track_id = self._next_track_id
+        return self._place(box, best_track_id)
+
+    def assign_all(self, boxes: list[FaceBox]) -> list[int]:
+        """
+        The track each of this frame's boxes continues, decided together.
+
+        `assign()` one box at a time is order-dependent: the first box takes
+        its best track even when that track is a far better match for a later
+        box. Two neighbours moving the same way then swap tracks - and names -
+        and a settled track never predicts again to notice (PE-3). Here every
+        box/track pair is scored first and the best pairs are taken first, so
+        the order MediaPipe lists faces in cannot change the answer.
+        """
+        self.expire_old_tracks()
+
+        pairs = []
+
+        for index, box in enumerate(boxes):
+            for track_id, data in self._boxes.items():
+                score = self._match_score(box, data["box"])
+
+                if score is not None:
+                    pairs.append((score, index, track_id))
+
+        pairs.sort(key=lambda pair: (-pair[0], pair[1], pair[2]))
+
+        matched: dict[int, int] = {}
+        taken: set[int] = set()
+
+        for _score, index, track_id in pairs:
+            if index in matched or track_id in taken:
+                continue
+
+            matched[index] = track_id
+            taken.add(track_id)
+
+        return [self._place(box, matched.get(index)) for index, box in enumerate(boxes)]
+
+    def _match_score(self, box: FaceBox, old_box: FaceBox) -> float | None:
+        """How well `box` continues `old_box`; None when it cannot."""
+        center_x, center_y = box_center(box)
+        old_center_x, old_center_y = box_center(old_box)
+        new_area = max(box_area(box), 1)
+        old_area = max(box_area(old_box), 1)
+
+        center_distance = (
+            (center_x - old_center_x) ** 2 + (center_y - old_center_y) ** 2
+        ) ** 0.5
+
+        overlap = box_iou(box, old_box)
+        size_similarity = min(new_area, old_area) / max(new_area, old_area)
+
+        distance_limit = max(
+            self.config.max_distance,
+            max(box[2] - box[0], box[3] - box[1]) * 0.85,
+        )
+
+        if size_similarity < self.config.min_size_similarity:
+            return None
+
+        if overlap < self.config.min_iou and center_distance > distance_limit:
+            return None
+
+        return (
+            overlap * 2.0
+            + size_similarity
+            - center_distance / max(distance_limit, 1.0)
+        )
+
+    def _place(self, box: FaceBox, track_id: int | None) -> int:
+        """Record `box` on `track_id`, or on a new track when it is None."""
+        if track_id is None:
+            track_id = self._next_track_id
             self._next_track_id += 1
 
-        self._boxes[best_track_id] = {
+        self._boxes[track_id] = {
             "box": box,
-            "center": (center_x, center_y),
+            "center": box_center(box),
             "last_seen": self._clock(),
         }
 
-        return best_track_id
+        return track_id

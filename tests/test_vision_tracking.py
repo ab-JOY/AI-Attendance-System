@@ -591,3 +591,69 @@ def test_reset_clears_everything():
     assert tracker.states == {}
     # Ids restart, because a reset means a new attendance session.
     assert tracker.assign(FaceBox(100, 100, 200, 220), set()) == 0
+
+
+def _two_neighbours_step_right(tracker):
+    """Two side-by-side faces, then both one step right. Returns the ids."""
+    left, right = tracker.assign_all(
+        [FaceBox(50, 100, 150, 200), FaceBox(150, 100, 250, 200)]
+    )
+
+    # The left face, listed first, now sits nearer the right face's old
+    # position than its own: 40 px from it against 60 px from its own.
+    return (left, right), tracker.assign_all(
+        [FaceBox(110, 100, 210, 200), FaceBox(160, 100, 260, 200)]
+    )
+
+
+def test_neighbours_moving_together_keep_their_own_tracks():
+    """
+    Matching is decided over the whole frame, not detection by detection.
+
+    Matched one at a time in MediaPipe's order, the left face took the right
+    face's track (its nearest) and the right face was left with the left's:
+    two students' names swapped on screen. A settled track skips prediction
+    (PE-3), so nothing would ever notice.
+    """
+    tracker = FaceTracker(config=CONFIG, clock=FakeClock())
+
+    before, after = _two_neighbours_step_right(tracker)
+
+    assert after == list(before)
+
+
+def test_matching_does_not_depend_on_detection_order():
+    tracker = FaceTracker(config=CONFIG, clock=FakeClock())
+    left, right = tracker.assign_all(
+        [FaceBox(50, 100, 150, 200), FaceBox(150, 100, 250, 200)]
+    )
+
+    moved_right, moved_left = tracker.assign_all(
+        [FaceBox(160, 100, 260, 200), FaceBox(110, 100, 210, 200)]
+    )
+
+    assert (moved_left, moved_right) == (left, right)
+
+
+def test_assign_all_gives_every_face_its_own_track():
+    tracker = FaceTracker(config=CONFIG, clock=FakeClock())
+    boxes = [FaceBox(100 + 120 * i, 100, 200 + 120 * i, 200) for i in range(5)]
+
+    first = tracker.assign_all(boxes)
+    second = tracker.assign_all(boxes)
+
+    assert len(set(first)) == 5
+    assert second == first
+
+
+def test_assign_all_starts_a_track_for_a_face_with_no_match():
+    tracker = FaceTracker(config=CONFIG, clock=FakeClock())
+    (only,) = tracker.assign_all([FaceBox(100, 100, 200, 200)])
+
+    kept, new = tracker.assign_all(
+        [FaceBox(102, 100, 202, 200), FaceBox(900, 500, 1000, 600)]
+    )
+
+    assert kept == only
+    assert new not in (only,)
+    assert len(tracker) == 2

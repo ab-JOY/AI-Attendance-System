@@ -359,3 +359,43 @@ not re-derived): `todo.md` §12.
   - Verified: route tests (+16, two mutations caught), fast suite 1537 passed,
     integration 88 passed; the live `/edit_subject/1` renders `07:00`/`08:00`
     with Monday ticked. **Not clicked through in a browser.**
+
+---
+
+## 11. Added 2026-10-16 — five students at once: predicts in parallel, no swapped names
+
+**Asked for by the user:** verify 5 students simultaneously "without lagging
+and mixing their names". **Not run in the real app or with real people.**
+
+| Change | Files |
+|---|---|
+| `FaceTracker.assign_all()`: every box/track pair scored, best pairs taken first. `assign()` kept, sharing `_match_score()`/`_place()` | `vision/tracking.py` |
+| `recognise_frame()` in three passes: gate + `assign_all`; **confirmed tracks resolve first**; predicts via `predict_identities()` | `recognize_face.py` |
+| `predict_identity()` = `prepare_face()` (calling thread) + `predict_prepared()` (pool, `_PREDICT_POOL`, ≤8 workers) | `recognize_face.py` |
+| The adopt-a-finished-mark branch refuses a student another box already claims this frame | `recognize_face.py` |
+
+**Measured** (real 245 MB model, 5 dataset faces, `recognizer.predict` only —
+a component bound, L9): sequential **797 ms**, threaded **214 ms** per frame
+for 5 faces; 1 face 168 vs 175 ms. Labels and distances identical. 12 cores.
+
+**Mixing, found by reading the code:** `assign()` matched faces one at a time
+in MediaPipe's order, so two neighbours moving together could swap tracks; a
+settled track skips predict (PE-3) and would carry the wrong name indefinitely.
+And `claimed_student_ids` filled in listing order, so a new track listed first
+could adopt an already-recorded student's mark while that student's own box
+was on screen.
+
+Gates: fast suite **1545 passed**, 91 skipped (+8); ruff 18, unchanged.
+Mutations from a copy (L13), 4 of 4 caught: greedy `assign` in `assign_all`;
+no confirmed-first sort; no adopt guard; sequential `map`.
+`eval_heldout_accuracy.py` not run: no threshold, model or preprocessing changed.
+
+- ⚠️ **Only `recognizer.predict()` may run on the pool.** `preprocess_for_lbph()`
+  applies the module-level `CLAHE`, which keeps scratch buffers on the object.
+  Pinned by `test_preprocessing_stays_on_the_calling_thread`.
+- ⚠️ **Parallelism does not fix roster growth.** Each predict is still linear in
+  stored images (`assessment-phase-6c.md` §4); at 30 students ~400 ms per face
+  even in parallel. That is `todo.md` §7 Q1 — the user's decision.
+- ⚠️ On a 4-core machine the gain is up to ~4×, not 5×.
+- Not done: FaceMesh's own cost with 5 faces and the full loop's fps were not
+  measured — that needs 5 real people (L25: composites are not detected).

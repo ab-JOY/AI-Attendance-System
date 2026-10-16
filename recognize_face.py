@@ -1,5 +1,7 @@
 import logging
+import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from enum import Enum
 from typing import NamedTuple
@@ -391,6 +393,21 @@ PREDICTION_HISTORY_SIZE = TRACK_CONFIG.prediction_history_size
 MEDIAPIPE_PROCESS_WIDTH = 960
 STREAM_JPEG_QUALITY = 70
 STREAM_FRAME_DELAY = 0.0
+
+# The faces in one frame are predicted side by side. LBPH compares a face with
+# every stored training image (~0.13 ms each, ~170 ms per face on the 245 MB
+# model), and OpenCV releases the GIL while it does, so five faces cost about
+# what one does instead of five times as much - measured on this machine,
+# 797 ms -> 214 ms per frame, labels and distances identical.
+#
+# ⚠️ Only `recognizer.predict()` runs on the pool. Alignment and
+# `preprocess_for_lbph()` stay on the recognition thread: the latter applies
+# one module-level CLAHE object, and OpenCV's CLAHE keeps scratch buffers on
+# the object, so calling it from several threads at once is a data race.
+_PREDICT_POOL = ThreadPoolExecutor(
+    max_workers=min(8, os.cpu_count() or 1),
+    thread_name_prefix="lbph-predict",
+)
 
 
 # =====================================================
@@ -1407,6 +1424,37 @@ def predict_identity(context, frame, face_landmarks, state, track_id):
     quality problem or None; a confidence of 999.0 means no prediction was
     attempted, which draw_face_result() renders as "--".
     """
+    prepared = prepare_face(frame, face_landmarks, state, track_id)
+
+    return predict_prepared(context, prepared, track_id)
+
+
+def predict_identities(context, frame, faces):
+    """
+    `predict_identity()` for every `(face_landmarks, state, track_id)` in
+    `faces`, in order, with the LBPH predictions run side by side.
+    """
+    prepared = [
+        prepare_face(frame, face_landmarks, state, track_id)
+        for face_landmarks, state, track_id in faces
+    ]
+
+    return list(
+        _PREDICT_POOL.map(
+            lambda ready, face: predict_prepared(context, ready, face[2]),
+            prepared,
+            faces,
+        )
+    )
+
+
+def prepare_face(frame, face_landmarks, state, track_id):
+    """
+    The LBPH-ready crop of one face, as `(face, issue)`.
+
+    `face` is None when there is nothing to predict: a quality problem, a
+    failed alignment, or a track that no longer needs recognising.
+    """
     # A track that has already recorded attendance does not need recognising
     # again - the identity is locked and the row is written. Skipping the
     # predict here is what keeps a full classroom from paying for 314M float
@@ -1424,23 +1472,28 @@ def predict_identity(context, frame, face_landmarks, state, track_id):
         issue = get_face_quality_issue(aligned_face)
 
         if issue is not None or skip_recognition:
-            return -1, 999.0, issue
+            return None, issue
 
-        processed_face = preprocess_for_lbph(aligned_face)
-        label, confidence = context.recognizer.predict(processed_face)
+        return preprocess_for_lbph(aligned_face), None
 
-        # DEBUG, not INFO: this fires once per tracked face per frame. At
-        # ~15 fps with three faces in shot that is 45 lines a second, which
-        # makes the log useless for anything else. Set LOG_LEVEL=DEBUG in
-        # .env when you are actually diagnosing recognition.
+    except Exception:
         logger.debug(
-            "Track: %s | Label: %s | Distance: %.1f",
+            "Recognition failed for track %s",
             track_id,
-            label,
-            confidence
+            exc_info=True
         )
+        return None, "Face alignment failed"
 
-        return label, confidence, None
+
+def predict_prepared(context, prepared, track_id):
+    """LBPH on one `prepare_face()` result. Safe to call from the pool."""
+    processed_face, issue = prepared
+
+    if processed_face is None:
+        return -1, 999.0, issue
+
+    try:
+        label, confidence = context.recognizer.predict(processed_face)
 
     except Exception:
         logger.debug(
@@ -1449,6 +1502,19 @@ def predict_identity(context, frame, face_landmarks, state, track_id):
             exc_info=True
         )
         return -1, 999.0, "Face alignment failed"
+
+    # DEBUG, not INFO: this fires once per tracked face per frame. At
+    # ~15 fps with three faces in shot that is 45 lines a second, which
+    # makes the log useless for anything else. Set LOG_LEVEL=DEBUG in
+    # .env when you are actually diagnosing recognition.
+    logger.debug(
+        "Track: %s | Label: %s | Distance: %.1f",
+        track_id,
+        label,
+        confidence
+    )
+
+    return label, confidence, None
 
 
 def resolve_track_identity(
@@ -1531,7 +1597,15 @@ def resolve_track_identity(
     # branch reachable across a restart: before it, stopping and starting
     # attendance put a student who was already Present through the whole
     # 20-frame window and a fresh liveness challenge, for a duplicate write.
-    if candidate_id is not None and candidate_id in context.recognized:
+    #
+    # ⚠️ Not when another box in this frame already holds that student: an
+    # LBPH misread of a neighbour would otherwise put the same name on two
+    # faces. It falls through to "Duplicate identity blocked" below.
+    if (
+        candidate_id is not None
+        and candidate_id in context.recognized
+        and candidate_id not in claimed_student_ids
+    ):
         state.adopt_completed_identity(
             candidate_id,
             candidate_name,
@@ -1946,16 +2020,16 @@ def recognise_frame(context, frame):
     """
     Detect, track, predict and decide for one frame. Returns its overlays.
 
-    The body of the old single loop, unchanged except that it returns what
-    to draw instead of drawing it.
+    The body of the old single loop, in three passes rather than one face at
+    a time: gate and track every face, predict them side by side, then decide
+    with confirmed tracks first. Each face's decision is the same as before;
+    what the passes remove is the dependence on MediaPipe's listing order.
     """
     frame_height, frame_width = frame.shape[:2]
 
     results = detect_faces(context, frame)
 
-    used_track_ids = set()
-    claimed_student_ids = set()
-    overlays = []
+    faces = []
 
     for face_landmarks in results.multi_face_landmarks or []:
         raw_box = get_face_box(
@@ -1974,9 +2048,15 @@ def recognise_frame(context, frame):
             # completely and receive no visible box.
             continue
 
-        track_id = context.tracker.assign(raw_box, used_track_ids)
-        used_track_ids.add(track_id)
+        faces.append((face_landmarks, raw_box))
 
+    # Every face in the frame is matched to its track together, so the order
+    # MediaPipe lists them in cannot swap two neighbours' tracks (and names).
+    track_ids = context.tracker.assign_all([box for _, box in faces])
+
+    tracked = []
+
+    for (face_landmarks, raw_box), track_id in zip(faces, track_ids, strict=True):
         state = context.tracker.state_for(track_id)
         state.note_valid_frame()
 
@@ -1986,13 +2066,30 @@ def recognise_frame(context, frame):
         if state.is_provisional:
             continue
 
-        label, confidence, issue = predict_identity(
-            context,
-            frame,
-            face_landmarks,
-            state,
-            track_id
-        )
+        tracked.append((face_landmarks, raw_box, track_id, state))
+
+    # ⚠️ Confirmed tracks are resolved first, so the students they hold are in
+    # `claimed_student_ids` before any newer track is asked who it is. In
+    # detection order, a new track listed ahead of the one holding student X
+    # was not blocked from reading as X too - two boxes with one name.
+    tracked.sort(key=lambda face: not face[3].confirmed)
+
+    predictions = predict_identities(
+        context,
+        frame,
+        [
+            (face_landmarks, state, track_id)
+            for face_landmarks, _box, track_id, state in tracked
+        ]
+    )
+
+    claimed_student_ids = set()
+    overlays = []
+
+    for (face_landmarks, raw_box, track_id, state), prediction in zip(
+        tracked, predictions, strict=True
+    ):
+        label, confidence, issue = prediction
 
         student_id, student_name, status, state = resolve_track_identity(
             context,
