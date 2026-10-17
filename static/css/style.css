@@ -405,6 +405,8 @@ button:hover{
    Enlarged camera screen
 */
 .camera-feed{
+    /* relative: the .face-overlay canvas is positioned over the picture. */
+    position:relative;
     width:100%;
     height:clamp(500px, 62vh, 720px);
     background:#e9ecef;
@@ -1189,6 +1191,55 @@ table caption{
 
 .camera-picker #retry-button{
     margin-top:12px;
+}
+
+/* Attendance: where the session's frames come from - this device's webcam or
+   the classroom camera on the server. */
+.camera-source{
+    border:0;
+    padding:0;
+    margin:0 0 12px;
+}
+
+.camera-source legend{
+    font-weight:600;
+    margin-bottom:6px;
+}
+
+.camera-source-option{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    margin:4px 0;
+    font-weight:normal;
+}
+
+/* The global input rule gives every input the full width and a margin, which
+   stretched each radio across the row with its label pushed to the far
+   right - as .day-picker input undoes for its checkboxes. */
+.camera-source-option input{
+    width:auto;
+    margin:0;
+}
+
+/* The browser webcam before the session starts: fills the camera area the
+   same way the server's stream (#camera) does once it is running. */
+.browser-preview{
+    width:100%;
+    height:100%;
+    object-fit:cover;
+    object-position:center;
+    background:#000;
+}
+
+/* The recognition results for the browser camera, drawn over the preview.
+   The camera area is its positioning context (.camera-feed below). */
+.face-overlay{
+    position:absolute;
+    inset:0;
+    width:100%;
+    height:100%;
+    pointer-events:none;
 }
 
 /* Secondary explanatory text: the mirror note under the instruction, and the

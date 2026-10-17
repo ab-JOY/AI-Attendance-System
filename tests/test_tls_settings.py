@@ -38,8 +38,14 @@ FAKE_SECRET = "x" * 32
 
 
 def build(**overrides):
-    """A Settings instance with the required fields filled in."""
-    return Settings(secret_key=FAKE_SECRET, **overrides)
+    """
+    A Settings instance with the required fields filled in.
+
+    ⚠️ `_env_file=None`: without it the machine's own `.env` is read too, and a
+    deployed machine's SESSION_COOKIE_SECURE=true (docs/deployment.md) silently
+    overrode the "no TLS" case these tests describe.
+    """
+    return Settings(_env_file=None, secret_key=FAKE_SECRET, **overrides)
 
 
 @pytest.fixture

@@ -1010,3 +1010,178 @@ def test_the_dataset_folder_numbering_still_matches_the_capture_stages(
 
     assert not missing_frontal, f"frontal images missing: {sorted(missing_frontal)}"
     assert not missing_turn, f"left-turn images missing: {sorted(missing_turn)}"
+
+
+# ---------------------------------------------------------------------------
+# The same session, as a browser webcam would send it
+# ---------------------------------------------------------------------------
+
+# What static/js/attendance.js sends: frames scaled to this width, as JPEG at
+# this quality (UPLOAD_WIDTH, UPLOAD_QUALITY there - keep them in step).
+#
+# Chosen by measurement on 2026-10-17. Through the Cloudflare tunnel a
+# 1280-wide frame at 85 (139 KB) took ~1.3 s, under one frame a second. These
+# settings make a real webcam frame 44 KB, and this file confirms an enrolled
+# student and passes liveness at them; so did 960 at 70. The server scales the
+# upload back up to 1280x720 to judge it.
+BROWSER_UPLOAD_WIDTH = 960
+BROWSER_JPEG_QUALITY = 60
+
+
+@pytest.fixture(scope="module")
+def browser_session(recognition_module, enrolled_student, scripted_frames):
+    """
+    The scripted session again, with every frame taken the way a browser
+    upload takes it: scaled to the page's upload width, JPEG-encoded at its
+    quality, decoded and scaled back up to 1280x720 by
+    `decode_frame()` exactly as `/attendance/frame` does, handed to a
+    `BrowserCamera`, and read back through the **real** `CameraReader`.
+
+    The classroom camera's frames are never compressed, and the 58.0
+    threshold and the liveness yaw were measured on frames that were not. If
+    compression broke either, this is where the student stops being recorded.
+
+    One frame at a time: the next is pushed only once recognition has taken
+    the last. A real browser can be ahead of recognition - the reader then
+    drops frames, as it does for a fast camera - but that would make which
+    frames are judged a race, and this test is about what one frame survives.
+    """
+    import threading
+
+    import cv2
+
+    from infra.camera import BrowserCamera, CameraReader
+    from infra.uploads import decode_frame
+
+    module = recognition_module
+    student_id, _folder = enrolled_student
+
+    uploads = []
+
+    upload_height = round(FRAME_HEIGHT * BROWSER_UPLOAD_WIDTH / FRAME_WIDTH)
+
+    for frame in scripted_frames:
+        if BROWSER_UPLOAD_WIDTH != FRAME_WIDTH:
+            frame = cv2.resize(
+                frame, (BROWSER_UPLOAD_WIDTH, upload_height),
+                interpolation=cv2.INTER_AREA,
+            )
+
+        ok, buffer = cv2.imencode(
+            ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, BROWSER_JPEG_QUALITY]
+        )
+        assert ok
+        uploads.append(
+            decode_frame(
+                buffer.tobytes(),
+                "image/jpeg",
+                size=(FRAME_WIDTH, FRAME_HEIGHT),
+            )
+        )
+
+    with pytest.MonkeyPatch.context() as patch:
+        recorder = AttendanceRecorder()
+
+        # First, before anything can run - lessons.md L6, as above.
+        patch.setattr(module, "save_attendance", recorder)
+
+        def refuse_to_connect(*args, **kwargs):
+            raise AssertionError(
+                "the recognition loop reached the database during a test - "
+                "see tasks/lessons.md L6"
+            )
+
+        patch.setattr(module.mysql.connector, "connect", refuse_to_connect)
+        patch.setattr(infra.db, "get_pool", refuse_to_connect)
+        patch.setattr(
+            module,
+            "create_liveness_state",
+            lambda: LivenessChallenge(
+                config=module.LIVENESS_CONFIG,
+                sequence=(LEFT, CENTER),
+            ),
+        )
+
+        readers = []
+
+        def make_reader(capture):
+            reader = CameraReader(capture)
+            readers.append(reader)
+            return reader
+
+        session = RecognitionSession(
+            hooks=SessionHooks(
+                open_camera=lambda: pytest.fail("a browser session opened a camera"),
+                load_model=module.load_model_and_labels,
+                model_signature=module.model_signature,
+                make_detector=module.make_detector,
+                make_reader=make_reader,
+                configure_camera=None,
+            ),
+            config=module.TRACK_CONFIG,
+        )
+
+        patch.setattr(module, "session", session)
+
+        if not session.start("SMOKE-TEST-SUBJECT", camera=BrowserCamera()):
+            pytest.skip("no LBPH model loaded - run train_model.py first")
+
+        token = session.acquire_viewer()
+        reader = readers[0]
+        done = threading.Event()
+
+        def feed():
+            try:
+                for number, upload in enumerate(uploads, start=1):
+                    session.submit_frame(upload)
+
+                    deadline = time.monotonic() + 15.0
+                    while reader.frames_delivered < number:
+                        if time.monotonic() > deadline:
+                            return
+                        time.sleep(0.005)
+            finally:
+                done.set()
+
+        feeder = threading.Thread(target=feed, daemon=True)
+        feeder.start()
+
+        overlays = []
+        module.run_recognition(token, overlays.append, done.is_set)
+        feeder.join(timeout=5.0)
+
+        yield {
+            "student_id": student_id,
+            "recorder": recorder,
+            "tracker": session.tracker,
+            "delivered": reader.frames_delivered,
+            "uploads": len(uploads),
+        }
+
+        session.stop()
+
+
+def test_every_browser_frame_reached_recognition(browser_session):
+    assert browser_session["delivered"] == browser_session["uploads"]
+
+
+def test_a_browser_webcam_confirms_the_right_student(browser_session):
+    tracker = browser_session["tracker"]
+
+    assert len(tracker.states) == 1
+    state = next(iter(tracker.states.values()))
+
+    assert state.confirmed, "compressed uploads never confirmed an identity"
+    assert state.student_id == browser_session["student_id"]
+
+
+def test_a_browser_webcam_records_attendance_exactly_once(browser_session):
+    """Liveness passed and the write happened, on compressed frames."""
+    recorder = browser_session["recorder"]
+
+    assert len(recorder.calls) == 1, (
+        f"expected one save_attendance call, got {recorder.calls}"
+    )
+
+    args, _kwargs = recorder.calls[0]
+    assert args[0] == browser_session["student_id"]

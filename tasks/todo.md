@@ -110,7 +110,7 @@ Severity: **P0** blocker · **P1** critical · **P2** major · **P3** minor
 |---|---|---|---|
 | CO-1 | P1 | **`cv2.CAP_DSHOW` is Windows-only.** Camera acquisition fails outright on Linux/macOS. ◨ **Narrowed 2026-08-16 (Phase 5), not closed.** `capture_dataset.py` is deleted, so the Windows-only *enrolment* path is gone — enrolment is `getUserMedia` in the operator's browser and runs anywhere. `camera_utils.py` keeps `CAP_DSHOW` because **recognition still opens the classroom camera on the server**, which is by design. So CO-1 now reads: the server must be Windows; the clients need not be. | [camera_utils.py:30,41](../camera_utils.py#L30) |
 | CO-2 | P1 | ~~`ctypes.windll` for window placement — Windows-only (guarded, but the whole capture UX assumes Windows).~~ ✅ **Fixed 2026-08-16 (Phase 5).** `capture_dataset.py` is deleted; there is no server-side capture window to place. | — |
-| CO-3 | P1 | **The architecture is single-machine only.** ⚠️ **Resolved by the §7 Q2 decision (2026-08-08): enrolment moves into the browser.** The capture path that contains this is being replaced in Phase 5, not refactored. `/capture_face` spawns an OpenCV GUI window *on the server*. If the browser is not on the server desktop, the operator sees nothing and the request hangs until someone at the server presses ESC. ◧ **Reduced 2026-08-11 (Phase 4), not closed.** Enrolment runs in the operator's browser, so the server-side OpenCV window is no longer how a student is captured - but only over `http://localhost`, because `getUserMedia` needs a secure context and TLS was deliberately out of scope. Enrolling from another machine still does not work, and recognition still opens the camera on the server by design. | [app.py:209](../app.py#L209) |
+| CO-3 | P1 | **The architecture is single-machine only.** ✅ **Attendance half closed 2026-10-17 (§7 Q7):** a session can take its frames from the browser webcam of the device that started it (`BrowserCamera`, `/attendance/frame`), so attendance no longer needs the server's camera. The classroom camera remains an option. ⚠️ **Resolved by the §7 Q2 decision (2026-08-08): enrolment moves into the browser.** The capture path that contains this is being replaced in Phase 5, not refactored. `/capture_face` spawns an OpenCV GUI window *on the server*. If the browser is not on the server desktop, the operator sees nothing and the request hangs until someone at the server presses ESC. ◧ **Reduced 2026-08-11 (Phase 4), not closed.** Enrolment runs in the operator's browser, so the server-side OpenCV window is no longer how a student is captured - but only over `http://localhost`, because `getUserMedia` needs a secure context and TLS was deliberately out of scope. Enrolling from another machine still does not work, and recognition still opens the camera on the server by design. | [app.py:209](../app.py#L209) |
 | CO-4 | P2 | `mediapipe==0.10.14` pins the project to Python ≤3.11 (venv is 3.11). No documented interpreter constraint. | [requirements.txt:5](../requirements.txt#L5) |
 | CO-5 | P2 | MySQL-specific SQL (`CURDATE()`) while the test harness uses SQLite with a *different* schema — tests never exercise production queries. | [app.py:1188](../app.py#L1188), [test_accuracy.py:26-48](../test_accuracy.py#L26-L48) |
 | CO-6 | P3 | `hello_flutter/` is the unmodified Flutter counter demo — no integration point, pure dead weight. | [main.dart:14](../hello_flutter/lib/main.dart#L14) |
@@ -787,6 +787,38 @@ answered, so Phase 3 can start; Q2 and Q3 block Phases 5 and 6.*
    rather than the only thing standing between an enrolment and a working one.
    ⚠️ **The thesis writeup is affected either way** — the enrolment procedure
    is described in the manuscript, so this is the user's call.
+
+
+**Raised and decided 2026-10-17 (user):**
+
+7. **Does attendance have to use the server's camera?** Q2 kept it there
+   ("the classroom camera is physically at the kiosk") and asked to be told if
+   that reading was wrong. It became wrong once the system was put on the
+   internet: Google Cloud has no camera at all, and behind Cloudflare an
+   instructor on another laptop could watch the session but not use that
+   laptop's webcam. ✅ **Decided by the user: option A, browser-camera
+   attendance**, built the same day.
+
+   **What it is.** The attendance page offers *This device's camera* or
+   *Classroom camera*. The browser uploads JPEG frames, about 8 a second, to
+   `/attendance/frame`. `infra.camera.BrowserCamera` presents them to the
+   existing `CameraReader` as if it were a `cv2.VideoCapture`, so tracking,
+   liveness, the 58.0 threshold and `save_attendance()` are **the same code
+   for both sources**. Uploads are sized to 1280x720, the resolution
+   recognition's pixel thresholds were tuned at, not enrolment's 1920x1080.
+
+   **What is measured, and what is not.** A real enrolled student's frames,
+   JPEG-compressed at the page's quality, confirm and pass liveness through
+   the real loop (`tests/test_recognition_loop_smoke.py`, browser section). A
+   real Edge drove the page with a fake camera at ~7.5 frames/s. **Not
+   measured:** a physical external webcam, the rate through Cloudflare, and
+   whether compression shifts LBPH distances enough to matter at the
+   threshold across all students. One student passing is not a FAR/FRR
+   figure.
+
+   ⚠️ **The manuscript describes attendance as using the server's camera.** It
+   needs updating to say either source may be used, and the evaluation should
+   say which one produced each figure.
 
 ---
 

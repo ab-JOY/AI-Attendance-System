@@ -25,13 +25,17 @@ from flask import (
 )
 
 from camera_utils import describe_available_cameras, save_camera_index
+from infra.camera import BrowserCamera
 from infra.db import db_cursor
+from infra.uploads import UploadRejected, decode_frame
 from recognize_face import (
     ActiveSubject,
     SessionBusy,
     SessionNotRunning,
+    latest_upload_overlays,
     open_video_stream,
     start_camera,
+    start_upload_recognition,
     stop_camera,
 )
 
@@ -46,11 +50,28 @@ from repositories import subjects as subjects_repo
 from security.access import authenticated, instructor_scope, json_api
 from services import attendance as attendance_service
 from services import schedule
+from vision.pose import (
+    MIN_NATIVE_FRAME_WIDTH,
+    RECOGNITION_FRAME_HEIGHT,
+    RECOGNITION_FRAME_WIDTH,
+)
 from web.errors import error_page
 
 logger = logging.getLogger(__name__)
 
 sessions_bp = Blueprint("sessions", __name__)
+
+# Where a session's frames come from. "server" is the classroom camera, opened
+# by OpenCV on this machine - the only source there was until the system was
+# put on the internet. "browser" is the webcam of whichever device started the
+# session, uploaded frame by frame. Recognition is the same code either way.
+CAMERA_SOURCES = ("server", "browser")
+
+# Flask-session key holding the session_id of the browser-camera session this
+# login started. The upload route compares against it instead of re-running
+# `_may_use_subject()` - a database query - for every one of ~8 frames a
+# second, and it means only the browser that started a session can feed it.
+BROWSER_CAMERA_KEY = "browser_camera_session_id"
 
 
 # The three statuses this system produces. Deliberately not free text: the
@@ -265,10 +286,37 @@ def attendance():
     # table, so a typo silently created a session no report could find. It is a
     # dropdown now, which is also what makes subject_id available: a typed code
     # cannot identify an offering, because two sections share one code.
-    return render_template(
-        'attendance.html',
+    return _render_attendance_page(
         subjects=_all_subjects(),
         running_subject_id=_running_subject_id(),
+    )
+
+
+def _render_attendance_page(**context):
+    """
+    attendance.html, always with the browser camera's settings.
+
+    ⚠️ **Both routes that render this page go through here, and must.** The
+    page reads these three from data attributes. /end-attendance used to call
+    render_template() itself without them, so after End the page asked the
+    webcam for an ideal width of 0 - which the browser answers with the
+    camera's *smallest* mode (640x480 on the user's laptop, 96x96 for a test
+    camera) - and its minimum-width check compared against 0 and passed. Every
+    frame of the next session was then refused as too narrow. Reported as
+    "it works, but after End and Start again it says the camera is only 640
+    pixels wide".
+    """
+    return render_template(
+        'attendance.html',
+        # The browser camera sends frames at this size, so the upload is no
+        # larger than recognition will use. From here rather than restated in
+        # JavaScript, where a duplicated constant drifts.
+        recognition_width=RECOGNITION_FRAME_WIDTH,
+        recognition_height=RECOGNITION_FRAME_HEIGHT,
+        # What /attendance/frame refuses below, so the page can refuse a
+        # too-small webcam at Start rather than after the session has begun.
+        min_frame_width=MIN_NATIVE_FRAME_WIDTH,
+        **context,
     )
 
 
@@ -278,6 +326,16 @@ def attendance():
 def start_attendance():
     """Open an attendance session: a database row, then the camera."""
     subject_id = request.form.get("subject_id", "").strip()
+
+    # Absent means the classroom camera, which is what every caller sent
+    # before there was a choice.
+    camera_source = request.form.get("camera", "server").strip()
+
+    if camera_source not in CAMERA_SOURCES:
+        return jsonify({
+            "success": False,
+            "message": "Choose which camera the session should use."
+        })
 
     if not subject_id.isdigit():
         return jsonify({
@@ -374,7 +432,10 @@ def start_attendance():
     )
 
     try:
-        started = start_camera(active)
+        if camera_source == "browser":
+            started = start_camera(active, camera=BrowserCamera())
+        else:
+            started = start_camera(active)
 
     except Exception:
         logger.exception("Camera error while starting attendance")
@@ -396,11 +457,86 @@ def start_attendance():
             "message": "An attendance session is already running."
         })
 
+    # `start()` answers True without starting anything when this subject is
+    # already running - with whichever camera it was started on. Asking for
+    # the other one must not look like success: a browser told "running"
+    # would upload into a session that refuses its frames.
+    if (camera_source == "browser") != recognition_session.uses_browser_camera:
+        attendance_service.close_session(session_row_id)
+
+        return jsonify({
+            "success": False,
+            "message": (
+                "This subject's session is already running with the "
+                + ("classroom camera" if camera_source == "browser"
+                   else "camera of another device")
+                + ". End it first to switch cameras."
+            )
+        })
+
+    if camera_source == "browser":
+        session[BROWSER_CAMERA_KEY] = session_row_id
+        # Recognition for uploads runs on the server's own thread; the page
+        # does not open /video_feed in this mode (see recognize_face.py).
+        start_upload_recognition()
+    else:
+        session.pop(BROWSER_CAMERA_KEY, None)
+
     return jsonify({
         "success": True,
         "session_id": session_row_id,
         "subject_id": subject_id,
+        "camera": camera_source,
     })
+
+
+@sessions_bp.route('/attendance/frame', methods=['POST'])
+@authenticated
+@json_api
+def attendance_frame():
+    """
+    One JPEG from the browser camera of the running session.
+
+    Answers as soon as the frame is handed over - recognition runs on its own
+    thread - with the **latest results** (`faces`): boxes in the 1280x720
+    recognition frame, names, statuses and colours, which the page draws over
+    its own camera picture. They are for the previous frame recognition
+    finished, not this one; at a few frames a second that is a fraction of a
+    second behind. `faces` is null until the first frame has been judged.
+
+    409 when there is nothing to feed: no session, a classroom-camera session,
+    or a session this login did not start. The page stops uploading on a 409.
+    """
+    active = recognition_session.subject
+
+    if (
+        active is None
+        or not recognition_session.uses_browser_camera
+        or session.get(BROWSER_CAMERA_KEY) != active.session_id
+    ):
+        return jsonify({
+            "success": False,
+            "message": "No session is waiting for this device's camera.",
+        }), 409
+
+    try:
+        frame = decode_frame(
+            request.get_data(),
+            request.content_type,
+            size=(RECOGNITION_FRAME_WIDTH, RECOGNITION_FRAME_HEIGHT),
+        )
+    except UploadRejected as error:
+        # Safe to relay: infra/uploads.py's messages describe the picture.
+        return jsonify({"success": False, "message": str(error)}), 400
+
+    if not recognition_session.submit_frame(frame):
+        # The session ended between the check above and now.
+        return jsonify({
+            "success": False,
+            "message": "The session has ended.",
+        }), 409
+
+    return jsonify({"success": True, "faces": latest_upload_overlays()})
 
 
 def _may_correct(record):
@@ -638,8 +774,7 @@ def end_attendance():
             1 for row in session_results if row['status'] != "Absent"
         )
 
-        return render_template(
-            "attendance.html",
+        return _render_attendance_page(
             subjects=_all_subjects(),
             # Always None here in practice - the session has just been stopped -
             # but computed rather than hardcoded, so the control unlocks because
@@ -856,6 +991,15 @@ def attendance_live():
     # running session so the state is covered.
     student_ids = sorted(recognition_session.recognized_ids())
 
+    # "browser" only for the login that started it: that is the page which
+    # should resume uploading after a reload. Anyone else is watching.
+    camera = (
+        "browser"
+        if recognition_session.uses_browser_camera
+        and session.get(BROWSER_CAMERA_KEY) == active.session_id
+        else "server"
+    )
+
     try:
         with db_cursor(dictionary=True) as cursor:
             rows = attendance_repo.recognised_today(
@@ -868,12 +1012,14 @@ def attendance_live():
         logger.exception("Could not read the live recognised list")
         return jsonify({
             "running": True,
+            "camera": camera,
             "students": [],
             "recognised": len(student_ids),
         })
 
     return jsonify({
         "running": True,
+        "camera": camera,
         "subject_code": active.subject_code,
         "recognised": len(student_ids),
         "students": [

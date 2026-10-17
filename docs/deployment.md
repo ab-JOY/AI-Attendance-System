@@ -126,6 +126,45 @@ attendance systems, each fighting the other for the camera.
   through Cloudflare has **not been tested** yet. Caddy streams it, but
   Cloudflare's behaviour with a never-ending MJPEG response is unconfirmed.
 
+### Taking attendance with a laptop's webcam
+
+The attendance page asks for a **Camera source**:
+
+- **This device's camera:** the webcam of the laptop the page is open on,
+  built in or plugged in, chosen from the **Webcam** list. The page shows that
+  webcam directly and draws the names and statuses over it. Frames go to the
+  server 960 pixels wide, about 44 KB each, with two in flight at a time. The
+  server recognises them with exactly the same code, threshold and liveness
+  challenge as the classroom camera. This is the default when the page is
+  opened from anywhere except the classroom PC itself.
+- **Classroom camera:** the camera plugged into the classroom PC, as before.
+
+While a session runs, the line under the webcam list shows the measured rate,
+e.g. *"Sending 7.6 frames/s from this webcam."* **Below 3 frames/s** it warns
+that students may need to repeat the check. A face track expires 1.5 s after
+it was last seen and each liveness step allows 8 s, so a slow or stalling
+connection restarts a student's verification. Check this rate on the school
+connection before relying on it in class.
+
+- The webcam must be at least **960 pixels wide**. Frames are judged at
+  1280×720, the resolution the face-size limits were tuned at. A 640×480
+  webcam is refused with a message that says so.
+- Only the login that started a session can send frames to it. Anyone else who
+  opens the page sees the stream.
+- Reloading the page mid-session resumes sending from the same device.
+- **Measured through a real Cloudflare tunnel, 2026-10-17:** the first
+  version streamed the annotated picture back down and sent 1280-wide frames
+  (139 KB). It managed **~0.75 frames/s**, so no face was ever boxed. The
+  current version manages **4.8–5.8 frames/s** on the same connection, with a
+  box on the face in 126 of 132 replies.
+- **Verified 2026-10-17** in Edge with a fake camera against a scratch
+  database: resume after reload, End writes the register.
+  Also verified with a real enrolled student's face, JPEG-compressed as the
+  browser sends it, through the real recognition loop: confirmed, liveness
+  passed, and recorded once (`tests/test_recognition_loop_smoke.py`).
+  **Not yet verified:** a physical external webcam, and the rate through
+  Cloudflare on the school connection. Those are what your trial measures.
+
 **Verified on this machine (2026-10-17):** the real `serve.py` behind the real
 Caddy, against the local database. Five bad logins from one visitor locked that visitor only,
 and another visitor was unaffected. The request reached the app as `https`, and the start-up

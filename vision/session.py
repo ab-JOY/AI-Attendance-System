@@ -294,7 +294,7 @@ class RecognitionSession:
     # Nothing here interprets it - it is compared for equality, logged, and
     # handed back in the snapshot - so this module still knows nothing about
     # the schema.
-    def start(self, subject_code: Any) -> bool:
+    def start(self, subject_code: Any, camera: Any = None) -> bool:
         """
         Begin a session for one subject. True if recognition can now run.
 
@@ -302,6 +302,12 @@ class RecognitionSession:
         simply overwrote `current_subject`, which silently attributed frames
         already being counted toward one subject to another one; the operator
         has to end the session first.
+
+        `camera` replaces `hooks.open_camera()` for this session - a
+        `BrowserCamera` fed by uploads. It is used as it is: `configure_camera`
+        sets a real device's resolution and reads three frames to discard,
+        which would only block on a browser that has not sent any yet. Uploads
+        arrive at the recognition resolution already.
         """
         with self._lock:
             if self._running:
@@ -320,13 +326,13 @@ class RecognitionSession:
                 return False
 
             if self._capture is None:
-                capture = self._hooks.open_camera()
+                capture = camera if camera is not None else self._hooks.open_camera()
 
                 if capture is None or not capture.isOpened():
                     logger.error("Cannot open camera")
                     return False
 
-                if self._hooks.configure_camera is not None:
+                if camera is None and self._hooks.configure_camera is not None:
                     self._hooks.configure_camera(capture)
 
                 self._capture = capture
@@ -585,6 +591,43 @@ class RecognitionSession:
                 tracker=self._tracker,
                 recognized=self._recognized,
             )
+
+    # -- uploaded frames (attendance from the operator's browser) ----------
+
+    @property
+    def uses_browser_camera(self) -> bool:
+        """Whether the running session takes its frames from uploads."""
+        with self._lock:
+            return self._running and callable(getattr(self._capture, "push", None))
+
+    def submit_frame(self, frame: Any) -> bool:
+        """
+        Hand one uploaded frame to a running browser-camera session.
+
+        False when no session is running or the running one uses the
+        classroom camera, so an upload can never be mixed into frames from a
+        real device. Duck-typed on `push` so this package still imports no
+        camera code.
+        """
+        with self._lock:
+            if not self._running:
+                return False
+
+            push = getattr(self._capture, "push", None)
+
+            if not callable(push):
+                return False
+
+            accepted = push(frame)
+
+            # The heartbeat for the upload-driven recognition thread, which has
+            # no stream of its own to beat with. Without it, ten seconds after
+            # Start any /video_feed request could take the slot over as
+            # "abandoned" (VIEWER_STALE_SECONDS) from a session that is alive.
+            if accepted and self._viewer is not None:
+                self._viewer_heartbeat_at = self._clock()
+
+            return accepted
 
     def mark_recognized(self, student_id: str, status: str | None = None) -> None:
         """Record that this student's attendance has been written."""

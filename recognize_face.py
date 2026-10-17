@@ -20,6 +20,7 @@ from services.punctuality import derive_status
 from vision.geometry import FaceBox, get_face_box
 from vision.landmarks import LEFT_EYE_OUTER, NOSE_TIP, RIGHT_EYE_OUTER
 from vision.liveness import LivenessChallenge, LivenessConfig
+from vision.pose import RECOGNITION_FRAME_HEIGHT, RECOGNITION_FRAME_WIDTH
 from vision.quality import RECOGNITION_QUALITY, quality_issue
 from vision.session import (
     RecognitionSession,
@@ -461,11 +462,11 @@ def configure_camera(capture):
     """Resolution and buffering for a freshly opened camera."""
     capture.set(
         cv2.CAP_PROP_FRAME_WIDTH,
-        1280
+        RECOGNITION_FRAME_WIDTH
     )
     capture.set(
         cv2.CAP_PROP_FRAME_HEIGHT,
-        720
+        RECOGNITION_FRAME_HEIGHT
     )
     capture.set(
         cv2.CAP_PROP_BUFFERSIZE,
@@ -898,7 +899,7 @@ def save_attendance(student_id, subject):
 # =====================================================
 
 
-def start_camera(subject):
+def start_camera(subject, camera=None):
     """
     Begin an attendance session. True if recognition can now run.
 
@@ -907,11 +908,14 @@ def start_camera(subject):
     still works by value - but the identity it carries is now `subject_id`,
     which is what every attendance write keys on.
 
+    `camera` is a `BrowserCamera` when frames come from the operator's browser
+    rather than the classroom camera; None opens the classroom camera.
+
     Thin: the model reload, the camera open, the tracker reset and the
     "already running" decision all belong to the session, which holds the lock
     that makes them one atomic transition (RE-2).
     """
-    return session.start(subject)
+    return session.start(subject, camera=camera)
 
 
 def stop_camera():
@@ -1978,6 +1982,75 @@ def _recognition_worker(token, publish, stopped):
         logger.exception(
             "Recognition stopped with an error. The video stream ends with it."
         )
+
+
+# =====================================================
+# RECOGNITION FOR UPLOADED FRAMES (the browser camera)
+#
+# ⚠️ **Not through /video_feed, and that is the fix for the lag.** Driving
+# this through the MJPEG stream meant every picture crossed the internet
+# twice: up as an upload, then back down as the annotated stream, on the same
+# connection. Measured through the Cloudflare tunnel, a 1280x720 frame took
+# ~1.3 s, under one frame a second, so the tracker treated every frame as a
+# new face and never drew a box. Now the browser shows its own camera, and
+# each upload's reply carries just the boxes, names and statuses to draw on it.
+#
+# The recognition itself is unchanged. The same `run_recognition()` on the same
+# session, holding the same single viewer slot - so a second stream still
+# cannot double-count votes - with uploads as its heartbeat
+# (`RecognitionSession.submit_frame`).
+# =====================================================
+
+_upload_overlays = _LatestOverlays()
+
+
+def start_upload_recognition():
+    """
+    Run recognition over a browser-camera session's uploads, on a thread.
+
+    False when it is already running for this session - a second Start, or a
+    reload - which is not an error: the thread that holds the slot carries on.
+    It ends by itself when the session stops, because `stop()` releases the
+    slot and `run_recognition()` checks `holds_viewer()` every frame.
+    """
+    try:
+        token = session.acquire_viewer()
+    except SessionBusy:
+        return False
+
+    _upload_overlays.publish(None)
+
+    threading.Thread(
+        target=_recognition_worker,
+        args=(token, _upload_overlays.publish, lambda: False),
+        name="recognition-upload",
+        daemon=True,
+    ).start()
+
+    return True
+
+
+def overlay_as_json(overlay):
+    """One `FaceOverlay` as the page draws it: what `draw_face_result()` draws."""
+    blue, green, red = status_color(overlay.status)
+
+    return {
+        "box": list(overlay.box),
+        "name": overlay.student_name,
+        "status": overlay.status,
+        "score": "--" if overlay.confidence >= 900 else f"{overlay.confidence:.1f}",
+        "color": f"#{red:02x}{green:02x}{blue:02x}",
+    }
+
+
+def latest_upload_overlays():
+    """The newest results for the page, or None before the first frame is judged."""
+    overlays = _upload_overlays.get()
+
+    if overlays is None:
+        return None
+
+    return [overlay_as_json(overlay) for overlay in overlays]
 
 
 def run_recognition(token, publish, stopped=lambda: False):

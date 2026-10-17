@@ -90,6 +90,15 @@ CANONICAL_FRAME_HEIGHT = 1080
 # Refusing up front with a clear reason beats an unexplained "Image is blurry."
 MIN_NATIVE_FRAME_WIDTH = 960
 
+# ⚠️ Attendance is NOT judged at the canonical frame above. Recognition opens
+# the classroom camera at 1280x720 (`recognize_face.configure_camera`), and its
+# gates - MIN_FACE_WIDTH and the rest - are pixel sizes tuned at that
+# resolution. A browser frame scaled to 1920x1080 instead would make every
+# face 1.5x larger than the thresholds assume, so attendance uploads are
+# normalised to this size.
+RECOGNITION_FRAME_WIDTH = 1280
+RECOGNITION_FRAME_HEIGHT = 720
+
 
 # =====================================================
 # FRAMING

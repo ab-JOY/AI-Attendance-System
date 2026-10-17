@@ -51,8 +51,6 @@ JPEG_MAGIC = b"\xff\xd8\xff"
 MAX_DECODED_WIDTH = 7680
 MAX_DECODED_HEIGHT = 4320
 
-CANONICAL_ASPECT = CANONICAL_FRAME_WIDTH / CANONICAL_FRAME_HEIGHT
-
 
 class UploadRejected(ValueError):
     """
@@ -64,12 +62,19 @@ class UploadRejected(ValueError):
     """
 
 
-def decode_frame(body: bytes | None, content_type: str | None):
+def decode_frame(
+    body: bytes | None,
+    content_type: str | None,
+    size: tuple[int, int] = (CANONICAL_FRAME_WIDTH, CANONICAL_FRAME_HEIGHT),
+):
     """
     Validate, decode and canonicalise one uploaded frame.
 
-    Returns a BGR array at exactly CANONICAL_FRAME_WIDTH x
-    CANONICAL_FRAME_HEIGHT. Raises UploadRejected for anything unusable.
+    Returns a BGR array at exactly `size` (width, height) - enrolment's
+    canonical frame unless the caller says otherwise. Attendance passes
+    RECOGNITION_FRAME_WIDTH x RECOGNITION_FRAME_HEIGHT, the resolution its
+    gates were tuned at (see vision/pose.py). Raises UploadRejected for
+    anything unusable.
     """
     _check_declared_type(content_type)
     _check_magic(body)
@@ -85,54 +90,56 @@ def decode_frame(body: bytes | None, content_type: str | None):
         # captures, and "Image is blurry." would be a misleading thing to show
         # someone whose only problem is a low-resolution webcam.
         raise UploadRejected(
-            f"The camera is only {width} pixels wide. Enrolment needs at "
+            f"The camera is only {width} pixels wide. It needs to be at "
             f"least {MIN_NATIVE_FRAME_WIDTH}; choose a higher-resolution "
             "camera or raise its quality setting."
         )
 
-    return canonicalise(frame)
+    return canonicalise(frame, size)
 
 
-def canonicalise(frame):
+def canonicalise(
+    frame,
+    size: tuple[int, int] = (CANONICAL_FRAME_WIDTH, CANONICAL_FRAME_HEIGHT),
+):
     """
-    Centre-crop to the canonical aspect ratio, then scale to the canonical size.
+    Centre-crop to the aspect ratio of `size`, then scale to `size`.
 
     Cropping rather than squashing: see the module docstring. The crop is
     centred because the framing gate asks the subject to centre themselves, so
     the middle of the frame is where the face is meant to be anyway.
     """
+    target_width, target_height = size
+    target_aspect = target_width / target_height
+
     height, width = frame.shape[:2]
 
-    if (width, height) == (CANONICAL_FRAME_WIDTH, CANONICAL_FRAME_HEIGHT):
+    if (width, height) == size:
         return frame
 
     aspect = width / height
 
-    if aspect > CANONICAL_ASPECT:
+    if aspect > target_aspect:
         # Too wide: trim the sides.
-        target_width = int(round(height * CANONICAL_ASPECT))
-        offset = (width - target_width) // 2
-        frame = frame[:, offset : offset + target_width]
-    elif aspect < CANONICAL_ASPECT:
+        cropped_width = int(round(height * target_aspect))
+        offset = (width - cropped_width) // 2
+        frame = frame[:, offset : offset + cropped_width]
+    elif aspect < target_aspect:
         # Too tall: trim top and bottom.
-        target_height = int(round(width / CANONICAL_ASPECT))
-        offset = (height - target_height) // 2
-        frame = frame[offset : offset + target_height, :]
+        cropped_height = int(round(width / target_aspect))
+        offset = (height - cropped_height) // 2
+        frame = frame[offset : offset + cropped_height, :]
 
     # INTER_AREA downscales without the aliasing INTER_LINEAR introduces, and
     # aliasing would show up as false detail in the Laplacian blur measure -
     # a sharpness score the picture had not earned.
     interpolation = (
         cv2.INTER_AREA
-        if frame.shape[1] > CANONICAL_FRAME_WIDTH
+        if frame.shape[1] > target_width
         else cv2.INTER_LINEAR
     )
 
-    return cv2.resize(
-        frame,
-        (CANONICAL_FRAME_WIDTH, CANONICAL_FRAME_HEIGHT),
-        interpolation=interpolation,
-    )
+    return cv2.resize(frame, size, interpolation=interpolation)
 
 
 def _check_declared_type(content_type: str | None) -> None:

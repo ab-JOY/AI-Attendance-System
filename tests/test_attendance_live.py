@@ -67,10 +67,12 @@ class FakeSession:
     is about.
     """
 
-    def __init__(self, *, running, subject=None, ids=()):
+    def __init__(self, *, running, subject=None, ids=(), browser=False):
         self.is_running = running
         self.subject = subject
         self._ids = set(ids)
+        # A property on the real class; a plain attribute reads the same.
+        self.uses_browser_camera = browser
 
     def recognized_ids(self):
         return set(self._ids)
@@ -263,3 +265,41 @@ def test_a_fault_answers_json_rather_than_an_html_page(client, monkeypatch):
         "a @json_api route answered a fault with HTML; see web/errors.py"
     )
     assert "something unexpected" not in response.get_data(as_text=True)
+
+
+# ---------------------------------------------------------------------------
+# Which camera the running session uses (attendance from a browser webcam)
+# ---------------------------------------------------------------------------
+
+
+def test_a_classroom_camera_session_reports_the_server_camera(client, monkeypatch):
+    stub_session(monkeypatch, FakeSession(running=True, subject=SUBJECT))
+    stub_register(monkeypatch, rows=[])
+    sign_in(client)
+
+    assert client.get("/attendance/live").get_json()["camera"] == "server"
+
+
+def test_the_browser_that_started_the_session_is_told_to_resume_uploading(
+    client, monkeypatch
+):
+    from web.sessions import BROWSER_CAMERA_KEY
+
+    stub_session(monkeypatch, FakeSession(running=True, subject=SUBJECT, browser=True))
+    stub_register(monkeypatch, rows=[])
+    sign_in(client)
+
+    with client.session_transaction() as session:
+        session[BROWSER_CAMERA_KEY] = SUBJECT.session_id
+
+    assert client.get("/attendance/live").get_json()["camera"] == "browser"
+
+
+def test_another_login_watching_a_browser_session_does_not_upload(client, monkeypatch):
+    # Only the device that started it feeds the session. Anyone else who
+    # opens the page sees the stream, and must not start sending frames.
+    stub_session(monkeypatch, FakeSession(running=True, subject=SUBJECT, browser=True))
+    stub_register(monkeypatch, rows=[])
+    sign_in(client)
+
+    assert client.get("/attendance/live").get_json()["camera"] == "server"

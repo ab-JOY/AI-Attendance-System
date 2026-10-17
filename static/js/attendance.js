@@ -32,7 +32,16 @@
     var FEED_URL = page.getAttribute("data-feed-url");
     var CAMERAS_URL = page.getAttribute("data-cameras-url");
     var SELECT_CAMERA_URL = page.getAttribute("data-select-camera-url");
+    var FRAME_URL = page.getAttribute("data-frame-url");
     var LOGIN_URL = page.getAttribute("data-login-url");
+
+    // The resolution recognition judges faces at. Sent from the server
+    // rather than restated here (see web/sessions.py).
+    var RECOGNITION_WIDTH = Number(page.getAttribute("data-recognition-width"));
+    var RECOGNITION_HEIGHT = Number(page.getAttribute("data-recognition-height"));
+
+    // /attendance/frame refuses anything narrower (MIN_NATIVE_FRAME_WIDTH).
+    var MIN_FRAME_WIDTH = Number(page.getAttribute("data-min-frame-width"));
 
     // Slow enough not to hammer a server that is also decoding frames - the
     // recognition loop costs 48-147 ms per frame on this machine
@@ -187,7 +196,15 @@
             .then(function (body) {
                 if (!body.running) {
                     stopPolling();
+                    stopUploading();
+                    streamWanted = false;
                     return;
+                }
+
+                // Reloaded mid-session on the device feeding it: pick the
+                // uploads back up, or recognition has nothing to look at.
+                if (body.camera === "browser" && !uploading && !resuming) {
+                    resumeBrowserSession();
                 }
 
                 if (liveCount) {
@@ -286,6 +303,607 @@
     }
 
     /* ---------------------------------------------------------------
+     * Which camera: this device's, or the classroom camera
+     *
+     * "browser" uses getUserMedia on whatever device this page is open on
+     * and uploads its frames; "server" is the camera connected to the
+     * machine running the system, opened there by OpenCV. Recognition is
+     * the same code either way - only where the pixels come from differs.
+     *
+     * The default follows where the page is opened: on the server itself
+     * (localhost) the classroom camera is right there; from anywhere else
+     * it is in another room, and this device's camera is the useful one.
+     * --------------------------------------------------------------- */
+
+    var SOURCE_KEY = "attendance-camera-source";
+
+    var sourceRadios = document.querySelectorAll('input[name="camera_source"]');
+    var browserPicker = document.getElementById("browser-camera-picker");
+    var serverPicker = document.getElementById("server-camera-picker");
+    var browserSelect = document.getElementById("browser-camera-select");
+    var browserDetail = document.getElementById("browser-camera-detail");
+    var preview = document.getElementById("browser-preview");
+
+    var browserStream = null;
+    var serverCamerasLoaded = false;
+
+    function onThisMachine() {
+        var host = window.location.hostname;
+        return host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+    }
+
+    function savedSource() {
+        // localStorage can throw (private window, blocked site data). The
+        // default is then the whole behaviour, which is fine.
+        try {
+            var value = window.localStorage.getItem(SOURCE_KEY);
+            if (value === "browser" || value === "server") { return value; }
+        } catch (ignored) { /* fall through to the default */ }
+
+        return onThisMachine() ? "server" : "browser";
+    }
+
+    function rememberSource(value) {
+        try {
+            window.localStorage.setItem(SOURCE_KEY, value);
+        } catch (ignored) { /* a convenience only */ }
+    }
+
+    function chosenSource() {
+        for (var i = 0; i < sourceRadios.length; i += 1) {
+            if (sourceRadios[i].checked) { return sourceRadios[i].value; }
+        }
+        return "server";
+    }
+
+    function sayAboutWebcam(text) {
+        if (browserDetail) { browserDetail.textContent = text; }
+    }
+
+    function releaseBrowserCamera() {
+        // Any request still opening a camera is now stale; see openBrowserCamera.
+        cameraRequest += 1;
+        browserWidth = 0;
+
+        if (browserStream) {
+            browserStream.getTracks().forEach(function (track) { track.stop(); });
+            browserStream = null;
+        }
+
+        if (preview) {
+            preview.srcObject = null;
+            preview.hidden = true;
+        }
+
+        clearFaces();
+    }
+
+    function listWebcams(activeId) {
+        if (!navigator.mediaDevices.enumerateDevices) { return; }
+
+        navigator.mediaDevices.enumerateDevices().then(function (devices) {
+            var webcams = devices.filter(function (d) { return d.kind === "videoinput"; });
+
+            browserSelect.textContent = "";
+
+            webcams.forEach(function (device, index) {
+                var option = new Option(
+                    device.label || ("Camera " + (index + 1)),
+                    device.deviceId
+                );
+                option.selected = device.deviceId === activeId;
+                browserSelect.appendChild(option);
+            });
+
+            browserSelect.disabled = webcams.length < 2;
+        });
+    }
+
+    // Bumped by every open and every release. A getUserMedia() that resolves
+    // after a newer request has started is stale: its stream is stopped and
+    // thrown away. Without this, choosing webcams quickly let an older request
+    // finish last, overwrite the newer stream and keep holding the device -
+    // so the next open failed with "in use" (reported as "sometimes the webcam
+    // won't open").
+    var cameraRequest = 0;
+
+    // Windows can take a moment to let go of a webcam after its track is
+    // stopped. NotReadableError right after a switch is usually that, not
+    // another application.
+    var CAMERA_RETRY_MS = 700;
+
+    /* The webcam this device last used successfully, so a reload - including
+     * the one /end-attendance causes - reopens it instead of the browser's
+     * default. That default is usually the built-in camera, often 640x480,
+     * which the server refuses: reported as "it works, but after End and
+     * Start again it says the camera is only 640 pixels wide". */
+    var WEBCAM_KEY = "attendance-webcam-id";
+
+    function savedWebcam() {
+        try { return window.localStorage.getItem(WEBCAM_KEY); } catch (ignored) { return null; }
+    }
+
+    function rememberWebcam(id) {
+        try { window.localStorage.setItem(WEBCAM_KEY, id); } catch (ignored) { /* convenience */ }
+    }
+
+    // The width the open webcam actually delivers; 0 when none is open.
+    var browserWidth = 0;
+
+    function tooSmallMessage(width, height) {
+        return "This webcam gives only " + width + "x" + height + ". Attendance " +
+               "needs one at least " + MIN_FRAME_WIDTH + " pixels wide - choose " +
+               "another webcam from the list.";
+    }
+
+    // When the camera was not chosen by hand and is too small, try the
+    // device's other webcams and keep the first one that is wide enough.
+    function tryAnotherWebcam(tried) {
+        return navigator.mediaDevices.enumerateDevices().then(function (devices) {
+            var next = devices.filter(function (d) {
+                return d.kind === "videoinput" && tried.indexOf(d.deviceId) === -1;
+            })[0];
+
+            // null: nothing left to try, so the caller keeps what it has open.
+            return next ? openBrowserCamera(next.deviceId, false, tried) : null;
+        });
+    }
+
+    // `tried` is set only while searching for a wide-enough webcam: those
+    // opens were not chosen by hand, so a too-small result moves on.
+    function openBrowserCamera(deviceId, isRetry, tried) {
+        releaseBrowserCamera();
+        var request = cameraRequest;
+        var chosenByHand = Boolean(deviceId) && !tried;
+
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            // Absent rather than failing: the page is not in a secure context.
+            sayAboutWebcam(
+                "This browser will not give the page a camera. Open the system " +
+                "through its https:// address."
+            );
+            return Promise.resolve(false);
+        }
+
+        var video = {
+            width: { ideal: RECOGNITION_WIDTH },
+            height: { ideal: RECOGNITION_HEIGHT }
+        };
+
+        if (deviceId) {
+            // `exact`, so a chosen webcam that cannot be opened says so
+            // instead of silently falling back to the built-in one.
+            video.deviceId = { exact: deviceId };
+        } else if (savedWebcam()) {
+            // `ideal`: the remembered webcam if it is still plugged in, the
+            // default if not.
+            video.deviceId = { ideal: savedWebcam() };
+        }
+
+        sayAboutWebcam("Opening the camera…");
+
+        return navigator.mediaDevices.getUserMedia({ video: video, audio: false })
+            .then(function (stream) {
+                if (request !== cameraRequest) {
+                    stream.getTracks().forEach(function (track) { track.stop(); });
+                    return false;
+                }
+
+                browserStream = stream;
+                preview.srcObject = stream;
+                preview.play().catch(function () { /* autoplay covers it */ });
+                preview.hidden = false;
+                cameraText.hidden = true;
+
+                var track = stream.getVideoTracks()[0];
+                var settings = track.getSettings ? track.getSettings() : {};
+
+                track.addEventListener("ended", function () {
+                    stopUploading();
+                    notify("The webcam was disconnected. Reconnect it and reload " +
+                           "the page to keep taking attendance.", "error");
+                });
+
+                listWebcams(settings.deviceId);
+
+                browserWidth = settings.width || 0;
+
+                if (browserWidth && browserWidth < MIN_FRAME_WIDTH) {
+                    if (!chosenByHand) {
+                        var alreadyTried = (tried || []).concat([settings.deviceId]);
+
+                        return tryAnotherWebcam(alreadyTried).then(function (result) {
+                            if (result === null) {
+                                // No other webcam to try: this one stays open,
+                                // and Start will refuse it with this reason.
+                                sayAboutWebcam(tooSmallMessage(settings.width, settings.height));
+                                return true;
+                            }
+                            return result;
+                        });
+                    }
+
+                    sayAboutWebcam(tooSmallMessage(settings.width, settings.height));
+                    return true;
+                }
+
+                // Only a webcam that works is worth reopening next time.
+                if (settings.deviceId) { rememberWebcam(settings.deviceId); }
+
+                sayAboutWebcam(
+                    "Webcam ready" +
+                    (settings.width ? " (" + settings.width + "x" + settings.height + ")" : "") +
+                    ". If the picture is black or frozen, choose another webcam."
+                );
+
+                return true;
+            })
+            .catch(function (error) {
+                if (request !== cameraRequest) { return false; }
+
+                var name = error && error.name ? error.name : "unknown error";
+
+                if (!isRetry && (name === "NotReadableError" || name === "AbortError")) {
+                    sayAboutWebcam("The webcam is busy, trying again…");
+
+                    return new Promise(function (resolve) {
+                        window.setTimeout(resolve, CAMERA_RETRY_MS);
+                    }).then(function () {
+                        return request === cameraRequest
+                            ? openBrowserCamera(deviceId, true)
+                            : false;
+                    });
+                }
+
+                sayAboutWebcam(
+                    name === "NotAllowedError"
+                        ? "Camera access was refused. Allow it in the browser's " +
+                          "address bar, then choose the camera again."
+                        : "The webcam could not be opened (" + name + "). Close " +
+                          "any other app using it (Zoom, Teams, the Camera app), " +
+                          "then choose it again."
+                );
+                return false;
+            });
+    }
+
+    function showSource(source) {
+        browserPicker.hidden = source !== "browser";
+        serverPicker.hidden = source !== "server";
+
+        if (source === "browser") {
+            openBrowserCamera(browserSelect.value || null);
+            return;
+        }
+
+        releaseBrowserCamera();
+        cameraText.hidden = camera.style.display === "block";
+
+        // The scan opens every device on the server and can take seconds, so
+        // it runs only when the classroom camera is actually wanted.
+        if (!serverCamerasLoaded) {
+            serverCamerasLoaded = true;
+            loadCameras();
+        }
+    }
+
+    /* ---------------------------------------------------------------
+     * The recognition results, drawn over this device's own picture
+     *
+     * ⚠️ **The page does not show the server's stream in this mode.** That
+     * sent every picture across the internet twice - up, then back down
+     * annotated - and through the Cloudflare tunnel a frame took ~1.3 s, so
+     * recognition saw under one frame a second and never drew a box. The
+     * webcam is shown directly instead (no lag at all), and each upload's
+     * reply carries the boxes, names and statuses the server would have
+     * drawn, in its 1280x720 recognition frame.
+     * --------------------------------------------------------------- */
+
+    var overlay = document.getElementById("face-overlay");
+
+    function clearFaces() {
+        if (!overlay) { return; }
+        overlay.getContext("2d").clearRect(0, 0, overlay.width, overlay.height);
+    }
+
+    function drawFaces(faces) {
+        if (!overlay || !preview.videoWidth || faces === null || faces === undefined) {
+            return;
+        }
+
+        var ratio = window.devicePixelRatio || 1;
+        var shownWidth = overlay.clientWidth;
+        var shownHeight = overlay.clientHeight;
+
+        overlay.width = Math.round(shownWidth * ratio);
+        overlay.height = Math.round(shownHeight * ratio);
+
+        var context = overlay.getContext("2d");
+        context.setTransform(ratio, 0, 0, ratio, 0, 0);
+        context.clearRect(0, 0, shownWidth, shownHeight);
+
+        var videoWidth = preview.videoWidth;
+        var videoHeight = preview.videoHeight;
+
+        // 1. Recognition frame -> video pixels. The server centre-cropped the
+        //    upload to 16:9 and scaled it to RECOGNITION_WIDTH (infra/uploads.py).
+        var target = RECOGNITION_WIDTH / RECOGNITION_HEIGHT;
+        var cropX = 0;
+        var cropY = 0;
+        var perPixel;
+
+        if (videoWidth / videoHeight > target) {
+            var croppedWidth = videoHeight * target;
+            cropX = (videoWidth - croppedWidth) / 2;
+            perPixel = croppedWidth / RECOGNITION_WIDTH;
+        } else {
+            var croppedHeight = videoWidth / target;
+            cropY = (videoHeight - croppedHeight) / 2;
+            perPixel = videoWidth / RECOGNITION_WIDTH;
+        }
+
+        // 2. Video pixels -> the element, which shows it with object-fit:cover.
+        var cover = Math.max(shownWidth / videoWidth, shownHeight / videoHeight);
+        var offsetX = (shownWidth - videoWidth * cover) / 2;
+        var offsetY = (shownHeight - videoHeight * cover) / 2;
+
+        function toScreenX(x) { return offsetX + (cropX + x * perPixel) * cover; }
+        function toScreenY(y) { return offsetY + (cropY + y * perPixel) * cover; }
+
+        if (!faces.length) {
+            context.fillStyle = "#ff0000";
+            context.font = "bold 18px sans-serif";
+            context.fillText("No valid face detected", 16, 30);
+            return;
+        }
+
+        faces.forEach(function (face) {
+            var x1 = toScreenX(face.box[0]);
+            var y1 = toScreenY(face.box[1]);
+            var x2 = toScreenX(face.box[2]);
+            var y2 = toScreenY(face.box[3]);
+
+            context.strokeStyle = face.color;
+            context.fillStyle = face.color;
+            context.lineWidth = 3;
+            context.strokeRect(x1, y1, x2 - x1, y2 - y1);
+
+            // Canvas text, never HTML: a student's name cannot become markup.
+            context.font = "bold 18px sans-serif";
+            context.fillText(face.name, x1, Math.max(y1 - 8, 20));
+
+            context.font = "bold 15px sans-serif";
+            context.fillText(
+                face.status + " (" + face.score + ")",
+                x1,
+                Math.min(y2 + 22, shownHeight - 6)
+            );
+        });
+    }
+
+    /* ---------------------------------------------------------------
+     * Uploading frames
+     *
+     * Up to MAX_IN_FLIGHT frames on the wire at once, never more often than
+     * MIN_FRAME_MS. One at a time capped the rate at one frame per round trip
+     * - ~0.35 s to Cloudflare and back before a single byte of picture -
+     * whatever the bandwidth. Two hides that wait; more would only queue
+     * frames behind a slow connection.
+     *
+     * Frames are UPLOAD_WIDTH wide at UPLOAD_QUALITY: 44 KB rather than the
+     * 139 KB of a 1280-wide frame at 0.85, measured on a real webcam frame.
+     * Recognition still confirms an enrolled student and passes liveness at
+     * exactly these settings (tests/test_recognition_loop_smoke.py, browser
+     * section); the server scales them up to 1280x720 to judge. 960 is also
+     * the narrowest frame the server accepts (MIN_NATIVE_FRAME_WIDTH).
+     *
+     * ⚠️ Never mirrored. drawImage() samples the decoded video, which no CSS
+     * transform touches - and a mirrored upload would turn "turn left" in
+     * the liveness challenge into a turn to the right (see enrol.js).
+     * --------------------------------------------------------------- */
+
+    var UPLOAD_WIDTH = 960;
+    var UPLOAD_QUALITY = 0.6;
+
+    // ~8 frames a second: recognition handles about 6.8 with a face in shot
+    // (docs/benchmarks.md), so sending faster only costs bandwidth.
+    var MIN_FRAME_MS = 125;
+    var MAX_IN_FLIGHT = 2;
+
+    // Below this, a face track can expire between frames (1.5 s) and the
+    // liveness steps can time out (8 s each), so a check may restart.
+    var SLOW_FPS = 3;
+
+    var uploading = false;
+    var inFlight = 0;
+    var lastSentAt = 0;
+    var pumpTimer = null;
+    var sentInWindow = 0;
+    var windowStartedAt = 0;
+
+    function reportRate() {
+        var now = Date.now();
+        var elapsed = (now - windowStartedAt) / 1000;
+
+        if (elapsed < 2) { return; }
+
+        var fps = sentInWindow / elapsed;
+        sentInWindow = 0;
+        windowStartedAt = now;
+
+        sayAboutWebcam(
+            "Sending " + fps.toFixed(1) + " frames/s from this webcam." +
+            (fps < SLOW_FPS
+                ? " Slow connection: students may need to repeat the check."
+                : "")
+        );
+    }
+
+    function pumpLater(ms) {
+        if (pumpTimer !== null) { return; }
+
+        pumpTimer = window.setTimeout(function () {
+            pumpTimer = null;
+            pump();
+        }, ms);
+    }
+
+    function pump() {
+        if (!uploading || inFlight >= MAX_IN_FLIGHT) {
+            // A reply arriving calls pump() again.
+            return;
+        }
+
+        var wait = MIN_FRAME_MS - (Date.now() - lastSentAt);
+
+        if (wait > 0) {
+            pumpLater(wait);
+            return;
+        }
+
+        if (!browserStream || !preview.videoWidth) {
+            // The webcam has not produced a frame yet.
+            pumpLater(MIN_FRAME_MS);
+            return;
+        }
+
+        lastSentAt = Date.now();
+        inFlight += 1;
+        sendFrame(function () {
+            inFlight -= 1;
+            pump();
+        });
+
+        // Start the next one too, if the limit allows; it waits MIN_FRAME_MS.
+        pump();
+    }
+
+    var scratch = document.createElement("canvas");
+
+    function sendFrame(done) {
+        var scale = Math.min(1, UPLOAD_WIDTH / preview.videoWidth);
+        scratch.width = Math.round(preview.videoWidth * scale);
+        scratch.height = Math.round(preview.videoHeight * scale);
+        scratch.getContext("2d").drawImage(preview, 0, 0, scratch.width, scratch.height);
+
+        scratch.toBlob(function (blob) {
+            if (!blob || !uploading) { done(); return; }
+
+            fetch(FRAME_URL, {
+                method: "POST",
+                credentials: "same-origin",
+                headers: { "Content-Type": "image/jpeg", "X-CSRFToken": CSRF_TOKEN },
+                body: blob
+            })
+                .then(function (response) {
+                    if (response.status === 401) {
+                        window.location.href = LOGIN_URL;
+                        throw new Error("signed out");
+                    }
+
+                    return response.json().then(function (body) {
+                        return { status: response.status, body: body };
+                    });
+                })
+                .then(function (result) {
+                    if (result.status === 409 || result.status === 400) {
+                        // 409: the session ended, or is not this device's.
+                        // 400: the picture itself is unusable, and sending
+                        // the same camera again cannot fix it.
+                        stopUploading();
+                        notify(result.body.message,
+                               result.status === 400 ? "error" : "info");
+                        done();
+                        return;
+                    }
+
+                    if (uploading) { drawFaces(result.body.faces); }
+
+                    sentInWindow += 1;
+                    reportRate();
+                    done();
+                })
+                .catch(function (error) {
+                    if (error.message === "signed out") { return; }
+
+                    // A dropped request on a flaky connection: carry on in a
+                    // moment rather than giving up on the class.
+                    sayAboutWebcam("Connection interrupted, retrying…");
+                    window.setTimeout(done, 1000);
+                });
+        }, "image/jpeg", UPLOAD_QUALITY);
+    }
+
+    /* ---------------------------------------------------------------
+     * The classroom camera's live stream, retried when its slot is held
+     *
+     * ⚠️ For the classroom camera, recognition runs only while a /video_feed
+     * viewer is open - the single-viewer rule (vision/session.py). After a
+     * reload the previous page's stream still holds the slot until the
+     * server notices it has gone (at most VIEWER_STALE_SECONDS, 10 s), so
+     * the new request is refused with a 409. Taken once, that refusal left a
+     * session with nobody recognising (lessons.md L38). So a refused stream
+     * is retried while the session runs.
+     * --------------------------------------------------------------- */
+
+    var STREAM_RETRY_MS = 2000;
+    var streamWanted = false;
+
+    function showStream() {
+        streamWanted = true;
+        camera.style.display = "block";
+        cameraText.hidden = true;
+        // A fresh URL each time, or the browser may reuse the refused one.
+        camera.src = FEED_URL + "?t=" + Date.now();
+    }
+
+    camera.addEventListener("error", function () {
+        if (!streamWanted) { return; }
+
+        window.setTimeout(function () {
+            if (streamWanted) { showStream(); }
+        }, STREAM_RETRY_MS);
+    });
+
+    function startUploading() {
+        if (uploading) { return; }
+
+        uploading = true;
+        sentInWindow = 0;
+        windowStartedAt = Date.now();
+        pump();
+    }
+
+    function stopUploading() {
+        uploading = false;
+        clearFaces();
+    }
+
+    window.addEventListener("pagehide", function () {
+        stopUploading();
+        releaseBrowserCamera();
+    });
+
+    Array.prototype.forEach.call(sourceRadios, function (radio) {
+        radio.addEventListener("change", function () {
+            if (uploading) {
+                // Switching mid-session would leave it with no frames.
+                notify("End the session before changing the camera.", "warning");
+                return;
+            }
+
+            rememberSource(radio.value);
+            showSource(radio.value);
+        });
+    });
+
+    if (browserSelect) {
+        browserSelect.addEventListener("change", function () {
+            openBrowserCamera(browserSelect.value);
+        });
+    }
+
+    /* ---------------------------------------------------------------
      * Starting and ending
      * --------------------------------------------------------------- */
 
@@ -301,6 +919,21 @@
             return;
         }
 
+        var source = chosenSource();
+
+        if (source === "browser" && !browserStream) {
+            refuse("This device's camera is not open yet. Allow camera access, " +
+                   "or choose the classroom camera.", null);
+            return;
+        }
+
+        // Refused here, before a session exists: the server would refuse
+        // every frame from it, and the session would run with nothing to see.
+        if (source === "browser" && browserWidth && browserWidth < MIN_FRAME_WIDTH) {
+            refuse(tooSmallMessage(browserWidth, preview.videoHeight || "?"), null);
+            return;
+        }
+
         var button = startForm.querySelector("button[type=submit]");
         button.disabled = true;
 
@@ -311,7 +944,8 @@
                 "Content-Type": "application/x-www-form-urlencoded",
                 "X-CSRFToken": CSRF_TOKEN
             },
-            body: "subject_id=" + encodeURIComponent(subject)
+            body: "subject_id=" + encodeURIComponent(subject) +
+                  "&camera=" + encodeURIComponent(source)
         })
             .then(function (response) {
                 if (response.status === 401) {
@@ -334,9 +968,13 @@
                     return;
                 }
 
-                camera.style.display = "block";
-                camera.src = FEED_URL;
-                cameraText.hidden = true;
+                if (body.camera === "browser") {
+                    // This device's picture stays on screen, with the
+                    // results drawn over it; there is no stream to open.
+                    startUploading();
+                } else {
+                    showStream();
+                }
 
                 // R3/FS-16. The page does not reload on start, so the End
                 // control has to be locked here as well as on render - and
@@ -379,6 +1017,8 @@
         // way - the difference is that the guard now runs against a session
         // that still exists. Do not reintroduce a stop before this post.
         stopPolling();
+        stopUploading();
+        streamWanted = false;
     });
 
     /* ---------------------------------------------------------------
@@ -550,10 +1190,39 @@
             });
     }
 
+    var resuming = false;
+
+    function resumeBrowserSession() {
+        resuming = true;
+
+        var radio = document.querySelector('input[name="camera_source"][value="browser"]');
+        if (radio) { radio.checked = true; }
+        browserPicker.hidden = false;
+        serverPicker.hidden = true;
+
+        openBrowserCamera(null).then(function (opened) {
+            resuming = false;
+
+            if (!opened) {
+                notify("This device was sending the camera for the running " +
+                       "session. Allow camera access to continue.", "warning");
+                return;
+            }
+
+            startUploading();
+        });
+    }
+
     if (cameraSelect) {
         cameraSelect.addEventListener("change", chooseCamera);
-        loadCameras();
     }
+
+    var initialSource = savedSource();
+    var initialRadio = document.querySelector(
+        'input[name="camera_source"][value="' + initialSource + '"]'
+    );
+    if (initialRadio) { initialRadio.checked = true; }
+    showSource(initialSource);
 
     // A page reloaded mid-session - the operator refreshed, or came back to
     // the tab - picks the running session up rather than claiming there is

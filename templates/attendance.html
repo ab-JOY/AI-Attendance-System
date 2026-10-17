@@ -19,6 +19,10 @@
         data-feed-url="{{ url_for('sessions.video_feed') }}"
         data-cameras-url="{{ url_for('sessions.list_cameras') }}"
         data-select-camera-url="{{ url_for('sessions.select_camera') }}"
+        data-frame-url="{{ url_for('sessions.attendance_frame') }}"
+        data-recognition-width="{{ recognition_width }}"
+        data-recognition-height="{{ recognition_height }}"
+        data-min-frame-width="{{ min_frame_width }}"
         data-login-url="{{ url_for('auth.home') }}"
         hidden></div>
 
@@ -80,8 +84,27 @@
                 <img
                     id="camera"
                     src=""
-                    alt="Live view from the classroom camera"
+                    alt="Live view of the attendance camera, with recognition results"
                     style="display:none;">
+
+                {#
+                    This device's webcam, shown directly - before and during
+                    the session. The recognition results are drawn on the
+                    canvas over it from each upload's reply, rather than by
+                    streaming the server's annotated picture back down: that
+                    round trip is what made it unusable through Cloudflare.
+                    Not mirrored, so the boxes line up with what the server
+                    judged.
+                #}
+                <video
+                    id="browser-preview"
+                    class="browser-preview"
+                    muted
+                    playsinline
+                    autoplay
+                    hidden></video>
+
+                <canvas id="face-overlay" class="face-overlay" aria-hidden="true"></canvas>
 
                 <p id="cameraText">
                     Choose a subject and start the session.
@@ -103,7 +126,46 @@
                 default and was the only option: nothing on any page said a
                 second camera existed.
             #}
-            <div class="form-container camera-picker" style="margin-top:16px; padding:16px;">
+            <div class="form-container camera-picker">
+
+                {#
+                    Where the session's frames come from. "This device" is the
+                    browser's own camera - a laptop's webcam or one plugged
+                    into it - uploaded frame by frame; it is what makes
+                    attendance possible from any machine once the system is on
+                    the internet. "Classroom camera" is the one connected to the
+                    server. Recognition is the same code either way.
+                #}
+                <fieldset class="camera-source">
+                    <legend>Camera source</legend>
+
+                    <label class="camera-source-option">
+                        <input type="radio" name="camera_source" value="browser">
+                        This device's camera
+                    </label>
+
+                    <label class="camera-source-option">
+                        <input type="radio" name="camera_source" value="server">
+                        Classroom camera (connected to the server)
+                    </label>
+                </fieldset>
+
+                <div id="browser-camera-picker" hidden>
+
+                    <label for="browser-camera-select">Webcam</label>
+
+                    <select id="browser-camera-select" disabled>
+                        <option value="">Allow camera access to list webcams</option>
+                    </select>
+
+                    <p id="browser-camera-detail"
+                       class="camera-detail"
+                       role="status"
+                       aria-live="polite"></p>
+
+                </div>
+
+                <div id="server-camera-picker" hidden>
 
                 <label for="camera-select">Camera</label>
 
@@ -114,11 +176,12 @@
                 <p id="camera-detail"
                    class="camera-detail"
                    role="status"
-                   aria-live="polite"
-                   style="font-size:0.85em; color:#555; margin:8px 0 0;">
+                   aria-live="polite">
                     Checking which cameras this machine has. This can take a
                     few seconds.
                 </p>
+
+                </div>
 
             </div>
 

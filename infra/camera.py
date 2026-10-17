@@ -305,3 +305,80 @@ class CameraReader:
     def is_running(self) -> bool:
         with self._condition:
             return self._running
+
+
+# How long `BrowserCamera.read()` waits for an upload before reporting no
+# frame. CameraReader treats that as a failed read, backs off 20 ms and asks
+# again, so this bounds how long `CameraReader.stop()` waits on the thread.
+BROWSER_FRAME_WAIT_SECONDS = 0.5
+
+
+class BrowserCamera:
+    """
+    A camera whose frames are uploaded by the operator's browser.
+
+    **Why it imitates `cv2.VideoCapture` rather than replacing the reader.**
+    Everything downstream of the capture - `CameraReader`, the viewer slot, the
+    recognition thread, the MJPEG stream - already works and is already
+    tested. `CameraReader` asks its capture for three things: `read()`,
+    `isOpened()` and `release()`. Supplying those means attendance from a
+    laptop's webcam runs through *exactly* the code the classroom camera does:
+    the same tracker, the same liveness challenge, the same threshold. Only
+    where the pixels come from changes.
+
+    `read()` blocks like a real camera does - until the browser sends the next
+    frame, or `BROWSER_FRAME_WAIT_SECONDS` passes. A browser that stops sending
+    (tab closed, laptop asleep, connection lost) therefore looks to the reader
+    exactly like a camera that stopped delivering, and is reported the same way.
+
+    Frames must already be at the recognition resolution:
+    `infra.uploads.decode_frame(..., size=(RECOGNITION_FRAME_WIDTH, ...))`.
+    """
+
+    def __init__(self, wait_seconds: float = BROWSER_FRAME_WAIT_SECONDS) -> None:
+        self._wait_seconds = wait_seconds
+        self._condition = threading.Condition()
+        self._frame = None
+        self._sequence = 0
+        self._delivered = 0
+        self._open = True
+
+    # -- the browser's side ------------------------------------------------
+
+    def push(self, frame) -> bool:
+        """Hand over one uploaded frame. False once the camera is released."""
+        with self._condition:
+            if not self._open:
+                return False
+
+            self._frame = frame
+            self._sequence += 1
+            self._condition.notify_all()
+            return True
+
+    # -- the cv2.VideoCapture side, for CameraReader -----------------------
+
+    def isOpened(self) -> bool:
+        # camelCase because it is cv2.VideoCapture's name for it.
+        with self._condition:
+            return self._open
+
+    def read(self):
+        """`(True, frame)` for a frame not yet read, else `(False, None)`."""
+        with self._condition:
+            self._condition.wait_for(
+                lambda: self._sequence != self._delivered or not self._open,
+                timeout=self._wait_seconds,
+            )
+
+            if not self._open or self._sequence == self._delivered:
+                return False, None
+
+            self._delivered = self._sequence
+            return True, self._frame
+
+    def release(self) -> None:
+        with self._condition:
+            self._open = False
+            self._frame = None
+            self._condition.notify_all()

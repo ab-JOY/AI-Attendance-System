@@ -1703,3 +1703,49 @@ sharing one lockout, the exact bug the change was meant to fix.
 - **Before calling a proxy setup done, put the real proxy in front and look
   at what the app receives** (an echo route is enough). The Caddy log showed
   the right `client_ip` the whole time. The loss happened one hop later.
+
+## L38 - "Sending 7.7 frames/s" while nothing was being recognised
+
+**2026-10-17, found by me while driving browser-camera attendance in Edge.**
+
+After a reload mid-session, the page resumed uploading and its readout said
+*"Sending 7.7 frames/s from this webcam."* Nothing was being recognised.
+Recognition runs only while a `/video_feed` viewer holds the single stream
+slot. The old page's stream still held it, so the new page's stream got a 409,
+which the page took once and never retried. Frames kept arriving into a session
+with nobody looking at them. Every unit test passed, and the only number on
+screen looked healthy, because it counted uploads, not recognition.
+
+**How to apply:**
+
+- **A health indicator must measure the thing that matters, or say what it
+  measures.** "Frames sent" is not "faces judged". When a feature has a
+  readout, ask what failure it would still show as green.
+- **Drive reload, second tab and reconnect in a real browser** for anything
+  tied to the single-viewer slot (`vision/session.py`). Those are the paths
+  where an old stream and a new one overlap, and no unit test builds that
+  overlap. The fix (retry a refused stream while the session runs) was found
+  only by reading the server log after a scripted reload.
+
+## L39 - Measure the real network before choosing what to send over it
+
+**2026-10-17, reported by the user from a second laptop.** "Super laggy, it
+can't recognise." Browser-camera attendance worked at 7.5 frames/s on this
+machine. Through the Cloudflare tunnel it ran at **~0.75**. Each 1280-wide frame
+at JPEG 0.85 was 139 KB and took ~1.3 s, sent one at a time, and the picture
+then came back down as an annotated stream on the same connection. Below about
+3 frames/s the tracker treats every frame as a new face (a 1.5 s expiry and a
+run of consecutive frames before a box is drawn), so it showed "No valid face
+detected" with a face filling the screen. It looked like a recognition fault
+and was a bandwidth one.
+
+**How to apply:**
+
+- **Time a real payload through the real path** (`curl --data-binary` through
+  the tunnel) before settling a design that moves pictures over the internet.
+  Localhost hides latency and bandwidth completely.
+- **Do not send the same picture both ways.** Show the camera locally and
+  return the results as data.
+- **Shrink only as far as a test proves recognition survives.** 960 wide at
+  quality 60 was chosen because the real-face smoke test still confirms and
+  passes liveness there, not because it looked fine.
