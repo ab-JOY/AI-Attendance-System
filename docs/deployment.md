@@ -39,6 +39,28 @@ buffering. Files: [`deploy/cloudflare/Caddyfile`](../deploy/cloudflare/Caddyfile
 
 ---
 
+## 0. Demo without a domain (temporary link)
+
+To show the system working on other devices without buying a domain, run this
+on the classroom PC (MySQL must be running):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy\cloudflare\start-demo.ps1
+```
+
+It starts the app, Caddy and a Cloudflare **quick tunnel** as hidden background
+processes, so they keep running after the PowerShell or VS Code window closes.
+Their output goes to `logs\`. It prints a link like `https://random-words.trycloudflare.com` and
+copies it. Stop everything with `deploy\cloudflare\stop-demo.ps1`.
+
+- **The link changes every time the script runs.** Re-enter it in the mobile
+  app's Settings each time.
+- A quick tunnel is Cloudflare's offer for testing and demos: no account, no
+  domain, no uptime guarantee. For classes that run for months, use steps 1–6
+  with your own domain.
+- It needs `C:\caddy\caddy.exe`, `C:\caddy\Caddyfile` and
+  `C:\caddy\cloudflared.exe` (steps 3 and 4), and the `.env` lines from step 2.
+
 ## 1. MariaDB starts with Windows
 
 XAMPP's MySQL does not start on its own after a restart (`lessons.md` L15),
