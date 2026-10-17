@@ -1,0 +1,16 @@
+# MariaDB settings for the attendance system.
+# bootstrap.sh installs this as /etc/mysql/mariadb.conf.d/60-attendance.cnf.
+
+[mysqld]
+# Loopback only. The app is the only client, and it is on this machine.
+bind-address = 127.0.0.1
+
+# ⚠️ Matches the development machine (XAMPP MariaDB 10.4.32) and CI on purpose.
+# Debian's MariaDB defaults to STRICT_TRANS_TABLES, which the development server
+# does not have. The migrations and every measured result were produced on the
+# non-strict server, so the cloud copy runs the same mode rather than a
+# different database's rules (tasks/lessons.md L11, handover-phase-4b.md).
+sql_mode = NO_ZERO_IN_DATE,NO_ZERO_DATE,NO_ENGINE_SUBSTITUTION
+
+character-set-server = utf8mb4
+collation-server = utf8mb4_general_ci

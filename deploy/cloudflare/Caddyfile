@@ -1,0 +1,52 @@
+# Caddy on the classroom machine, behind Cloudflare Tunnel.
+#
+#   browser --HTTPS--> Cloudflare --tunnel--> cloudflared --> Caddy 127.0.0.1:8080
+#           --> serve.py 127.0.0.1:8000
+#
+# Cloudflare holds the certificate and terminates HTTPS, so Caddy serves plain
+# HTTP on loopback and never requests a certificate itself - no automatic
+# HTTPS, no on-demand TLS. Nothing outside this machine can reach port 8080;
+# the only way in is the tunnel. See docs/deployment.md.
+
+{
+	auto_https off
+
+	servers {
+		# cloudflared connects from this machine. Trusting it is what makes
+		# Caddy pass Cloudflare's X-Forwarded-For through and append its own
+		# hop, instead of replacing it with 127.0.0.1. With two hops in the
+		# header the app needs PROXY_HOPS=2 (config/settings.py).
+		trusted_proxies static 127.0.0.1/32 ::1/128
+	}
+}
+
+# Any Host: cloudflared forwards the public hostname, not "localhost", so a
+# site address naming a host would match nothing.
+:8080 {
+	bind 127.0.0.1
+
+	encode gzip
+
+	# Flask already refuses bodies over MAX_UPLOAD_BYTES (4 MB) with a 413.
+	# This stops a larger one before it reaches the app.
+	request_body {
+		max_size 5MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "same-origin"
+		-Server
+	}
+
+	# The live camera view is an MJPEG stream that never ends. Flush every
+	# frame as it arrives instead of buffering.
+	@stream path /video_feed*
+	reverse_proxy @stream 127.0.0.1:8000 {
+		flush_interval -1
+	}
+
+	reverse_proxy 127.0.0.1:8000
+}

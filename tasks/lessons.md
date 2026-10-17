@@ -1679,3 +1679,27 @@ change reverted, because the failure appeared right after testing it.
   runs caused it before it is blamed on the code change.** Here the trainer
   directory's timestamps (`.tmp` left from the failed run, a later successful
   `.bak`) told the story in one `ls`.
+
+## L37 - The Flask test client skips the WSGI server, and waitress strips X-Forwarded-For
+
+**2026-10-17, found by me while building the Cloudflare + Caddy deployment.**
+
+To keep the login lockout (SE-13) per-visitor behind a proxy I added ProxyFix
+and a test that drove `/login` with `X-Forwarded-For` through
+`app.test_client()`. It passed and was mutation-checked. Then I ran the real
+Caddy in front of the real waitress, and the app saw `X-Forwarded-For: None`.
+**waitress deletes the X-Forwarded-* headers before the app runs** unless
+`clear_untrusted_proxy_headers=False` is passed (`serve.py`). The test client
+calls the WSGI app directly, so no test that uses it can see anything a server
+does to a request. The deployment would have shipped with every visitor
+sharing one lockout, the exact bug the change was meant to fix.
+
+**How to apply:**
+
+- **Anything that depends on headers, the client address, the scheme or
+  streaming must be tested through the real server.**
+  `tests/test_deployment.py` runs waitress on a socket with
+  `serve.server_options()`, so the test and `serve.py` cannot drift apart.
+- **Before calling a proxy setup done, put the real proxy in front and look
+  at what the app receives** (an echo route is enough). The Caddy log showed
+  the right `client_ip` the whole time. The loss happened one hop later.

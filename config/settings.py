@@ -86,6 +86,39 @@ class Settings(BaseSettings):
     flask_host: str = "127.0.0.1"
 
     # -----------------------------------------------------------------
+    # Production server (PO-4) - read by serve.py, not by app.py
+    #
+    # serve.py runs the same app under waitress: one process, several
+    # threads. **One process is not a tuning choice.** The recognition
+    # session, the enrolment slot and the login lockout all live in this
+    # process's memory, so two workers would be two attendance systems
+    # that disagree. Threads are what /video_feed needs - each viewer
+    # holds one for as long as the MJPEG stream is open - so 8 leaves
+    # room for a few viewers and the ordinary page requests beside them.
+    # -----------------------------------------------------------------
+    wsgi_port: int = 8000
+    wsgi_threads: int = 8
+
+    # -----------------------------------------------------------------
+    # Reverse proxy
+    #
+    # How many proxies in front of this process add X-Forwarded-For.
+    # 0 (the default) trusts no header, which is right when browsers
+    # connect directly. Cloudflare Tunnel + Caddy is 2; Caddy alone is 1.
+    #
+    # Only meaningful when nothing but the proxy can reach this process,
+    # which is why serve.py refuses PROXY_HOPS > 0 on a non-loopback host.
+    #
+    # ⚠️ Not cosmetic. The login lockout (SE-13) is keyed on
+    # (username, client address). Behind a proxy that address is
+    # 127.0.0.1 for every request, so five wrong passwords from anyone
+    # lock that account out for everyone. Setting this higher than the
+    # real number of proxies is the opposite mistake: a client could
+    # then choose its own address by sending the header itself.
+    # -----------------------------------------------------------------
+    proxy_hops: int = Field(default=0, ge=0)
+
+    # -----------------------------------------------------------------
     # TLS (CO-3, and the prerequisite for remote browser enrolment)
     #
     # ⚠️ **`getUserMedia` is only available in a secure context.** Browsers

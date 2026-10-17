@@ -32,6 +32,7 @@ from datetime import timedelta
 
 from flask import Flask
 from flask_wtf.csrf import CSRFProtect
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from config.settings import settings as app_config
 from security.access import install_access_control
@@ -129,6 +130,23 @@ def create_app(config_overrides=None):
         login_endpoint="auth.home",
         change_password_endpoint="auth.change_password",
     )
+
+    # ==============================
+    # REVERSE PROXY (deployment behind Caddy)
+    # ==============================
+    #
+    # Off unless PROXY_HOPS says how many proxies to believe. With it on,
+    # request.remote_addr is the browser's address rather than the proxy's,
+    # which is what keeps the login lockout per-client - see config/settings.py.
+    #
+    # Only X-Forwarded-For grows by one entry per proxy. X-Forwarded-Proto is
+    # set once at the edge and passed through unchanged, so it is always read
+    # as a single hop: with x_proto=2 behind Cloudflare + Caddy, ProxyFix would
+    # find one value where it wants two and silently ignore it.
+    if app_config.proxy_hops:
+        app.wsgi_app = ProxyFix(
+            app.wsgi_app, x_for=app_config.proxy_hops, x_proto=1
+        )
 
     return app
 

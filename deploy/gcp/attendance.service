@@ -1,0 +1,31 @@
+# systemd unit for the attendance system (serve.py under waitress).
+# bootstrap.sh installs it as /etc/systemd/system/attendance.service.
+#
+# Configuration comes from /opt/attendance/.env, which config/settings.py reads
+# itself - nothing is passed through the environment here.
+
+[Unit]
+Description=AI Attendance System (waitress)
+After=network.target mariadb.service
+Requires=mariadb.service
+
+[Service]
+Type=simple
+User=attendance
+Group=attendance
+WorkingDirectory=/opt/attendance
+ExecStart=/opt/attendance/.venv/bin/python serve.py
+# serve.py exits 1 when the database is unreachable or a migration fails, and
+# logs why. Restarting slowly gives MariaDB time to come up without hiding a
+# real failure in a tight loop.
+Restart=on-failure
+RestartSec=10
+
+# The app writes only to these. Everything else on the system is read-only to it.
+ProtectSystem=strict
+ReadWritePaths=/opt/attendance/dataset /opt/attendance/dataset_staging /opt/attendance/trainer /opt/attendance/logs
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

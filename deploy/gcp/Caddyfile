@@ -1,0 +1,45 @@
+# Caddy in front of the attendance system - a standard site with a fixed
+# domain. Caddy obtains and renews the certificate itself (automatic HTTPS);
+# on-demand TLS is not used and not needed.
+#
+# bootstrap.sh copies this to /etc/caddy/Caddyfile with {$DOMAIN} replaced by
+# the real domain (the packaged caddy.service reads no environment file, so the
+# placeholder is not left for Caddy to expand). The domain's A record must point at
+# the VM's external IP, and ports 80 and 443 must be open, or the certificate
+# request fails - `journalctl -u caddy` says which.
+#
+# HTTPS is not optional for this system: browser enrolment calls
+# getUserMedia, which browsers refuse outside a secure context.
+
+{$DOMAIN} {
+	encode gzip
+
+	# Flask already refuses bodies over MAX_UPLOAD_BYTES (4 MB) with a 413.
+	# This stops a larger one at the edge, before it reaches the app.
+	request_body {
+		max_size 5MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "same-origin"
+		-Server
+	}
+
+	# The live camera view is an MJPEG stream that never ends. Flush every
+	# frame as it arrives instead of buffering.
+	@stream path /video_feed*
+	reverse_proxy @stream 127.0.0.1:8000 {
+		flush_interval -1
+	}
+
+	# serve.py listens on loopback only. Caddy replaces any X-Forwarded-For a
+	# client sends, which is why the app trusts exactly one hop (PROXY_HOPS=1).
+	reverse_proxy 127.0.0.1:8000
+
+	log {
+		output file /var/log/caddy/attendance.log
+	}
+}

@@ -70,6 +70,10 @@ dependencies = [
     # app calls. The web routes continue to use Flask sessions; JWT is only
     # for /api/* endpoints that cannot carry a session cookie.
     "PyJWT==2.9.0",
+
+    # Deployment (PO-4). waitress serves the app in serve.py: pure Python, so
+    # it installs identically on Windows and Linux. See docs/deployment.md.
+    "waitress==3.0.2",
 ]
 
 [project.optional-dependencies]
@@ -92,6 +96,7 @@ dev = [
 # tree as a description of the layers, which now exist.
 py-modules = [
     "app",
+    "serve",
     "recognize_face",
     "train_model",
     "camera_utils",
