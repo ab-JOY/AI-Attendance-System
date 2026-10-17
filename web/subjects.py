@@ -30,6 +30,7 @@ from repositories import instructors as instructors_repo
 from repositories import subjects as subjects_repo
 from security.access import role_required
 from security.paths import UnsafeStudentPathError, validate_student_id
+from services.schedule import DAY_SEPARATOR, WEEKDAYS, meeting_days
 from web.errors import error_page
 from web.placement import optional_id, parse_placement, section_id_for
 
@@ -61,21 +62,9 @@ SECTION_AT = SUBJECT_FIELDS.index('time_in')
 # instructor_id nullable on purpose).
 REQUIRED_SUBJECT_FIELDS = ('subject_code', 'subject_name')
 
-# The days a class can meet, in week order. A PRMSU subject meets on two days
-# at the same time - Monday and Wednesday, say - so the form offers one box
-# per day and `subjects.day` (VARCHAR(100), display only) holds them joined:
-# "Monday, Wednesday". Nothing filters or computes on the column, so the text
-# form needed no migration, and every single-day value already in it is the
-# one-day case of the same format.
-WEEKDAYS = (
-    'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday',
-)
-DAY_SEPARATOR = ', '
-
-
-def meeting_days(stored):
-    """The days in a stored `subjects.day`, as a list. `[]` for NULL."""
-    return [day.strip() for day in (stored or '').split(',') if day.strip()]
+# The days a class can meet, and how `subjects.day` stores them, live in
+# services/schedule.py: `/start-attendance` reads the same text to refuse a
+# session on a day the subject does not meet, and the two must not drift.
 
 
 def _days_from(form):

@@ -411,6 +411,11 @@ def sessions(monkeypatch):
         calls["stopped"] += 1
 
     monkeypatch.setattr(sessions_module, "db_cursor", fake_cursor)
+    # A subject with no stored days meets every day: the day gate is
+    # tests/test_session_gates.py's, not this file's.
+    monkeypatch.setattr(
+        sessions_module.subjects_repo, "meeting_day", lambda *_args: None
+    )
     monkeypatch.setattr(
         sessions_module.attendance_service, "open_session", open_session
     )

@@ -10,6 +10,7 @@ in and what the operator is told.
 from __future__ import annotations
 
 import logging
+from datetime import date
 
 import mysql.connector
 from flask import (
@@ -44,6 +45,7 @@ from repositories import enrolments as enrolments_repo
 from repositories import subjects as subjects_repo
 from security.access import authenticated, instructor_scope, json_api
 from services import attendance as attendance_service
+from services import schedule
 from web.errors import error_page
 
 logger = logging.getLogger(__name__)
@@ -181,6 +183,48 @@ def _class_list_is_empty(subject_id):
         return False
 
 
+def _today():
+    """Today's date on the server's clock. A function so tests can set it."""
+    return date.today()
+
+
+def _wrong_day_refusal(subject_id):
+    """
+    The refusal message when the subject does not meet today, else None.
+
+    A Monday-and-Wednesday subject started on a Friday used to run, and
+    `/end-attendance` then wrote its whole class list Absent for a class that
+    never met (user-reported, 2026-10-17).
+
+    ⚠️ **None on a database error**, for the same reason as
+    `_class_list_is_empty()`: a gate that closes when it cannot see turns a
+    blip into a class that cannot take attendance. A subject whose days cannot
+    be read is not refused either - see `schedule.meets_on()`.
+    """
+    try:
+        with db_cursor(dictionary=True) as cursor:
+            stored = subjects_repo.meeting_day(cursor, subject_id)
+
+    except mysql.connector.Error:
+        logger.exception(
+            "Could not read the meeting days of subject_id %s; allowing the "
+            "start rather than refusing on an answer we do not have.",
+            subject_id,
+        )
+        return None
+
+    today = _today()
+
+    if schedule.meets_on(stored, today):
+        return None
+
+    return (
+        f"This subject meets on {stored}, and today is "
+        f"{today.strftime('%A')}. Start it on one of its days. For a make-up "
+        "class, an administrator can add today under Subjects → Edit."
+    )
+
+
 def _class_list_action(subject_id):
     """
     The "Open Class List" button for the empty-class-list dialog, or None.
@@ -251,6 +295,18 @@ def start_attendance():
         )
 
         return jsonify({"success": False, "message": NOT_YOUR_SUBJECT})
+
+    # Before a session row exists, like B3 below: a refusal leaves nothing to
+    # undo, and no Absent row is ever written for a class that did not meet.
+    wrong_day = _wrong_day_refusal(subject_id)
+
+    if wrong_day is not None:
+        logger.warning(
+            "Refused to start attendance for subject_id %s: %s",
+            subject_id, wrong_day,
+        )
+
+        return jsonify({"success": False, "message": wrong_day})
 
     # B3. Checked **first**, before a session row exists and before the camera
     # is touched, so a refusal costs nothing and leaves nothing behind. The

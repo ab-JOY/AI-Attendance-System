@@ -283,6 +283,18 @@ def code_of(cursor, subject_id):
     return cursor.fetchone()
 
 
+def meeting_day(cursor, subject_id):
+    """The stored `subjects.day` text, or None for NULL or no such subject."""
+    cursor.execute("SELECT day FROM subjects WHERE id = %s", (subject_id,))
+
+    row = cursor.fetchone()
+
+    if row is None:
+        return None
+
+    return row['day'] if isinstance(row, dict) else row[0]
+
+
 def insert(cursor, subject_code, subject_name, instructor_id, day,
            section_id, time_in, time_out):
     """

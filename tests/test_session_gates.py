@@ -46,6 +46,7 @@ No database: every repository call is stubbed, and every identifier is fake
 from __future__ import annotations
 
 import contextlib
+from datetime import date
 
 import mysql.connector
 import pytest
@@ -121,6 +122,11 @@ def started(monkeypatch):
     # subject is theirs; tests/test_instructor_scope.py covers the refusal.
     monkeypatch.setattr(
         sessions_module.subjects_repo, "is_taught_by", lambda *_args: True
+    )
+    # A subject with no stored days meets every day; the day gate's own tests
+    # below set the days and the date.
+    monkeypatch.setattr(
+        sessions_module.subjects_repo, "meeting_day", lambda *_args: None
     )
     monkeypatch.setattr(
         sessions_module.attendance_service, "open_session", open_session
@@ -591,3 +597,81 @@ def test_the_notice_strip_survives_alongside_the_dialog(client, monkeypatch):
 
     assert 'id="session-notice"' in page
     assert 'aria-live="polite"' in page
+
+
+# ---------------------------------------------------------------------------
+# A session is refused on a day the subject does not meet (2026-10-17)
+# ---------------------------------------------------------------------------
+#
+# User-reported: a Monday-and-Wednesday subject was started on a Friday, and
+# ending it would have written the whole class list Absent for a class that
+# never met.
+
+FRIDAY = date(2026, 10, 16)
+
+
+def start_on(client, monkeypatch, stored_days, today=FRIDAY):
+    monkeypatch.setattr(
+        sessions_module.subjects_repo,
+        "meeting_day",
+        lambda _cursor, _subject_id: stored_days,
+    )
+    monkeypatch.setattr(sessions_module, "_today", lambda: today)
+
+    return start(client, monkeypatch, enrolled=12)
+
+
+def test_a_session_on_a_day_the_subject_does_not_meet_is_refused(
+    client, monkeypatch, started
+):
+    body = start_on(client, monkeypatch, "Monday, Wednesday")
+
+    assert body["success"] is False
+    assert "Monday, Wednesday" in body["message"]
+    assert "Friday" in body["message"]
+
+
+def test_nothing_is_opened_on_the_wrong_day(client, monkeypatch, started):
+    """Refused before the session row, so no Absent row can ever follow."""
+    start_on(client, monkeypatch, "Monday, Wednesday")
+
+    assert started["opened_sessions"] == 0, "a session row was created anyway"
+    assert started["cameras_started"] == 0, "the camera was opened anyway"
+
+
+def test_a_session_on_a_meeting_day_starts(client, monkeypatch, started):
+    body = start_on(client, monkeypatch, "Wednesday, Friday")
+
+    assert body["success"] is True
+    assert started["cameras_started"] == 1
+
+
+def test_a_subject_with_no_days_still_starts(client, monkeypatch, started):
+    body = start_on(client, monkeypatch, None)
+
+    assert body["success"] is True
+
+
+def test_a_failed_day_check_does_not_refuse(client, monkeypatch, started):
+    """The same rule as the class-list gate: a blip is not an answer."""
+
+    def explode(_cursor, _subject_id):
+        raise mysql.connector.Error("the database is down")
+
+    monkeypatch.setattr(sessions_module.subjects_repo, "meeting_day", explode)
+    monkeypatch.setattr(sessions_module, "_today", lambda: FRIDAY)
+
+    body = start(client, monkeypatch, enrolled=12)
+
+    assert body["success"] is True
+
+
+def test_reading_the_days_survives_a_plain_cursor():
+    class Cursor:
+        def execute(self, sql, params):
+            assert "FROM subjects" in sql and params == (SUBJECT_ID,)
+
+        def fetchone(self):
+            return ("Monday, Wednesday",)
+
+    assert subjects_repo.meeting_day(Cursor(), SUBJECT_ID) == "Monday, Wednesday"

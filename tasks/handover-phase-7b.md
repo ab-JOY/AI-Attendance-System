@@ -443,3 +443,35 @@ alone: MJPG made configuring slower (1.2 s vs 0.6 s) with no fps gain.
 Both enumerate `CLSID_VideoInputDeviceCategory` via `ICreateDevEnum`, and this
 was verified on this machine by frames and logs. If the backend ever changes to
 MSMF, the names will no longer line up with the indices.
+
+---
+
+## 12. Added 2026-10-17 — a session is refused on a day the subject does not meet
+
+**User-reported:** a Monday-and-Wednesday subject was started on a Friday.
+Ending it would have written its whole class list Absent for a class that
+never met. **Not clicked through in a browser** — route tests only.
+
+| Change | Files |
+|---|---|
+| `meets_on(stored_day, date)`, pure. `WEEKDAYS` / `meeting_days()` moved here from `web/subjects.py` (still importable from there) | `services/schedule.py` (new) |
+| `meeting_day(cursor, id)` reads `subjects.day` | `repositories/subjects.py` |
+| `/start-attendance` refuses before the session row and the camera, after the instructor check, before B3. The message names the days and today | `web/sessions.py` (`_wrong_day_refusal()`, `_today()`) |
+
+Gates: fast suite **1584 passed**, 91 skipped; integration **88 passed**;
+ruff unchanged in `web/api.py` (+1 pre-existing I001 in
+`tests/test_camera_selection.py`, from commit 0c84a87). Mutations, 5 of 5
+caught: gate not called; fails closed on DB error; unreadable days refused;
+weekday off by one; case-sensitive match.
+
+- ⚠️ **`subjects.day` is no longer display-only.** §10's note still holds: if
+  anything needs to *query* by day, that is when a `subject_days` table earns
+  its place. One row is read by id here, which the text handles.
+- ⚠️ **Allowed, on purpose:** NULL/blank/unreadable days ("MWF"), and a DB
+  error (same rule as B3). Sunday is never a meeting day.
+- ⚠️ **The date is the server's clock** (`date.today()`), the same clock
+  `save_attendance()` stamps rows with.
+- **Open (user's decision):** a make-up class on another day is refused; the
+  workaround the message gives is an admin adding that day under Subjects →
+  Edit. A "start anyway" override (admin-only, or a confirm dialog) was not
+  built. The attendance dropdown does not mark subjects that do not meet today.
