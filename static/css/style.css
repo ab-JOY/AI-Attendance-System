@@ -281,6 +281,25 @@ select:focus{
     margin:0;
 }
 
+/* One section a subject is taught to, on the Add Subject form. */
+.section-row{
+    margin:12px 0;
+    padding:12px 16px;
+    border:2px solid #0A1F8F33;
+    border-radius:12px;
+}
+
+.section-row legend{
+    padding:0 6px;
+    font-weight:bold;
+}
+
+/* The heading over one subject's sections in the Subject List. */
+.subject-table .subject-group td{
+    background:#EEF1FB;
+    text-align:left;
+}
+
 /* ===================================
    BUTTONS
 =================================== */

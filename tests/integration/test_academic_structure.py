@@ -1348,3 +1348,143 @@ def test_an_edit_rewrites_the_text_and_reports_only_its_own_change(
         )
 
     assert (unchanged, renamed, moved) == (0, 1, 1)
+
+
+def test_one_subject_is_added_to_several_sections_and_listed_together(
+    client, scratch_database
+):
+    """
+    The Add form takes a subject once and several sections, and writes one
+    offering per section - against real SQL, so the duplicate check and the
+    list's ordering by alias are exercised by the server, not a stub.
+    """
+    from infra.db import db_cursor
+    from repositories import subjects as subjects_repo
+
+    sign_in_as(client)
+    bscs = str(program_id_of("BSCS"))
+
+    form = {
+        "subject_code": "INT-TEST-404",
+        "subject_name": "Many Sections",
+    }
+    for number, (section, day, start) in enumerate(
+        [("A", "Monday", "08:00"), ("B", "Tuesday", "13:00")]
+    ):
+        form.update({
+            f"sections-{number}-program_id": bscs,
+            f"sections-{number}-year_level": "2",
+            f"sections-{number}-section": section,
+            f"sections-{number}-day": day,
+            f"sections-{number}-time_in": start,
+            f"sections-{number}-time_out": "",
+        })
+
+    assert client.post("/add_subject", data=form).status_code == 302
+
+    with db_cursor(dictionary=True) as cursor:
+        listed = [
+            (row["subject_code"], row["section"], row["day"])
+            for row in subjects_repo.all_subjects(cursor)
+        ]
+
+    assert listed == [
+        ("INT-TEST-404", "A", "Monday"),
+        ("INT-TEST-404", "B", "Tuesday"),
+    ]
+
+    # Section B again, beside a new section C: refused whole.
+    again = dict(form)
+    again["sections-0-section"] = "C"
+    response = client.post("/add_subject", data=again)
+
+    assert response.status_code == 409
+    assert "already offered" in response.get_data(as_text=True)
+
+    with db_cursor() as cursor:
+        cursor.execute(
+            "SELECT COUNT(*) FROM subjects WHERE subject_code = 'INT-TEST-404'"
+        )
+        assert cursor.fetchone()[0] == 2, "section C was kept from a refused form"
+
+    page = client.get("/subjects").get_data(as_text=True)
+    assert "(2 sections)" in page
+
+
+
+def test_a_minor_subject_across_departments_with_two_instructors(
+    client, scratch_database
+):
+    """
+    DM-11, end to end. PE taught to a BSCS section by one instructor and to a
+    BSN section - another department - by another: one form, two offerings,
+    each instructor's own. Then a second spelling of the name is refused, and
+    a rename on one section reaches the other, case included - the column's
+    collation is case-insensitive, which the rename must not be.
+    """
+    from infra.db import db_cursor
+
+    with db_cursor(commit=True) as cursor:
+        one = make_instructor(cursor, "INT-TEST-INSTR-1", "Instructor One")
+        two = make_instructor(cursor, "INT-TEST-INSTR-2", "Instructor Two")
+
+    sign_in_as(client)
+
+    form = {"subject_code": "INT-TEST-PE1", "subject_name": "Physical Education 1"}
+    for number, (program, instructor) in enumerate([("BSCS", one), ("BSN", two)]):
+        form.update({
+            f"sections-{number}-instructor_id": str(instructor),
+            f"sections-{number}-program_id": str(program_id_of(program)),
+            f"sections-{number}-year_level": "1",
+            f"sections-{number}-section": "A",
+            f"sections-{number}-day": "Friday",
+            f"sections-{number}-time_in": "07:00",
+            f"sections-{number}-time_out": "09:00",
+        })
+
+    assert client.post("/add_subject", data=form).status_code == 302
+
+    def offerings():
+        with db_cursor(dictionary=True) as cursor:
+            cursor.execute("""
+                SELECT s.id, s.subject_name, s.instructor_id, p.program_code
+                FROM subjects s
+                JOIN sections sec ON sec.id = s.section_id
+                JOIN programs p ON p.id = sec.program_id
+                WHERE s.subject_code = 'INT-TEST-PE1'
+                ORDER BY p.program_code
+            """)
+            return cursor.fetchall()
+
+    rows = offerings()
+    assert [(r["program_code"], r["instructor_id"]) for r in rows] == [
+        ("BSCS", one), ("BSN", two)
+    ]
+
+    # A second spelling, for another section: refused, nothing written.
+    second = {
+        "subject_code": "int-test-pe1",
+        "subject_name": "PE - Fitness",
+        "sections-0-program_id": str(program_id_of("BSCS")),
+        "sections-0-year_level": "1",
+        "sections-0-section": "B",
+        "sections-0-day": "Friday",
+    }
+    response = client.post("/add_subject", data=second)
+    assert response.status_code == 409
+    assert len(offerings()) == 2
+
+    # Renaming the BSCS offering, by case alone, renames the BSN one too.
+    response = client.post(f"/update_subject/{rows[0]['id']}", data={
+        "subject_code": "INT-TEST-PE1",
+        "subject_name": "PHYSICAL EDUCATION 1",
+        "instructor_id": str(one),
+        "program_id": str(program_id_of("BSCS")),
+        "year_level": "1",
+        "section": "A",
+        "day": "Friday",
+        "time_in": "07:00",
+        "time_out": "09:00",
+    })
+    assert response.status_code == 302
+    assert {r["subject_name"] for r in offerings()} == {"PHYSICAL EDUCATION 1"}

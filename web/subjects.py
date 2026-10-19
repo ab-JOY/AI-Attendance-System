@@ -10,6 +10,7 @@ is recorded, which is the same class of decision as adding a student.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import time, timedelta
 
 import mysql.connector
@@ -55,6 +56,12 @@ SUBJECT_FIELDS = (
 # Where the section id goes among them, in the order subjects_repo.insert()
 # and update() take their arguments: after `day`.
 SECTION_AT = SUBJECT_FIELDS.index('time_in')
+
+# The fields that belong to one section rather than to the subject. A subject
+# is one code and one name; each section it is taught to has its own
+# instructor and meets on its own days at its own times - PE1 for BSCS 1A
+# and for BSCE 1A are two offerings, often with two instructors.
+SECTION_FIELDS = ('instructor_id', 'day', 'time_in', 'time_out')
 
 # The two that identify the offering. The rest may legitimately be blank - a
 # subject with no assigned instructor, or no scheduled time, is a real state
@@ -111,9 +118,71 @@ def time_box(value):
     return f"{int(hours):02d}:{rest[:2]}"
 
 
+class _Refused(Exception):
+    """
+    A refusal decided inside a write's transaction.
+
+    ⚠️ **Raised, never returned.** `db_cursor(commit=True)` commits on *any*
+    clean exit, an early `return` included, and rolls back only on an
+    exception. The Add form writes one offering per section, so a refusal at
+    the third section returned from inside the block would keep the first two.
+    """
+
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+# The Add form takes one subject - code, name, instructor - and the sections it
+# is taught to, each with its own days and times: `sections-<n>-program_id`,
+# `sections-<n>-day` and so on. One offering is written per section, because
+# each section has its own class list, its own register and its own schedule,
+# and Late is derived from that schedule (FS-19).
+#
+# A form with no `sections-<n>-` fields is read as one section from the
+# unprefixed names, which is what the Edit form submits.
+SECTION_ROW = re.compile(r"^sections-(\d+)-")
+
+# Bounds the work one request can ask for. A program has a handful of
+# sections; a form with more than this is not one an operator filled in.
+MAX_SECTIONS_PER_SUBJECT = 20
+
+
+class _SectionRow:
+    """One section of the Add form, read through the unprefixed field names."""
+
+    def __init__(self, form, number):
+        self._form = form
+        self._prefix = f"sections-{number}-"
+
+    def get(self, key, default=None):
+        return self._form.get(self._prefix + key, default)
+
+    def getlist(self, key):
+        return self._form.getlist(self._prefix + key)
+
+
+def _section_rows(form):
+    """The form's section rows in the order they were numbered, or `[form]`."""
+    numbers = sorted({
+        int(match.group(1))
+        for match in map(SECTION_ROW.match, form.keys())
+        if match is not None
+    })
+
+    if not numbers:
+        return [form]
+
+    return [_SectionRow(form, number) for number in numbers]
+
+
 def _subject_form():
     """
     `(values, placement, None)` from the form, or `(None, None, error_page)`.
+
+    One section, from the unprefixed field names - the Edit form. The Add form
+    goes through `_subject_forms()`, which takes several.
 
     `placement` is the section the offering is taught to, as
     `web.placement.parse_placement()` returns it - the same three fields, and
@@ -128,14 +197,32 @@ def _subject_form():
     form route in this application validates and names the field; the shape
     below is `_class_list_form()`'s, further down this file.
     """
-    values = tuple(
-        request.form.get(field, '').strip() for field in SUBJECT_FIELDS
-    )
-
-    days, problem = _days_from(request.form)
+    values, placement, problem = _offering_form(request.form, request.form)
 
     if problem is not None:
         return None, None, error_page(400, problem)
+
+    return values, placement, None
+
+
+def _offering_form(form, row):
+    """
+    `(values, placement, None)` for one section `row` of `form`, or
+    `(None, None, message)`.
+
+    The subject's code, name and instructor are read from `form`; the days,
+    the times and the placement from `row`, which is `form` itself for a
+    one-section form.
+    """
+    values = tuple(
+        (row if field in SECTION_FIELDS else form).get(field, '').strip()
+        for field in SUBJECT_FIELDS
+    )
+
+    days, problem = _days_from(row)
+
+    if problem is not None:
+        return None, None, problem
 
     # ⚠️ A blank time must reach the database as NULL. This server is not in
     # strict mode, so `''` into a TIME column is stored as 00:00:00 on an
@@ -155,7 +242,7 @@ def _subject_form():
     instructor_at = SUBJECT_FIELDS.index('instructor_id')
 
     if values[instructor_at] and optional_id(values[instructor_at]) is None:
-        return None, None, error_page(400, "Choose an instructor from the list.")
+        return None, None, "Choose an instructor from the list."
 
     values = (
         *values[:instructor_at],
@@ -170,45 +257,150 @@ def _subject_form():
     ]
 
     if missing:
-        return None, None, error_page(
-            400,
-            "These fields are required: " + ", ".join(
-                field.replace('_', ' ') for field in missing
-            ) + ".",
-        )
+        return None, None, "These fields are required: " + ", ".join(
+            field.replace('_', ' ') for field in missing
+        ) + "."
 
-    placement, problem = parse_placement(request.form)
+    placement, problem = parse_placement(row)
 
     if problem is not None:
-        return None, None, error_page(400, problem)
+        return None, None, problem
 
     return values, placement, None
 
 
-def _with_section(cursor, values, placement):
+def _subject_forms():
+    """
+    `([(values, placement), ...], None)` - one per section - or `(None, error_page)`.
+
+    A refusal names the section it is about when there is more than one, so
+    the operator knows which row to fix.
+    """
+    rows = _section_rows(request.form)
+
+    if len(rows) > MAX_SECTIONS_PER_SUBJECT:
+        return None, error_page(
+            400,
+            f"Add at most {MAX_SECTIONS_PER_SUBJECT} sections at a time.",
+        )
+
+    offerings = []
+    seen = set()
+
+    for number, row in enumerate(rows, start=1):
+        values, placement, problem = _offering_form(request.form, row)
+
+        if problem is not None:
+            if len(rows) > 1:
+                problem = f"Section {number}: {problem}"
+            return None, error_page(400, problem)
+
+        # The unique key on `sections` is case-insensitive, so `4b` is `4B`.
+        key = (
+            placement['program_id'],
+            placement['year_level'],
+            placement['section'].casefold(),
+        )
+
+        if key in seen:
+            return None, error_page(
+                400,
+                f"Section {number} repeats an earlier section: Year "
+                f"{placement['year_level']} section {placement['section']} "
+                "is listed twice.",
+            )
+
+        seen.add(key)
+        offerings.append((values, placement))
+
+    return offerings, None
+
+
+def _with_section(cursor, values, placement, excluding=None):
     """
     The repository's arguments: `values` with the section id in its place.
 
-    None when the chosen program no longer exists. Resolved here, under the
-    caller's cursor, so a section created for this offering and an offering
-    that then failed to save cannot leave an empty section behind.
+    Resolved here, under the caller's cursor, so a section created for this
+    offering and an offering that then failed to save cannot leave an empty
+    section behind.
+
+    Raises `_Refused` when the chosen program no longer exists, or when this
+    subject code is already offered to that section - two offerings of one
+    subject to one section would split its students across two class lists
+    and two registers. `excluding` is the offering being edited, which is
+    allowed to keep its own section.
     """
     section_id = section_id_for(cursor, placement)
 
     if section_id is None:
-        return None
+        raise _Refused(400, "That program no longer exists.")
+
+    if subjects_repo.is_offered_to(cursor, values[0], section_id, excluding):
+        raise _Refused(
+            409,
+            f"{values[0]} is already offered to Year "
+            f"{placement['year_level']} section {placement['section']}. "
+            "Edit that one instead.",
+        )
 
     return (*values[:SECTION_AT], section_id, *values[SECTION_AT:])
+
+
+def _same_name(one, other):
+    return " ".join(one.split()).casefold() == " ".join(other.split()).casefold()
+
+
+def _name_for_code(cursor, code, name, excluding=None):
+    """
+    The name to store for `code`: `name`, or the one its other offerings carry.
+
+    A subject's name belongs to its code (DM-11). PE1 taught to BSCS and to
+    Engineering is one subject, and two spellings of its name would list it
+    as two subjects and split it in every report. A name differing only in
+    case or spacing is taken as the existing one; anything else raises
+    `_Refused`.
+    """
+    existing = subjects_repo.name_for_code(cursor, code, excluding)
+
+    if existing is None:
+        return name
+
+    if _same_name(existing, name):
+        return existing
+
+    raise _Refused(
+        409,
+        f"{code} is already named \"{existing}\" on its other sections. "
+        "Use that name, or a different subject code.",
+    )
+
+
+def _with_name(values, name):
+    """`values` with the subject name replaced."""
+    return (values[0], name, *values[2:])
 
 
 @subjects_bp.route('/subjects')
 @role_required('admin')
 def subjects():
+    """
+    The subject list, and the Add form.
+
+    `?add_to=<id>` opens the form filled in from that offering - its code,
+    name, instructor, program and year level - so another section of the
+    same subject is one row to finish rather than a form to retype.
+    """
+    add_to = optional_id(request.args.get('add_to'))
+
     try:
         with db_cursor(dictionary=True) as cursor:
             records = subjects_repo.all_subjects(cursor)
             instructors = instructors_repo.all_instructors(cursor)
             programs = academics_repo.programs(cursor)
+            prefill = (
+                subjects_repo.get(cursor, add_to)
+                if add_to is not None else None
+            )
 
     except mysql.connector.Error:
         logger.exception("Could not load the subjects list")
@@ -217,6 +409,10 @@ def subjects():
     return render_template(
         "subjects.html",
         subjects=records,
+        known_subjects={
+            record['subject_code']: record['subject_name'] for record in records
+        },
+        prefill=prefill or {},
         weekdays=WEEKDAYS,
         instructors=instructors,
         programs=programs,
@@ -227,34 +423,55 @@ def subjects():
 @subjects_bp.route('/add_subject', methods=['POST'])
 @role_required('admin')
 def add_subject():
-    values, placement, failure = _subject_form()
+    """
+    One subject, taught to one or more sections: one offering per section.
+
+    All or nothing. A refusal at any section writes none of them, so the
+    operator fixes that row and submits the same form again.
+    """
+    offerings, failure = _subject_forms()
 
     if failure is not None:
         return failure
 
+    code = offerings[0][0][0]
+
     try:
         with db_cursor(commit=True) as cursor:
-            arguments = _with_section(cursor, values, placement)
+            name = _name_for_code(cursor, code, offerings[0][0][1])
 
-            if arguments is None:
-                return error_page(400, "That program no longer exists.")
+            for values, placement in offerings:
+                subjects_repo.insert(
+                    cursor,
+                    *_with_section(cursor, _with_name(values, name), placement),
+                )
 
-            subjects_repo.insert(cursor, *arguments)
+    except _Refused as refusal:
+        logger.warning("Refused subject %r: %s", code, refusal.message)
+        return error_page(refusal.status, refusal.message)
 
     except mysql.connector.IntegrityError:
         # The foreign key refused it: the chosen instructor account was
         # deleted after the form was rendered.
-        logger.warning("Refused subject %r: no such instructor", values[0])
+        logger.warning("Refused subject %r: no such instructor", code)
         return error_page(409, "That instructor no longer exists.")
 
     except mysql.connector.Error:
-        logger.exception("Could not add subject %r", values[0])
+        logger.exception("Could not add subject %r", code)
         return error_page(500)
 
-    logger.info("Subject %r added by %r", values[0], session.get('user'))
+    sections = ", ".join(placement['section'] for _, placement in offerings)
+
+    logger.info(
+        "Subject %r added for %d section(s) (%s) by %r",
+        code, len(offerings), sections, session.get('user'),
+    )
 
     flash(
-        f"{values[0]} was added. Use Class List to say who is taking it - "
+        f"{code} was added for "
+        + (f"section {sections}" if len(offerings) == 1
+           else f"{len(offerings)} sections ({sections})")
+        + ". Use Class List on each to say who is taking it - "
         "a subject with no class list records nobody.",
         "success",
     )
@@ -311,14 +528,36 @@ def update_subject(id):
     if failure is not None:
         return failure
 
+    code, name = values[0], values[1]
+    renamed = 0
+
     try:
         with db_cursor(commit=True) as cursor:
-            arguments = _with_section(cursor, values, placement)
+            # DM-11. Renaming an offering that keeps its code renames the
+            # subject: every other section of it too. Moving an offering onto
+            # a code that is already another name is refused instead - that
+            # is a different subject, not a rename.
+            current_code = subjects_repo.code_of(cursor, id)
+            current_code = current_code[1] if current_code else None
+            keeps_code = (
+                current_code is not None
+                and current_code.casefold() == code.casefold()
+            )
 
-            if arguments is None:
-                return error_page(400, "That program no longer exists.")
+            if not keeps_code:
+                name = _name_for_code(cursor, code, name, excluding=id)
 
-            subjects_repo.update(cursor, id, *arguments)
+            subjects_repo.update(
+                cursor, id,
+                *_with_section(cursor, _with_name(values, name), placement, id),
+            )
+
+            if keeps_code:
+                renamed = subjects_repo.rename_code(cursor, code, name, excluding=id)
+
+    except _Refused as refusal:
+        logger.warning("Refused update of subject %s: %s", id, refusal.message)
+        return error_page(refusal.status, refusal.message)
 
     except mysql.connector.IntegrityError:
         logger.warning("Refused update of subject %s: no such instructor", id)
@@ -330,7 +569,15 @@ def update_subject(id):
 
     logger.info("Subject %s updated by %r", id, session.get('user'))
 
-    flash(f"{values[0]} was updated.", "success")
+    if renamed:
+        logger.info("Subject %r renamed to %r on %d other offering(s)", code, name, renamed)
+
+    flash(
+        f"{code} was updated."
+        + (f" Its name was changed on {renamed} other "
+           f"section{'s' if renamed != 1 else ''} too." if renamed else ""),
+        "success",
+    )
 
     return redirect(url_for('subjects.subjects'))
 

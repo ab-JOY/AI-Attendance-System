@@ -1179,3 +1179,67 @@ after the start to be Present, a one-and-a-half-hour class 30 minutes.
 3. **Rows already written stay as they are.** Earlier Lates inside what is
    now the window were not re-derived; the FS-10 correction screen can fix
    any that matter.
+
+---
+
+## 13. DM-10 — one subject, several sections (2026-10-19)
+
+**Raised 2026-10-19 by the user:** a subject set on section A only is "not
+real" - the other sections the same instructor teaches it to had to be added
+by filling in the whole form again, once per section.
+
+| Finding | Evidence |
+|---|---|
+| **DM-10** a subject could only be created for one section at a time | `/add_subject` read one placement. The list was ordered newest first, so the sections of one subject were scattered, and nothing stopped the same code being offered to the same section twice |
+
+**Decided without asking (memory: proceed on defaults):** the database keeps
+**one offering per section**. Each section has its own class list, register and
+schedule, and Late is derived from that schedule (FS-19), so merging sections
+into one row would break attendance. The change is to how offerings are
+created and shown.
+
+- [x] Add form: code, name and instructor entered once. **One or more section
+      rows**, each with its own program, year, section, days and times
+      (`sections-<n>-*`). One offering per row, in one transaction.
+- [x] All or nothing: refusals inside the write **raise** `_Refused`. An early
+      `return` from `db_cursor(commit=True)` commits (see `infra/db.py`).
+      Mutation-checked: a return-based refusal kept section A.
+- [x] Refused: the same section twice in one form (case-insensitive), and a
+      section already offered that code (`subjects_repo.is_offered_to`), on Add and Edit.
+- [x] Subject List grouped by subject, with `N sections` and **+ Add section**
+      (`/subjects?add_to=<id>` pre-fills code, name, instructor, program, year).
+- [x] Tests: 9 unit tests, 1 integration test (real MariaDB scratch schema).
+      Fast suite **1,693 passed, 92 skipped**; `test_academic_structure.py` **47 passed**.
+      `subjects.js` driven in headless Edge over CDP.
+
+### Open, the user's
+
+1. **Combined classes.** Sections A and B meeting together, at one time in one
+   room, are still two offerings, so two sessions. Starting A refuses B's
+   students ("Not in this class"). Supporting that needs an offering with
+   several sections (a join table). Ask if it happens at PRMSU.
+2. **Instructor double-booking is not checked.** Two sections of one instructor
+   at overlapping times on the same day are accepted.
+3. **The manuscript's description of the subject form**, if it has one.
+
+### DM-11 — different instructors, and minor subjects shared by departments (2026-10-19, same day)
+
+**Raised by the user:** the same subject with different instructors, and minor
+subjects (PE) taught to BSCS and to Engineering. Asked which logic is best, they said
+"choose the best for this system".
+
+**Chosen:** an instructor per section row, and one name per code.
+**Not chosen:** a `courses` catalog table. It would mean a migration and a change
+to the data model the manuscript describes, for little gain over these two rules.
+
+- [x] Instructor is a section field (`sections-<n>-instructor_id`). A new row starts
+      from the previous row's instructor, program and year.
+- [x] **A code's name is the subject's.** Add refuses a code already used under another
+      name (409). A name that differs only in case or spacing is stored as the existing one.
+      Edit keeping its code **renames every section** of the subject (`rename_code`, binary compare,
+      since the collation is case-insensitive). Edit moving onto a code named otherwise is refused.
+- [x] The form lists known codes (`<datalist>`). Typing one fills in the name and makes it
+      read-only (`subjects.js`).
+- [x] Live database checked read-only first: no code has two names (13 codes).
+- [x] Fast suite **1,698 passed, 93 skipped**. Integration **48 passed**. 3 mutations caught
+      (name rule, sibling rename, binary compare). Autofill checked in headless Edge.

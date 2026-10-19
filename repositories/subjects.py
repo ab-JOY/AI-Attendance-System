@@ -85,16 +85,83 @@ def _owned_by(instructor_id, prefix="WHERE"):
 
 
 def all_subjects(cursor):
-    """Every offering, newest first, for the management screen."""
+    """
+    Every offering, for the management screen: one subject's sections together.
+
+    Ordered by subject, then by where each section sits, so the screen can
+    group the offerings of one subject under one heading. It used to be newest
+    first, which scattered the sections of one subject across the list.
+    """
     cursor.execute(f"""
         SELECT {SELECTION_COLUMNS}, s.instructor_id, s.day, s.time_out,
                {INSTRUCTOR_NAME} AS instructor_name
         FROM subjects s
         {OFFERING_JOIN}
         LEFT JOIN instructors i ON i.id = s.instructor_id
-        ORDER BY s.id DESC
+        ORDER BY s.subject_code, s.subject_name, course, osec.year_level,
+                 section, s.id
     """)
     return cursor.fetchall()
+
+
+def is_offered_to(cursor, subject_code, section_id, excluding=None):
+    """
+    Whether an offering of this subject code is already taught to this section.
+
+    `excluding` is an offering to leave out - the one being edited. The
+    comparison is the column's collation, case-insensitive, so `cs101` is
+    `CS101`, as it is everywhere else this code is matched.
+    """
+    cursor.execute(
+        """
+        SELECT id FROM subjects
+        WHERE subject_code = %s AND section_id = %s AND id <> %s
+        LIMIT 1
+        """,
+        (subject_code, section_id, excluding or 0),
+    )
+
+    return cursor.fetchone() is not None
+
+
+def name_for_code(cursor, subject_code, excluding=None):
+    """
+    The name the other offerings of this code carry, or None if there are none.
+
+    One subject, one name (DM-11): the routes refuse a second spelling, so on a
+    consistent table every row of a code agrees and any one of them answers.
+    """
+    cursor.execute(
+        """
+        SELECT subject_name FROM subjects
+        WHERE subject_code = %s AND id <> %s
+        ORDER BY id
+        LIMIT 1
+        """,
+        (subject_code, excluding or 0),
+    )
+
+    row = cursor.fetchone()
+
+    if row is None:
+        return None
+
+    return row["subject_name"] if isinstance(row, dict) else row[0]
+
+
+def rename_code(cursor, subject_code, subject_name, excluding=None):
+    """Give every other offering of this code this name. Returns how many changed."""
+    cursor.execute(
+        """
+        UPDATE subjects SET subject_name = %s
+        WHERE subject_code = %s AND id <> %s
+          -- Binary: the collation is case-insensitive, and `pe 1` -> `PE 1` is a rename.
+          AND CAST(subject_name AS BINARY) <> CAST(%s AS BINARY)
+        """,
+        (subject_name, subject_code, excluding or 0, subject_name),
+    )
+
+    return cursor.rowcount
 
 
 def is_taught_by(cursor, subject_id, instructor_id):

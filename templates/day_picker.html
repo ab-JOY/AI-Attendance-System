@@ -4,6 +4,8 @@
     one dropdown. Stored as "Monday, Wednesday" (web/subjects.py, WEEKDAYS).
 
     Expects `weekdays`, and `days` - the ones already chosen, empty on Add.
+    `day_field` is the checkboxes' name, `day` unless set: each section row of
+    the Add form has its own days, as `sections-<n>-day`.
     At least one is required; a checkbox group cannot say so in HTML, so the
     server does.
 #}
@@ -13,7 +15,7 @@
         <label>
             <input
                 type="checkbox"
-                name="day"
+                name="{{ day_field|default('day') }}"
                 value="{{ weekday }}"
                 {% if weekday in days %}checked{% endif %}>
             {{ weekday }}

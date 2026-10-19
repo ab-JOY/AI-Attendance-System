@@ -2,109 +2,173 @@
 
 {% block title %}Subject Management{% endblock %}
 
+{#
+    One section the subject is taught to: where it is, and when it meets.
+
+    `n` numbers the row - `sections-<n>-program_id` and so on - and is `__N__`
+    in the <template> that subjects.js copies for "Add another section".
+    `chosen` is an offering to start from (`?add_to=`), or {}.
+#}
+{% macro section_row(n, chosen) %}
+    <fieldset class="section-row" data-section-row>
+        <legend>Section <span data-section-number>{{ n + 1 if n is number else '' }}</span></legend>
+
+        {#
+            DM-7. Which section the subject is taught to: a program, a year
+            level and a section, the same three fields as where a student
+            belongs. Type the section the way it is typed for its students:
+            the class list is filled from the students of that section.
+        #}
+        {#
+            DM-4. An instructor *account*, chosen from a list - per section,
+            because one subject is often taught by several instructors: PE1 to
+            BSCS 1A by one, to BSCE 1A by another. Reports, attendance and
+            face capture are limited to an instructor's own offerings by this
+            choice.
+        #}
+        <label for="sections-{{ n }}-instructor_id">Instructor</label>
+        <select id="sections-{{ n }}-instructor_id" name="sections-{{ n }}-instructor_id">
+            <option value="">Unassigned</option>
+            {% for instructor in instructors %}
+                <option value="{{ instructor.id }}"
+                    {% if chosen.instructor_id == instructor.id %}selected{% endif %}>
+                    {{ instructor.fullname }}
+                    {% if instructor.department_code %}({{ instructor.department_code }}){% endif %}
+                </option>
+            {% endfor %}
+        </select>
+
+        <label for="sections-{{ n }}-program_id">Program</label>
+        <select id="sections-{{ n }}-program_id" name="sections-{{ n }}-program_id" required>
+            <option value="">Select Program</option>
+            {% for department, offered in programs|groupby('department_name') %}
+                <optgroup label="{{ department }}">
+                    {% for program in offered %}
+                        <option value="{{ program.id }}"
+                            {% if chosen.program_id == program.id %}selected{% endif %}>
+                            {{ program.program_code }} - {{ program.program_name }}
+                        </option>
+                    {% endfor %}
+                </optgroup>
+            {% endfor %}
+        </select>
+
+        <label for="sections-{{ n }}-year_level">Year Level</label>
+        <select id="sections-{{ n }}-year_level" name="sections-{{ n }}-year_level" required>
+            <option value="">Select Year Level</option>
+            {% for year in year_levels %}
+                <option value="{{ year }}"
+                    {% if chosen.year_level == year %}selected{% endif %}>
+                    Year {{ year }}
+                </option>
+            {% endfor %}
+        </select>
+
+        <label for="sections-{{ n }}-section">Section</label>
+        <input
+            type="text"
+            id="sections-{{ n }}-section"
+            name="sections-{{ n }}-section"
+            maxlength="100"
+            placeholder="Section"
+            required>
+
+        {% with days=[], day_field="sections-" ~ n ~ "-day" %}
+            {% include "day_picker.html" %}
+        {% endwith %}
+
+        <label for="sections-{{ n }}-time_in">Time In</label>
+        <input
+            type="time"
+            id="sections-{{ n }}-time_in"
+            name="sections-{{ n }}-time_in"
+            required>
+
+        <label for="sections-{{ n }}-time_out">Time Out</label>
+        <input
+            type="time"
+            id="sections-{{ n }}-time_out"
+            name="sections-{{ n }}-time_out"
+            required>
+
+        <button type="button" data-remove-section hidden>
+            Remove this section
+        </button>
+    </fieldset>
+{% endmacro %}
+
 {% block content %}
     <h1>Subject Management</h1>
 
     <!-- ================= ADD SUBJECT FORM ================= -->
-    <div class="form-container">
+    <div class="form-container" id="add">
+
+        {% if prefill %}
+            <p class="hint">
+                Adding another section of {{ prefill.subject_code }}.
+                <a href="{{ url_for('subjects.subjects') }}">Start a new subject instead</a>
+            </p>
+        {% endif %}
 
         <form action="{{ url_for('subjects.add_subject') }}" method="POST">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
 
             <label for="subject_code">Subject Code</label>
+            {#
+                DM-11. One code, one name. A code already in use - a minor
+                subject like PE1 taught across departments - fills in its
+                name, and the server refuses a second spelling.
+            #}
             <input
                 type="text"
                 id="subject_code"
                 name="subject_code"
+                value="{{ prefill.subject_code or '' }}"
                 placeholder="Subject Code"
+                list="known-subject-codes"
+                data-known-subjects="{{ known_subjects|tojson|forceescape }}"
+                autocomplete="off"
                 required>
+            <datalist id="known-subject-codes">
+                {% for code, name in known_subjects|dictsort %}
+                    <option value="{{ code }}">{{ name }}</option>
+                {% endfor %}
+            </datalist>
 
             <label for="subject_name">Subject Name</label>
             <input
                 type="text"
                 id="subject_name"
                 name="subject_name"
+                value="{{ prefill.subject_name or '' }}"
                 placeholder="Subject Name"
                 required>
+            <p class="hint" data-known-subject-hint hidden>
+                An existing subject: its name is filled in. Add the sections
+                below - any program, any instructor.
+            </p>
 
             {#
-                DM-4. An instructor *account*, chosen from a list. This was a
-                text box, and a typed name linked the subject to nobody - so
-                on the deployed database every subject had a named instructor
-                and none of them belonged to one. Reports limited to an
-                instructor's own classes are limited by this choice.
+                A subject is taught to one or more sections, and one offering
+                is saved per section: each has its own class list, its own
+                register, its own instructor, and its own days and times -
+                Late is derived from them (FS-19). The code and name above are
+                entered once for all of them.
             #}
-            <label for="instructor_id">Instructor</label>
-            <select id="instructor_id" name="instructor_id">
-                <option value="">Unassigned</option>
-                {% for instructor in instructors %}
-                    <option value="{{ instructor.id }}">
-                        {{ instructor.fullname }}
-                        {% if instructor.department_code %}({{ instructor.department_code }}){% endif %}
-                    </option>
-                {% endfor %}
-            </select>
+            <h3>Sections taught</h3>
 
-            {% with days=[] %}
-                {% include "day_picker.html" %}
-            {% endwith %}
+            <div data-section-rows>
+                {{ section_row(0, prefill) }}
+            </div>
 
-            {#
-                DM-7. Which section the subject is taught to: a program, a
-                year level and a section, the same three fields as where a
-                student belongs. These were two text boxes, Course and
-                Section, and what was typed in them linked the subject to no
-                program - so the Classes list on the registration form could
-                only offer every subject to every student.
+            <template data-section-template>
+                {{ section_row('__N__', {}) }}
+            </template>
 
-                Type the section the way it is typed for its students: the
-                class list is filled from the students of that section.
-            #}
-            <label for="program_id">Program</label>
-            <select id="program_id" name="program_id" required>
-                <option value="">Select Program</option>
-                {% for department, offered in programs|groupby('department_name') %}
-                    <optgroup label="{{ department }}">
-                        {% for program in offered %}
-                            <option value="{{ program.id }}">
-                                {{ program.program_code }} - {{ program.program_name }}
-                            </option>
-                        {% endfor %}
-                    </optgroup>
-                {% endfor %}
-            </select>
-
-            <label for="year_level">Year Level</label>
-            <select id="year_level" name="year_level" required>
-                <option value="">Select Year Level</option>
-                {% for year in year_levels %}
-                    <option value="{{ year }}">Year {{ year }}</option>
-                {% endfor %}
-            </select>
-
-            <label for="section">Section</label>
-            <input
-                type="text"
-                id="section"
-                name="section"
-                maxlength="100"
-                placeholder="Section"
-                required>
-
-            <label for="time_in">Time In</label>
-            <input
-                type="time"
-                id="time_in"
-                name="time_in"
-                required>
-
-            <label for="time_out">Time Out</label>
-            <input
-                type="time"
-                id="time_out"
-                name="time_out"
-                required>
+            <button type="button" data-add-section hidden>
+                + Add another section
+            </button>
 
             <button type="submit">Add Subject</button>
 
@@ -132,6 +196,24 @@
         </tr>
 
         {% for subject in subjects %}
+        {#
+            One heading per subject, over the sections it is taught to. The
+            repository orders by code and name, so a subject's offerings are
+            adjacent.
+        #}
+        {% if loop.changed(subject.subject_code, subject.subject_name) %}
+        {% set count = subjects
+            | selectattr('subject_code', 'equalto', subject.subject_code)
+            | selectattr('subject_name', 'equalto', subject.subject_name)
+            | list | length %}
+        <tr class="subject-group">
+            <td colspan="11">
+                <strong>{{ subject.subject_code }} - {{ subject.subject_name }}</strong>
+                <span class="hint">({{ count }} section{{ 's' if count != 1 }})</span>
+                <a href="{{ url_for('subjects.subjects', add_to=subject.id) }}#add">+ Add section</a>
+            </td>
+        </tr>
+        {% endif %}
         <tr>
             <td>{{ subject.id }}</td>
             <td>{{ subject.subject_code }}</td>
@@ -175,7 +257,7 @@
                     action="{{ url_for('subjects.delete_subject', id=subject.id) }}"
                     method="POST"
                     style="display:inline;"
-                    data-confirm="Delete this subject?"
+                    data-confirm="Delete this section's offering of {{ subject.subject_code }}?"
                 >
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
@@ -190,4 +272,8 @@
         {% endfor %}
 
     </table>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/subjects.js') }}" defer></script>
 {% endblock %}

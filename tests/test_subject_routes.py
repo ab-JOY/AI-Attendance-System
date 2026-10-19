@@ -82,10 +82,34 @@ def no_database(monkeypatch):
         subjects_module, "section_id_for", lambda _cursor, _placement: SECTION_ID
     )
 
+    # No offering of the subject is taught to that section yet, and the code
+    # is new: no other offering carries a name for it (DM-11).
+    monkeypatch.setattr(
+        subjects_module.subjects_repo, "is_offered_to",
+        lambda _cursor, _code, _section_id, _excluding=None: False,
+    )
+    _code_is_new(subjects_module.subjects_repo, monkeypatch)
+
     return subjects_module
 
 
 SECTION_ID = 41
+
+
+def _code_is_new(subjects_repo, monkeypatch, name=None, current_code=None):
+    """Stub the DM-11 reads: the name other offerings of the code carry."""
+    monkeypatch.setattr(
+        subjects_repo, "name_for_code",
+        lambda _cursor, _code, _excluding=None: name,
+    )
+    monkeypatch.setattr(
+        subjects_repo, "code_of",
+        lambda _cursor, id: (id, current_code) if current_code else None,
+    )
+    monkeypatch.setattr(
+        subjects_repo, "rename_code",
+        lambda _cursor, _code, _name, excluding=None: 0,
+    )
 
 COMPLETE_FORM = {
     "subject_code": "SEC-TEST-101",
@@ -468,3 +492,330 @@ def test_meeting_days_reads_back_what_the_form_stores():
     assert meeting_days("Monday, Wednesday") == ["Monday", "Wednesday"]
     assert meeting_days("Friday") == ["Friday"]
     assert meeting_days(None) == []
+
+
+# ---------------------------------------------------------------------------
+# One subject, several sections
+#
+# Raised by the user 2026-10-19: a subject was set on section A only, and the
+# other sections the same instructor teaches it to meant filling in the whole
+# form again, once per section. The Add form now takes the subject once and
+# any number of sections, each with its own days and times, and writes one
+# offering per section - each still has its own class list and register.
+# ---------------------------------------------------------------------------
+
+
+def _two_sections(**overrides):
+    form = {
+        "subject_code": "SEC-TEST-101",
+        "subject_name": "Nothing In Particular",
+        "sections-0-instructor_id": "3",
+        "sections-0-program_id": "5",
+        "sections-0-year_level": "4",
+        "sections-0-section": "A",
+        "sections-0-day": ["Wednesday", "Monday"],
+        "sections-0-time_in": "08:00",
+        "sections-0-time_out": "09:00",
+        "sections-1-instructor_id": "4",
+        "sections-1-program_id": "5",
+        "sections-1-year_level": "4",
+        "sections-1-section": "B",
+        "sections-1-day": ["Tuesday"],
+        "sections-1-time_in": "13:00",
+        "sections-1-time_out": "14:30",
+    }
+    form.update(overrides)
+    return form
+
+
+def test_each_section_is_its_own_offering_with_its_own_schedule(
+    client, no_database, monkeypatch
+):
+    written = _written(no_database, monkeypatch)
+    placements = []
+
+    def section_for(_cursor, placement):
+        placements.append(placement["section"])
+        return {"A": 41, "B": 42}[placement["section"]]
+
+    monkeypatch.setattr(no_database, "section_id_for", section_for)
+
+    sign_in(client)
+    response = client.post("/add_subject", data=_two_sections())
+
+    assert response.status_code == 302
+    assert placements == ["A", "B"]
+    assert written == [
+        ("SEC-TEST-101", "Nothing In Particular", 3, "Monday, Wednesday",
+         41, "08:00", "09:00"),
+        ("SEC-TEST-101", "Nothing In Particular", 4, "Tuesday",
+         42, "13:00", "14:30"),
+    ], "the code and name are shared; instructor, days and times are not"
+
+
+def test_rows_are_read_in_number_order_and_gaps_are_fine(
+    client, no_database, monkeypatch
+):
+    """subjects.js never reuses a removed row's number."""
+    written = _written(no_database, monkeypatch)
+    form = _two_sections()
+    form = {
+        key.replace("sections-0-", "sections-7-"): value
+        for key, value in form.items()
+    }
+
+    sign_in(client)
+    client.post("/add_subject", data=form)
+
+    assert [values[3] for values in written] == ["Tuesday", "Monday, Wednesday"]
+
+
+def test_a_bad_row_names_its_section_and_writes_nothing(
+    client, no_database, monkeypatch
+):
+    written = _written(no_database, monkeypatch)
+
+    sign_in(client)
+    response = client.post(
+        "/add_subject", data=_two_sections(**{"sections-1-day": []})
+    )
+
+    assert response.status_code == 400
+    assert "Section 2" in response.get_data(as_text=True)
+    assert written == []
+
+
+def test_the_same_section_twice_in_one_form_is_refused(
+    client, no_database, monkeypatch
+):
+    """Case-insensitive, as the unique key on `sections` is: `a` is `A`."""
+    written = _written(no_database, monkeypatch)
+
+    sign_in(client)
+    response = client.post(
+        "/add_subject", data=_two_sections(**{"sections-1-section": "a"})
+    )
+
+    assert response.status_code == 400
+    assert "listed twice" in response.get_data(as_text=True)
+    assert written == []
+
+
+def test_a_section_already_offered_the_subject_is_refused(
+    client, no_database, monkeypatch
+):
+    written = _written(no_database, monkeypatch)
+
+    monkeypatch.setattr(
+        no_database.subjects_repo, "is_offered_to",
+        lambda _cursor, code, section_id, _excluding=None: section_id == SECTION_ID,
+    )
+
+    sign_in(client)
+    response = client.post("/add_subject", data=COMPLETE_FORM)
+
+    assert response.status_code == 409
+    assert "already offered" in response.get_data(as_text=True)
+    assert written == []
+
+
+def test_a_refusal_after_the_first_section_rolls_the_whole_form_back(
+    client, monkeypatch
+):
+    """
+    ⚠️ `db_cursor(commit=True)` commits on any clean exit, an early `return`
+    included. The second section's refusal must leave the block by raising,
+    or the first section's offering is committed and the operator, told the
+    form was refused, submits it again and gets a duplicate.
+    """
+    import web.subjects as subjects_module
+
+    committed = []
+
+    @contextlib.contextmanager
+    def recording_cursor(*_args, commit=False, **_kwargs):
+        pending = []
+        yield pending
+        if commit:
+            committed.extend(pending)
+
+    monkeypatch.setattr(subjects_module, "db_cursor", recording_cursor)
+    monkeypatch.setattr(
+        subjects_module, "section_id_for",
+        lambda _cursor, placement: {"A": 41, "B": 42}[placement["section"]],
+    )
+    monkeypatch.setattr(
+        subjects_module.subjects_repo, "is_offered_to",
+        lambda _cursor, _code, section_id, _excluding=None: section_id == 42,
+    )
+    monkeypatch.setattr(
+        subjects_module.subjects_repo, "insert",
+        lambda cursor, *values: cursor.append(values),
+    )
+    _code_is_new(subjects_module.subjects_repo, monkeypatch)
+
+    sign_in(client)
+    response = client.post("/add_subject", data=_two_sections())
+
+    assert response.status_code == 409
+    assert committed == [], "section A was committed although the form was refused"
+
+
+def test_editing_an_offering_may_keep_its_own_section(
+    client, no_database, monkeypatch
+):
+    """The duplicate check leaves out the offering being edited."""
+    excluded = []
+
+    def offered(_cursor, _code, _section_id, excluding=None):
+        excluded.append(excluding)
+        return False
+
+    monkeypatch.setattr(no_database.subjects_repo, "is_offered_to", offered)
+    _written(no_database, monkeypatch)
+
+    sign_in(client)
+    response = client.post("/update_subject/7", data=COMPLETE_FORM)
+
+    assert response.status_code == 302
+    assert excluded == [7]
+
+
+def test_add_section_starts_the_form_from_the_offering(
+    client, no_database, monkeypatch
+):
+    monkeypatch.setattr(no_database.subjects_repo, "all_subjects", lambda _c: [])
+    monkeypatch.setattr(
+        no_database.subjects_repo, "get",
+        lambda _cursor, _id: {
+            "subject_code": "SEC-TEST-101",
+            "subject_name": "Nothing In Particular",
+            "instructor_id": 3,
+            "program_id": 5,
+            "year_level": 4,
+        },
+    )
+    monkeypatch.setattr(
+        no_database.instructors_repo, "all_instructors",
+        lambda _cursor: [{"id": 3, "fullname": "Some One", "department_code": None}],
+    )
+    monkeypatch.setattr(
+        no_database.academics_repo, "programs",
+        lambda _cursor: [{
+            "id": 5, "program_code": "BSCS", "program_name": "Computer Science",
+            "department_name": "CCIT",
+        }],
+    )
+
+    sign_in(client)
+    body = client.get("/subjects?add_to=1").get_data(as_text=True)
+
+    assert 'value="SEC-TEST-101"' in body
+    assert 'value="Nothing In Particular"' in body
+    assert body.count("selected") >= 3, "instructor, program and year preselected"
+    assert 'name="sections-0-section"' in body
+    assert 'name="sections-__N__-section"' in body, "the template row for JS"
+    assert 'name="sections-0-day"' in body
+
+
+# ---------------------------------------------------------------------------
+# DM-11 - one code, one name; an instructor per section
+#
+# Raised by the user 2026-10-19: the same subject taught by different
+# instructors, and minor subjects - PE - shared by departments. Each section
+# row names its own instructor and its own program. A code's name is the
+# subject's, so a second spelling is refused rather than listed, and reported
+# on, as a second subject.
+# ---------------------------------------------------------------------------
+
+
+def test_a_code_already_named_otherwise_is_refused(client, no_database, monkeypatch):
+    written = _written(no_database, monkeypatch)
+    _code_is_new(no_database.subjects_repo, monkeypatch, name="Physical Education 1")
+
+    sign_in(client)
+    response = client.post(
+        "/add_subject", data=dict(COMPLETE_FORM, subject_name="PE - Fitness")
+    )
+
+    assert response.status_code == 409
+    assert "Physical Education 1" in response.get_data(as_text=True)
+    assert written == []
+
+
+def test_a_name_differing_only_in_case_or_spacing_is_the_existing_one(
+    client, no_database, monkeypatch
+):
+    written = _written(no_database, monkeypatch)
+    _code_is_new(no_database.subjects_repo, monkeypatch, name="Physical Education 1")
+
+    sign_in(client)
+    response = client.post(
+        "/add_subject",
+        data=dict(COMPLETE_FORM, subject_name="physical  education 1"),
+    )
+
+    assert response.status_code == 302
+    assert written[0][1] == "Physical Education 1"
+
+
+def test_renaming_an_offering_renames_its_subject_everywhere(
+    client, no_database, monkeypatch
+):
+    """Same code, new name: the other sections follow, not refuse."""
+    _written(no_database, monkeypatch)
+    _code_is_new(
+        no_database.subjects_repo, monkeypatch,
+        name="Old Name", current_code="sec-test-101",
+    )
+    renamed = []
+
+    def rename(_cursor, code, name, excluding=None):
+        renamed.append((code, name, excluding))
+        return 2
+
+    monkeypatch.setattr(no_database.subjects_repo, "rename_code", rename)
+
+    sign_in(client)
+    response = client.post("/update_subject/7", data=COMPLETE_FORM)
+
+    assert response.status_code == 302
+    assert renamed == [("SEC-TEST-101", "Nothing In Particular", 7)]
+
+
+def test_moving_an_offering_onto_a_code_named_otherwise_is_refused(
+    client, no_database, monkeypatch
+):
+    written = _written(no_database, monkeypatch)
+    _code_is_new(
+        no_database.subjects_repo, monkeypatch,
+        name="Something Else", current_code="OTHER-CODE",
+    )
+
+    sign_in(client)
+    response = client.post("/update_subject/7", data=COMPLETE_FORM)
+
+    assert response.status_code == 409
+    assert written == []
+
+
+def test_the_form_offers_known_codes_and_an_instructor_per_section(
+    client, no_database, monkeypatch
+):
+    monkeypatch.setattr(
+        no_database.subjects_repo, "all_subjects",
+        lambda _c: [{
+            "id": 1, "subject_code": "PE1", "subject_name": 'Physical "Ed" 1',
+            "instructor_id": None, "instructor_name": None, "day": "Monday",
+            "course": "BSCS", "year_level": 1, "section": "A", "section_id": 9,
+            "time_in": None, "time_out": None,
+        }],
+    )
+
+    sign_in(client)
+    body = client.get("/subjects").get_data(as_text=True)
+
+    assert 'name="sections-0-instructor_id"' in body
+    assert 'name="instructor_id"' not in body, "the instructor is per section now"
+    assert '<option value="PE1">' in body
+    assert "&#34;PE1&#34;" in body, "the attribute JSON is escaped, quotes and all"

@@ -227,3 +227,25 @@ admin-only.** An instructor's finished capture retrains automatically, as an adm
   1,644 passed, 90 skipped.
 - **Open (the user's):** the manuscript's access-control description.
   `docs/data_privacy.md` §3 is updated.
+
+---
+
+## 9. Addendum 2026-10-19: one subject, several sections (DM-10)
+
+See `todo.md` §13. Uncommitted, on `attendance-browser-camera`.
+
+- **Schema unchanged.** A `subjects` row is still one offering for one section.
+  The Add form creates several in one submit: `sections-<n>-program_id`,
+  `-year_level`, `-section`, `-day`, `-time_in`, `-time_out`. A form with no
+  `sections-<n>-` fields is read as one section from the plain names. The Edit
+  form and the existing tests use that.
+- **Trap: `db_cursor(commit=True)` commits on an early `return`.** Any refusal
+  inside a multi-row write must raise (`web/subjects.py::_Refused`).
+- `subjects_repo.all_subjects()` is ordered by code, name, program, year and section,
+  not newest first, so the template can group with `loop.changed`.
+- `day_picker.html` takes an optional `day_field` (default `day`).
+- New `static/js/subjects.js`. Without it, the form still works for one section.
+- **DM-11 (same day):** Instructor moved into each section row. One code has one name:
+  Add refuses a second spelling, and Edit renames all sections of the code
+  (`subjects_repo.name_for_code` / `rename_code`). `rename_code` compares as BINARY;
+  a plain `<>` misses case-only renames under this collation (mutation-checked).
