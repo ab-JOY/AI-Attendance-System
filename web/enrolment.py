@@ -30,6 +30,7 @@ browser needs TLS configured - see `config/settings.py`.
 from __future__ import annotations
 
 import logging
+import secrets
 from collections import Counter
 
 import mysql.connector
@@ -40,6 +41,7 @@ from flask import (
     render_template,
     request,
     session,
+    url_for,
 )
 
 from infra import dataset_store
@@ -50,10 +52,16 @@ from infra.uploads import (
     canonicalise,
     decode_native,
 )
+from repositories import academics as academics_repo
 from repositories import enrolments as enrolments_repo
 from repositories import students as students_repo
 from repositories import subjects as subjects_repo
-from security.access import authenticated, json_api, role_required
+from security.access import (
+    authenticated,
+    instructor_scope,
+    json_api,
+    role_required,
+)
 from security.passwords import PasswordTooLongError, hash_password
 from security.paths import (
     UnsafeStudentPathError,
@@ -66,6 +74,7 @@ from vision.enrolment import DEFAULT_PLAN, MAX_IMAGES, EnrolmentComplete
 from vision.pose import MIN_NATIVE_FRAME_WIDTH
 from web.errors import error_page
 from web.placement import parse_placement, section_id_for
+from web.students import class_groups
 
 logger = logging.getLogger(__name__)
 
@@ -113,8 +122,136 @@ def enrolment_json(message, status=400, **extra):
     return jsonify(body), status
 
 
+# ==========================================================
+# INSTRUCTOR CAPTURE
+#
+# An instructor captures the faces of their own classes with exactly the
+# administrator's flow - the same routes, page, gates and retrain. What differs
+# is who they may capture, and that is decided here rather than in the page:
+#
+#   - a student who already exists must be on one of their class lists, since
+#     finishing a capture replaces that student's images (and their name);
+#   - a new student must be placed in at least one class they teach, so they
+#     cannot add anyone they will never take attendance for.
+#
+# ⚠️ **Checked at /enrol/start, not only at /enrol.** /enrol renders a page;
+# /enrol/start takes the student ID and class list as a request body, and that
+# is the call a forged request would make.
+# ==========================================================
+
+# The Flask-session key holding the token of the capture this login started.
+CAPTURE_OWNER_KEY = "enrolment_owner"
+NOT_YOUR_CAPTURE = "This capture was started by someone else."
+
+
+def _subject_ids_from(record):
+    """The class list a record carries, as ints, or None if it is not one."""
+    values = record.get(SUBJECTS_KEY, []) if isinstance(record, dict) else None
+
+    if not isinstance(values, list) or not all(
+        isinstance(value, int) and not isinstance(value, bool)
+        for value in values
+    ):
+        return None
+
+    return values
+
+
+def _instructor_refusal(student_id, subject_ids):
+    """
+    Why the signed-in instructor may not capture this student, or None.
+
+    Always None for an administrator, without touching the database.
+    """
+    instructor_id = instructor_scope()
+
+    if instructor_id is None:
+        return None
+
+    with db_cursor(dictionary=True) as cursor:
+        if students_repo.exists(cursor, student_id):
+            if enrolments_repo.is_in_class_of(cursor, student_id, instructor_id):
+                return None
+
+            return "You can only capture the faces of students in your own classes."
+
+        if not subject_ids:
+            return "Choose at least one of your classes for the new student."
+
+        if not all(
+            subjects_repo.is_taught_by(cursor, subject_id, instructor_id)
+            for subject_id in subject_ids
+        ):
+            return "You can only add a student to classes you teach."
+
+    return None
+
+
+def _owns_capture(capture_session):
+    """
+    Whether this login may send frames to, finish or cancel the capture.
+
+    An administrator may act on any capture, as before. An instructor only on
+    the one they started: the slot is shared by the whole server, and another
+    instructor's half-finished capture is not theirs to throw away.
+    """
+    if session.get('role') == 'admin':
+        return True
+
+    token = getattr(capture_session, "owner_token", None)
+
+    return token is not None and session.get(CAPTURE_OWNER_KEY) == token
+
+
+def _done_url():
+    """Where the capture page goes when it is over, for this role."""
+    if session.get('role') == 'admin':
+        return url_for('students.manage_students')
+
+    return url_for('enrolment.class_capture')
+
+
+@enrolment_bp.route('/class_capture')
+@role_required('instructor')
+def class_capture():
+    """
+    The instructor's Face Capture page: their classes and who is in them.
+
+    Recapture for a student already listed, and Register & Capture for a new
+    one, both post to /enrol like the administrator's pages do.
+    """
+    instructor_id = instructor_scope()
+
+    try:
+        with db_cursor(dictionary=True) as cursor:
+            offerings = subjects_repo.for_selection(
+                cursor, instructor_id=instructor_id
+            )
+
+            classes = [
+                {**offering, "students": enrolments_repo.enrolled_in(
+                    cursor, offering["id"]
+                )}
+                for offering in offerings
+            ]
+
+            programs = academics_repo.programs(cursor)
+
+    except mysql.connector.Error:
+        logger.exception("Could not load the Face Capture page")
+        return error_page(500)
+
+    return render_template(
+        'class_capture.html',
+        classes=classes,
+        class_groups=class_groups(offerings),
+        programs=programs,
+        year_levels=academics_repo.YEAR_LEVELS,
+    )
+
+
 @enrolment_bp.route('/enrol', methods=['POST'])
-@role_required('admin')
+@role_required('admin', 'instructor')
 def enrol():
     """
     Render the capture page for a new student or a recapture.
@@ -138,6 +275,11 @@ def enrol():
 
         if student is None:
             return error_page(404, "That student ID was not found.")
+
+        refusal = _instructor_refusal(student_id, [])
+
+        if refusal is not None:
+            return error_page(403, refusal)
 
         name = student['name']
         record = {}
@@ -165,12 +307,18 @@ def enrol():
         if problem is not None:
             return error_page(400, problem)
 
+        chosen_subject_ids = _chosen_subject_ids(request.form)
+        refusal = _instructor_refusal(student_id, chosen_subject_ids)
+
+        if refusal is not None:
+            return error_page(403, refusal)
+
         record = {
             **placement,
             # US-10. Nothing is written here - this rides along in the opaque
             # record and is applied at /enrol/finish, with the student row, in
             # one transaction.
-            SUBJECTS_KEY: _chosen_subject_ids(request.form),
+            SUBJECTS_KEY: chosen_subject_ids,
         }
 
         password = request.form.get('password', '')
@@ -199,11 +347,12 @@ def enrol():
         # from a camera narrower than this, and a number duplicated in
         # JavaScript is a number that drifts.
         min_native_width=MIN_NATIVE_FRAME_WIDTH,
+        done_url=_done_url(),
     )
 
 
 @enrolment_bp.route('/enrol/start', methods=['POST'])
-@role_required('admin')
+@role_required('admin', 'instructor')
 @json_api
 def enrol_start():
     payload = request.get_json(silent=True) or {}
@@ -221,6 +370,19 @@ def enrol_start():
     except UnsafeStudentPathError as error:
         return enrolment_json(str(error))
 
+    record = payload.get('record') or {}
+
+    if session.get('role') != 'admin':
+        subject_ids = _subject_ids_from(record)
+
+        if subject_ids is None:
+            return enrolment_json("The class list could not be read.")
+
+        refusal = _instructor_refusal(student_id, subject_ids)
+
+        if refusal is not None:
+            return enrolment_json(refusal, status=403)
+
     try:
         password_hash = enrolment_slot.take_password(
             payload.get(PASSWORD_TOKEN_KEY)
@@ -230,7 +392,7 @@ def enrol_start():
             "student_id": student_id,
             "student_name": student_name,
             "started_by": session.get('user'),
-            "record": payload.get('record') or {},
+            "record": record,
         }
 
         if password_hash is not None:
@@ -247,6 +409,9 @@ def enrol_start():
         return enrolment_json(
             "Another enrolment is already in progress.", status=409
         )
+
+    capture_session.owner_token = secrets.token_urlsafe(16)
+    session[CAPTURE_OWNER_KEY] = capture_session.owner_token
 
     logger.info(
         "Enrolment started for %s by %s", student_id, session.get('user')
@@ -328,7 +493,7 @@ def _describe_uploads(capture_session):
 
 
 @enrolment_bp.route('/enrol/frame', methods=['POST'])
-@role_required('admin')
+@role_required('admin', 'instructor')
 @json_api
 def enrol_frame():
     """One uploaded JPEG, judged by the same gates the capture window used."""
@@ -338,6 +503,9 @@ def enrol_frame():
         return enrolment_json(
             "No capture is in progress. Start one first.", status=409
         )
+
+    if not _owns_capture(capture_session):
+        return enrolment_json(NOT_YOUR_CAPTURE, status=403)
 
     body = request.get_data()
 
@@ -376,7 +544,7 @@ def enrol_frame():
 
 
 @enrolment_bp.route('/enrol/finish', methods=['POST'])
-@role_required('admin')
+@role_required('admin', 'instructor')
 @json_api
 def enrol_finish():
     """
@@ -391,6 +559,9 @@ def enrol_finish():
 
     if capture_session is None:
         return enrolment_json("No capture is in progress.", status=409)
+
+    if not _owns_capture(capture_session):
+        return enrolment_json(NOT_YOUR_CAPTURE, status=403)
 
     if not capture_session.done:
         return enrolment_json(
@@ -548,7 +719,7 @@ def enrol_finish():
 
 
 @enrolment_bp.route('/enrol/cancel', methods=['POST'])
-@role_required('admin')
+@role_required('admin', 'instructor')
 @json_api
 def enrol_cancel():
     """
@@ -561,6 +732,9 @@ def enrol_cancel():
 
     if capture_session is None:
         return jsonify({"success": True, "message": "Nothing to cancel."})
+
+    if not _owns_capture(capture_session):
+        return enrolment_json(NOT_YOUR_CAPTURE, status=403)
 
     logger.info(
         "Enrolment cancelled for %s after %d image(s), from %s",

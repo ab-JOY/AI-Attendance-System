@@ -29,7 +29,12 @@
         Checking…
     </p>
 
-    <button type="button" id="retrain-button">
+    {# Retraining by hand is admin-only (/train_model). An instructor's
+       capture still retrains on its own when it finishes; they get the status
+       and no button that would answer 403. Hidden rather than left out, so
+       training.js finds the element it expects. #}
+    <button type="button" id="retrain-button"
+            {% if session['role'] != 'admin' %}hidden{% endif %}>
         Retrain model
     </button>
 

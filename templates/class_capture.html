@@ -1,0 +1,210 @@
+{% extends "base.html" %}
+
+{% block title %}Face Capture{% endblock %}
+
+{% block content %}
+    <h1>Face Capture</h1>
+
+    {#
+        The instructor's way into the same capture the administrator uses:
+        both forms post to /enrol, which renders enrol.html. What an instructor
+        may capture - students of their own classes, and new students placed
+        in one of them - is enforced by web/enrolment.py, not by what this page
+        happens to list.
+    #}
+    <p class="hint">
+        Capture faces for the students of the classes you teach. Nothing is
+        saved until all images are captured, and a recaptured student keeps
+        their current images until the new capture is complete.
+    </p>
+
+    {% include 'training_status.html' %}
+
+    {% if not classes %}
+        <p role="status">
+            You have no classes assigned yet, so there is nobody to capture.
+            Ask an administrator to assign your subjects to you.
+        </p>
+    {% endif %}
+
+    {% for class in classes %}
+        <h2 style="margin-top:30px;">
+            {{ class.subject_code }} — {{ class.subject_name }}
+        </h2>
+
+        <p class="hint">
+            {% if class.section_id %}
+                {{ class.course }}, Year {{ class.year_level }}, Section {{ class.section }}
+            {% elif class.section %}
+                Section {{ class.section }}
+            {% else %}
+                Not linked to a section yet
+            {% endif %}
+            · {{ class.students|length }}
+            student{{ 's' if class.students|length != 1 }}
+        </p>
+
+        {% if class.students %}
+            <table class="subject-table">
+                <tr>
+                    <th>Student ID</th>
+                    <th>Name</th>
+                    <th>Program</th>
+                    <th>Year</th>
+                    <th>Section</th>
+                    <th>Action</th>
+                </tr>
+
+                {% for student in class.students %}
+                    <tr>
+                        <td>{{ student.student_id }}</td>
+                        <td>{{ student.name }}</td>
+                        <td>{{ student.program or "—" }}</td>
+                        <td>{{ student.year_level or "—" }}</td>
+                        <td>{{ student.section or "—" }}</td>
+                        <td>
+                            <form
+                                action="{{ url_for('enrolment.enrol') }}"
+                                method="POST"
+                                style="display:inline;"
+                                data-confirm="Recapture the face of {{ student.name }}? Their current images are kept until the new capture is complete."
+                            >
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                <input type="hidden" name="mode" value="recapture">
+                                <input type="hidden" name="student_id" value="{{ student.student_id }}">
+
+                                <button type="submit" class="action-btn">
+                                    📷 Recapture Face
+                                </button>
+                            </form>
+                        </td>
+                    </tr>
+                {% endfor %}
+            </table>
+        {% else %}
+            <p role="status">
+                Nobody is on this class list yet. Register a new student below,
+                or ask an administrator to add existing students to it.
+            </p>
+        {% endif %}
+    {% endfor %}
+
+    {% if classes %}
+        <h2 style="margin-top:36px;">Register a new student</h2>
+
+        {#
+            The administrator's registration form (students.html), with the
+            class list narrowed to this instructor's own classes and required:
+            a student an instructor registers has to be in one of them.
+            static/js/students.js filters it by program and pre-selects the
+            student's own section, exactly as it does there.
+        #}
+        <div class="form-container">
+            <form action="{{ url_for('enrolment.enrol') }}" method="POST">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="mode" value="new">
+
+                <label for="student_id">Student ID</label>
+                <input
+                    type="text"
+                    id="student_id"
+                    name="student_id"
+                    placeholder="Enter Student ID"
+                    required>
+
+                <label for="name">Student Name</label>
+                <input
+                    type="text"
+                    id="name"
+                    name="name"
+                    placeholder="Enter Student Name"
+                    required>
+
+                <label for="password">Student Password (Optional)</label>
+                <input
+                    type="password"
+                    id="password"
+                    name="password"
+                    minlength="8"
+                    autocomplete="new-password"
+                    placeholder="Leave blank to set it later">
+
+                <label for="program_id">Program</label>
+                <select id="program_id" name="program_id" required>
+                    <option value="">Select Program</option>
+                    {% for department, offered in programs|groupby('department_name') %}
+                        <optgroup label="{{ department }}">
+                            {% for program in offered %}
+                                <option value="{{ program.id }}">
+                                    {{ program.program_code }} - {{ program.program_name }}
+                                </option>
+                            {% endfor %}
+                        </optgroup>
+                    {% endfor %}
+                </select>
+
+                <label for="year_level">Year Level</label>
+                <select id="year_level" name="year_level" required>
+                    <option value="">Select Year Level</option>
+                    {% for year in year_levels %}
+                        <option value="{{ year }}">Year {{ year }}</option>
+                    {% endfor %}
+                </select>
+
+                <label for="section">Section</label>
+                <input
+                    type="text"
+                    id="section"
+                    name="section"
+                    maxlength="100"
+                    placeholder="Enter Section"
+                    required>
+
+                <label for="subject_ids">
+                    Your classes
+                    <span class="hint">
+                        at least one — hold Ctrl (or ⌘) to choose more
+                    </span>
+                </label>
+                <select
+                    id="subject_ids"
+                    name="subject_ids"
+                    multiple
+                    size="6"
+                    required
+                    data-class-picker
+                    aria-describedby="subject_ids_help">
+
+                    {% for group in class_groups %}
+                        <optgroup
+                            label="{{ group.label }}"
+                            data-program-id="{{ group.program_id or '' }}"
+                            data-year-level="{{ group.year_level or '' }}"
+                            data-section="{{ group.section or '' }}">
+                            {% for subject in group.subjects %}
+                                <option value="{{ subject.id }}">
+                                    {{ subject.subject_code }} - {{ subject.subject_name }}
+                                </option>
+                            {% endfor %}
+                        </optgroup>
+                    {% endfor %}
+
+                </select>
+
+                <p id="subject_ids_help" class="hint">
+                    Only your classes for the chosen program are listed. The
+                    classes of the student's own section are selected for you.
+                </p>
+
+                <button type="submit">
+                    Register Student & Capture Face
+                </button>
+            </form>
+        </div>
+    {% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/training.js') }}" defer></script>
+<script src="{{ url_for('static', filename='js/students.js') }}" defer></script>
+{% endblock %}

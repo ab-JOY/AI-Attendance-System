@@ -200,3 +200,30 @@ This is L39 again, for enrolment.
 - **Fast suite:** 1,619 passed, 90 skipped. Slow enrolment tests pass.
 - **Still not verified:** a real capture with masking, in a browser. Its
   finish log line gives frames, widths and KB.
+
+---
+
+## 8. Addendum 2026-10-19: instructors capture faces for their own classes
+
+The user asked for it, removed it while tunnel capture was broken, and asked for it
+again once tunnel capture worked. This settles who may change the biometric model
+(the `/train_model` comment): **instructors may capture, but manual retraining stays
+admin-only.** An instructor's finished capture retrains automatically, as an admin's does.
+
+- The five `/enrol*` routes are `role_required('admin', 'instructor')`.
+  `_instructor_refusal()`, checked at `/enrol` **and** `/enrol/start`, allows an existing
+  student only if they're on one of the instructor's class lists
+  (`enrolments_repo.is_in_class_of`), and a new student only if they're placed in at least
+  one class the instructor teaches. An existing ID sent as "new" is still a recapture
+  (finish renames and replaces images), so it gets the same ownership check.
+- `_owns_capture()`: only the login that started a capture (`CAPTURE_OWNER_KEY` token)
+  can send frames, finish or cancel it. Any admin can still act on any capture.
+- Page: `GET /class_capture` (sidebar *Face Capture*), `templates/class_capture.html`.
+  `enrol.html` returns to `done_url` by role, and `training_status.html` hides Retrain from
+  non-admins.
+- Merged by hand with the tunnel work in `web/enrolment.py`: the owner check runs
+  before the body is read in `/enrol/frame`. `tests/test_instructor_capture.py` (21).
+  Both guards were mutation-checked after the merge (5 and 3 failures). Fast suite:
+  1,644 passed, 90 skipped.
+- **Open (the user's):** the manuscript's access-control description.
+  `docs/data_privacy.md` §3 is updated.

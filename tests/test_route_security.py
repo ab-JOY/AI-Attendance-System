@@ -135,6 +135,7 @@ PROTECTED_GET_ROUTES = [
     "/change_password",
     "/video_feed",
     "/enrol/status",
+    "/class_capture",
     # FS-10. A numeric id has no obviously-fake form the way SEC-TEST-NOBODY
     # does - the exact gap lessons.md L6 calls out after /delete_subject/1
     # turned out to name a real row - so this is a value no auto_increment
@@ -225,11 +226,9 @@ ADMIN_ONLY_POST_ROUTES = [
     "/enrol_student",
     "/enrol_section",
     "/unenrol_student",
-    "/enrol",
-    "/enrol/start",
-    "/enrol/frame",
-    "/enrol/finish",
-    "/enrol/cancel",
+    # The five /enrol routes are not here: instructors capture the faces of
+    # their own classes. What they may capture is tested in
+    # tests/test_instructor_capture.py.
     "/search_student",
     "/delete_student/SEC-TEST-NOBODY",
     "/update_student/SEC-TEST-NOBODY",

@@ -161,6 +161,28 @@ def count_for_student(cursor, student_id):
     return row["classes"] if isinstance(row, dict) else row[0]
 
 
+def is_in_class_of(cursor, student_id, instructor_id):
+    """
+    Whether this student is on any class list this instructor teaches (DM-5).
+
+    The check behind an instructor's recapture. Their Face Capture page lists
+    only their own students, so this is what refuses a request that names
+    somebody else's anyway - a recapture replaces that student's images.
+    """
+    cursor.execute(
+        """
+        SELECT 1
+        FROM enrolments e
+        JOIN subjects s ON s.id = e.subject_id
+        WHERE e.student_id = %s AND s.instructor_id = %s
+        LIMIT 1
+        """,
+        (student_id, instructor_id),
+    )
+
+    return cursor.fetchone() is not None
+
+
 def count_for_subject(cursor, subject_id):
     """
     How many students are on this offering's class list. Zero is the answer
