@@ -28,6 +28,7 @@ to do with the person in front of the camera.
 from __future__ import annotations
 
 import logging
+import math
 
 import cv2
 import numpy as np
@@ -76,6 +77,17 @@ def decode_frame(
     gates were tuned at (see vision/pose.py). Raises UploadRejected for
     anything unusable.
     """
+    return canonicalise(decode_native(body, content_type), size)
+
+
+def decode_native(body: bytes | None, content_type: str | None):
+    """
+    Validate and decode one uploaded frame, at the size it arrived.
+
+    `decode_frame()` without the canonicalising step, for a caller that needs
+    to know what the browser actually sent - enrolment records the upload
+    widths of each capture, since the browser steps down on a slow link.
+    """
     _check_declared_type(content_type)
     _check_magic(body)
 
@@ -95,7 +107,7 @@ def decode_frame(
             "camera or raise its quality setting."
         )
 
-    return canonicalise(frame, size)
+    return frame
 
 
 def canonicalise(
@@ -175,3 +187,42 @@ def _check_decoded_size(frame) -> None:
     if width > MAX_DECODED_WIDTH or height > MAX_DECODED_HEIGHT:
         logger.warning("Refused an oversized upload: %dx%d", width, height)
         raise UploadRejected("That image is too large.")
+
+
+def canonical_region(
+    region: tuple[int, int, int, int],
+    native_size: tuple[int, int],
+    size: tuple[int, int] = (CANONICAL_FRAME_WIDTH, CANONICAL_FRAME_HEIGHT),
+) -> tuple[int, int, int, int] | None:
+    """
+    Map `(x, y, width, height)` in an upload's pixels onto its canonical frame.
+
+    The same centre-crop and scale `canonicalise()` applies, rounded
+    **inward**, plus one pixel: the region is a promise about which pixels are
+    real, so where scaling blurs its edge the edge must not count. None if
+    nothing of it survives.
+    """
+    native_width, native_height = native_size
+    target_width, target_height = size
+    target_aspect = target_width / target_height
+
+    cropped_width = min(native_width, native_height * target_aspect)
+    cropped_height = min(native_height, native_width / target_aspect)
+    offset_x = (native_width - cropped_width) / 2
+    offset_y = (native_height - cropped_height) / 2
+    scale = target_width / cropped_width
+
+    x, y, width, height = region
+
+    left = math.ceil((x - offset_x) * scale) + 1
+    top = math.ceil((y - offset_y) * scale) + 1
+    right = math.floor((x + width - offset_x) * scale) - 1
+    bottom = math.floor((y + height - offset_y) * scale) - 1
+
+    left, top = max(0, left), max(0, top)
+    right, bottom = min(target_width, right), min(target_height, bottom)
+
+    if right <= left or bottom <= top:
+        return None
+
+    return left, top, right - left, bottom - top

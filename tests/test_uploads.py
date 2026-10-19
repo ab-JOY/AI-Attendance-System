@@ -242,3 +242,30 @@ def test_the_result_is_always_exactly_what_the_session_demands():
         frame = np.zeros((height, width, 3), dtype=np.uint8)
 
         assert canonicalise(frame).shape[:2] == CANONICAL
+
+
+# ==============================
+# canonical_region: the browser's sent face region on the canonical frame
+# ==============================
+
+
+def test_a_region_on_a_half_size_upload_is_doubled_and_shrunk_inward():
+    from infra.uploads import canonical_region
+
+    assert canonical_region((100, 50, 200, 100), (960, 540)) == (201, 101, 398, 198)
+
+
+def test_a_region_on_a_4_3_upload_accounts_for_the_centre_crop():
+    """1440x1080 is cropped to 1440x810 (135 px off top and bottom) and scaled 4/3."""
+    from infra.uploads import canonical_region
+
+    left, top, width, height = canonical_region((300, 300, 300, 300), (1440, 1080))
+
+    assert (left, top) == (401, 221)
+    assert (width, height) == (398, 398)
+
+
+def test_a_region_entirely_outside_the_kept_frame_is_nothing():
+    from infra.uploads import canonical_region
+
+    assert canonical_region((0, 0, 1440, 100), (1440, 1080)) is None

@@ -67,6 +67,47 @@
     // constant that drifts.
     var MIN_NATIVE_WIDTH = Number(page.getAttribute("data-min-native-width"));
 
+    // What each upload is sent as, largest first. **Stepped down only when
+    // replies are slow**, so on the server machine (localhost: ~15 ms of server
+    // work per frame) every frame still goes at 1920 and 0.92, as before.
+    //
+    // Through a Cloudflare tunnel a 1920 frame took 5-25 s to upload
+    // (measured 2026-10-19: 15-70 KB/s up), so the stage hold - several
+    // frames in a row - could never complete and no image was ever saved.
+    // Attendance hit the same wall first (lessons.md L39).
+    //
+    // The floor is the server's MIN_NATIVE_FRAME_WIDTH: infra/uploads.py
+    // refuses anything narrower, because upscaling further costs the blur gate
+    // real detail. Quality stays >= 0.7 because heavier JPEG blocking adds
+    // false edges to the Laplacian the blur gate measures. Every gate still
+    // runs on the saved crop at every tier; the server logs which widths each
+    // capture was built from.
+    var TIERS = [
+        { width: 1920, quality: 0.92 },
+        { width: 1280, quality: 0.8 },
+        { width: MIN_NATIVE_WIDTH, quality: 0.7 }
+    ];
+    // A reply slower than this, SLOW_REPLIES times in a row, steps down a tier.
+    var SLOW_REPLY_MS = 700;
+    var SLOW_REPLIES = 3;
+
+    // **Only the face is sent; the rest of the frame is flat grey.** Measured
+    // through the tunnel on 2026-10-19 after the tiers above: 268 frames at
+    // 60 KB took 8 min 10 s (1.8 s a frame, ~33 KB/s up) - the link, not the
+    // server, sets the pace, so the only lever left is bytes. A flat area
+    // costs JPEG almost nothing.
+    //
+    // The frame keeps its full size and the face its position, so framing,
+    // distance and the stage gates see exactly the geometry they would have;
+    // the crop the server saves comes from pixels that are sent unchanged.
+    // The region follows the last box the server returned. Every
+    // FULL_FRAME_EVERY-th upload, and any upload after a reply with no box,
+    // is the whole picture - so a face that moved is found again, and the
+    // server's "more than one face" check still sees the room.
+    var FACE_MARGIN = 0.35;
+    var FULL_FRAME_EVERY = 15;
+    var MASK_GREY = "rgb(96, 96, 96)";
+
     var video = document.getElementById("preview");
     var overlay = document.getElementById("overlay");
     var instruction = document.getElementById("instruction");
@@ -87,6 +128,10 @@
     var inFlight = false;
     var running = false;
     var captured = 0;
+    var tier = 0;
+    var slowReplies = 0;
+    var lastBox = null;
+    var uploadsSent = 0;
 
     function say(text, tone) {
         message.textContent = text;
@@ -147,7 +192,34 @@
             }
         });
 
+        lastBox = progress.box || null;
         drawBox(progress.box);
+    }
+
+    function faceRegion(width, height) {
+        // The server's box is in canonical 1920x1080 coordinates, after
+        // infra/uploads.py's `canonicalise()` centre-cropped the frame to
+        // 16:9 and scaled it. This undoes both, onto the video's own pixels.
+        var aspect = 1920 / 1080;
+        var croppedWidth = Math.min(width, height * aspect);
+        var croppedHeight = Math.min(height, width / aspect);
+        var offsetX = (width - croppedWidth) / 2;
+        var offsetY = (height - croppedHeight) / 2;
+        var scale = croppedWidth / 1920;
+
+        var marginX = lastBox[2] * FACE_MARGIN;
+        var marginY = lastBox[3] * FACE_MARGIN;
+
+        var left = Math.max(0, offsetX + (lastBox[0] - marginX) * scale);
+        var top = Math.max(0, offsetY + (lastBox[1] - marginY) * scale);
+        var right = Math.min(
+            width, offsetX + (lastBox[0] + lastBox[2] + marginX) * scale
+        );
+        var bottom = Math.min(
+            height, offsetY + (lastBox[1] + lastBox[3] + marginY) * scale
+        );
+
+        return [left, top, right - left, bottom - top];
     }
 
     function drawBox(box) {
@@ -186,8 +258,12 @@
     function grabFrame() {
         if (inFlight || !running || !video.videoWidth) { return; }
 
-        scratch.width = video.videoWidth;
-        scratch.height = video.videoHeight;
+        // Never upscaled here: a camera narrower than the tier is sent as is.
+        var upload = TIERS[tier];
+        var scale = Math.min(1, upload.width / video.videoWidth);
+
+        scratch.width = Math.round(video.videoWidth * scale);
+        scratch.height = Math.round(video.videoHeight * scale);
 
         var context = scratch.getContext("2d");
 
@@ -223,18 +299,57 @@
         // pose needs a mirror - and `drawBox()` still mirrors the box it gets
         // back, which maps the server's camera-view coordinates onto that
         // mirrored picture. Those two are unaffected by this.
-        context.drawImage(video, 0, 0);
+        uploadsSent += 1;
+
+        // The region in the upload's own pixels, whole numbers, and exactly
+        // what is drawn - the server is told this and refuses any crop that
+        // reaches outside it (vision/enrolment.py `_crop_was_sent`).
+        var sent = null;
+
+        if (lastBox && uploadsSent % FULL_FRAME_EVERY !== 0) {
+            var region = faceRegion(video.videoWidth, video.videoHeight);
+            var left = Math.floor(region[0] * scale);
+            var top = Math.floor(region[1] * scale);
+            var right = Math.min(
+                scratch.width, Math.ceil((region[0] + region[2]) * scale)
+            );
+            var bottom = Math.min(
+                scratch.height, Math.ceil((region[1] + region[3]) * scale)
+            );
+
+            if (right > left && bottom > top) {
+                sent = [left, top, right - left, bottom - top];
+            }
+        }
+
+        if (sent) {
+            context.fillStyle = MASK_GREY;
+            context.fillRect(0, 0, scratch.width, scratch.height);
+            context.drawImage(
+                video,
+                sent[0] / scale, sent[1] / scale,
+                sent[2] / scale, sent[3] / scale,
+                sent[0], sent[1], sent[2], sent[3]
+            );
+        } else {
+            context.drawImage(video, 0, 0, scratch.width, scratch.height);
+        }
 
         inFlight = true;
 
         scratch.toBlob(function (blob) {
             if (!blob) { inFlight = false; return; }
 
+            var sentAt = Date.now();
+
             post(FRAME_URL, {
-                headers: { "Content-Type": "image/jpeg" },
+                headers: sent
+                    ? { "Content-Type": "image/jpeg", "X-Face-Region": sent.join(",") }
+                    : { "Content-Type": "image/jpeg" },
                 body: blob
             })
                 .then(function (response) {
+                    noteReplyTime(Date.now() - sentAt);
                     if (handleAuthFailure(response)) { return null; }
                     return response.json();
                 })
@@ -258,7 +373,39 @@
                 .then(function () {
                     inFlight = false;
                 });
-        }, "image/jpeg", 0.92);
+        }, "image/jpeg", upload.quality);
+    }
+
+    function noteReplyTime(elapsed) {
+        if (elapsed < SLOW_REPLY_MS) {
+            slowReplies = 0;
+            return;
+        }
+
+        slowReplies += 1;
+
+        if (slowReplies < SLOW_REPLIES || tier === TIERS.length - 1) { return; }
+
+        tier += 1;
+        slowReplies = 0;
+        showUploadSize();
+    }
+
+    function showUploadSize() {
+        // Said on the page, so a capture that is slow on a slow link is not
+        // mistaken for one that is broken.
+        var note = document.getElementById("upload-note");
+
+        if (!note) {
+            note = document.createElement("p");
+            note.id = "upload-note";
+            note.className = "camera-detail";
+            cameraDetail.parentNode.insertBefore(note, cameraDetail.nextSibling);
+        }
+
+        note.textContent =
+            "Slow connection: sending smaller pictures (" +
+            TIERS[tier].width + " wide) to keep the capture moving.";
     }
 
     function start() {

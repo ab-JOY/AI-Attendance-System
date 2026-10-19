@@ -145,3 +145,58 @@ student passing is not an FAR/FRR figure.
 3. **RA 10173:** Cloudflare decrypts traffic in transit, including enrolment frames and
    the browser camera's frames. It belongs in `docs/data_privacy.md`.
 4. Whether to fix the mobile endpoint's missing liveness and its 70.0 threshold.
+
+---
+
+## 7. Addendum 2026-10-19: face capture through the Cloudflare tunnel
+
+**Reported:** capture opened through the tunnel never saved an image (0 of 100,
+no box). **Measured:** this PC uploads through the tunnel at **15-70 KB/s**, and a
+400 KB body took 5.7 s and 25.7 s, against 0.016 s locally. `enrol.js` sent
+1920x1080 at JPEG 0.92 with one frame in flight, so the stage hold never completed.
+This is L39 again, for enrolment.
+
+- **`enrol.js` steps down only when replies are slow:** 1920/0.92 → 1280/0.8 →
+  `MIN_NATIVE_FRAME_WIDTH` (960)/0.7, after 3 consecutive replies over 700 ms. On localhost
+  it stays at 1920/0.92, so localhost captures are unchanged. Quality is
+  never below 0.7, because JPEG blocking inflates the Laplacian the blur gate reads.
+  The page says when it has stepped down.
+- **Every gate still runs on the saved crop at every tier.** A smaller upload cannot save
+  a crop below the blur, brightness or contrast floor. It can only be refused more often.
+- **Provenance:** `/enrol/frame` decodes with the new `infra.uploads.decode_native()` and
+  records the real upload width and bytes. The log line on finish or cancel
+  reads e.g. `from 160 frames (960px x150, 1920px x10), 48 KB average`.
+  **A capture built from 960 frames has less detail than one from 1920.** If any
+  evaluation figure uses such students, say so.
+- **Bug found and fixed: the "idle" timeout was a total-duration cap.**
+  `EnrolmentSession.age_seconds` counted from Start, so a capture still receiving frames
+  was swept at 300 s. It now counts from the last frame. Test added and mutation-checked.
+- **Not verified:** the step-down in a real browser (no browser automation
+  installed), the real frame sizes from the user's webcam, and how many images the blur gate
+  refuses at 960. The finish log line answers all three after one real capture.
+- **Tests:** fast suite 1,602 passed, 90 skipped. Slow enrolment smoke tests pass.
+
+### Round 2 (same day): only the face is uploaded
+
+- **Measured first real tunnel capture** (`23-1-1-0918`, Jeff's **real** dataset, recaptured by
+  the user, not a test student; the old images are gone): 8 min 10 s, 268 frames
+  (1920 x3, 1280 x3, 960 x262), 60 KB average, 1.8 s/frame, about 33 KB/s up. The
+  step-down worked. The idle-timeout fix was necessary (8 min > 300 s).
+  **Jeff's dataset now comes from 960-wide uploads.** Recapture on localhost if any
+  accuracy figure depends on him.
+- **`enrol.js` now sends only the face region**, the last returned box plus a 35%
+  margin. The rest of the frame is flat grey (96), at full frame size, so geometry is
+  unchanged. Every 15th upload, and any upload after a reply with no box, is the
+  whole frame (re-acquisition, and the many-faces gate). Measured on a real webcam
+  screenshot at 960: 46 → 24 KB (q0.7), 98 → 45 KB (q0.92). That's a ratio from a
+  screenshot, not live camera bytes.
+- **Guard: `EnrolmentSession._crop_was_sent()`.** The browser names the region in
+  `X-Face-Region` (upload pixels). `infra.uploads.canonical_region()` maps it,
+  rounding inward by 1 px. A mask of it goes through **the same `align` hook** as the
+  face, and the crop is refused (`ALIGN_FAILED`, hold reset) unless every crop pixel is 255
+  or `align` raises. An unreadable header is a 400, not ignored. Both refusal paths are
+  mutation-checked: the unit tests cover the strict pixel check, and the real-face slow
+  test (real MediaPipe and `align_face`) covers the raise path.
+- **Fast suite:** 1,619 passed, 90 skipped. Slow enrolment tests pass.
+- **Still not verified:** a real capture with masking, in a browser. Its
+  finish log line gives frames, widths and KB.

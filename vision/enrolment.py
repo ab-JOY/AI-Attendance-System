@@ -40,6 +40,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
+
 from vision import pose as pose_gates
 from vision.geometry import box_to_xywh, get_face_box
 from vision.quality import ENROLMENT_QUALITY, quality_issue
@@ -317,6 +319,7 @@ class EnrolmentSession:
         self._hold_stage: str | None = None
         self._hold_count = 0
         self._started_at = hooks.now()
+        self._last_frame_at = self._started_at
 
         # The geometry refusal currently being reported, so `_note_refusal()`
         # can log on the transition rather than on every frame.
@@ -338,7 +341,18 @@ class EnrolmentSession:
 
     @property
     def age_seconds(self) -> float:
-        return self._hooks.now() - self._started_at
+        """
+        Seconds since the last frame, or since the start if none has arrived.
+
+        ⚠️ **Since the last frame, not since the start** (2026-10-19). This is
+        what `EnrolmentSlot.current()` sweeps an abandoned capture by, and it
+        used to be the time since Start - so the "idle" timeout was really a
+        five-minute cap on the whole capture. That was invisible on localhost,
+        where a capture takes about two minutes, and fatal through a tunnel,
+        where a slow link stretches a capture that is still running well past
+        five minutes and it would be thrown away midway.
+        """
+        return self._hooks.now() - self._last_frame_at
 
     def progress(self) -> FrameVerdict:
         """The current state with no frame offered, for a page that just loaded."""
@@ -359,7 +373,7 @@ class EnrolmentSession:
     # The frame
     # ------------------------------------------------------------------
 
-    def offer_frame(self, frame: Any) -> FrameVerdict:
+    def offer_frame(self, frame: Any, sent_region=None) -> FrameVerdict:
         """
         Judge one frame, and save it if it passes every gate.
 
@@ -368,10 +382,17 @@ class EnrolmentSession:
         only once framing has been agreed. Every failure resets the hold
         counter, so a stage has to be held continuously rather than
         cumulatively.
+
+        `sent_region` is `(x, y, width, height)` in this frame's pixels when
+        the browser sent only that part of the picture and greyed out the
+        rest (a slow link - see static/js/enrol.js). A crop that would take
+        any pixel from outside it is refused rather than saved.
         """
         self._require_canonical_frame(frame)
 
         with self._lock:
+            self._last_frame_at = self._hooks.now()
+
             if self.done:
                 raise EnrolmentComplete(
                     f"{self.student_id} already has all {self.plan.total} images"
@@ -433,6 +454,13 @@ class EnrolmentSession:
                     stage, ALIGN_FAILED, box=(x, y, box_width, box_height)
                 )
 
+            if sent_region is not None and not self._crop_was_sent(
+                frame, landmarks, sent_region
+            ):
+                return self._refuse(
+                    stage, ALIGN_FAILED, box=(x, y, box_width, box_height)
+                )
+
             issue = quality_issue(aligned, ENROLMENT_QUALITY)
 
             if issue:
@@ -466,6 +494,31 @@ class EnrolmentSession:
                 "threshold in vision/pose.py was tuned at that size and two of "
                 "them are absolute pixels; resize before offering the frame."
             )
+
+    def _crop_was_sent(self, frame, landmarks, sent_region) -> bool:
+        """
+        Whether every pixel of the aligned crop came from inside `sent_region`.
+
+        ⚠️ **The mask goes through the same `align` hook as the face**, so this
+        cannot drift from the real crop's geometry the way a hand-computed
+        bounding box would. Outside the region the browser sent flat grey,
+        and a crop with a grey wedge in it passes the quality gates and would
+        be saved as this student's face - silently, on a head that moved
+        between two uploads.
+
+        Strictly 255 everywhere: a crop that samples within a pixel of the
+        region's edge is refused too, since the browser may blend there.
+        """
+        x, y, width, height = sent_region
+        mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+        mask[y : y + height, x : x + width] = 255
+
+        try:
+            aligned_mask = self._hooks.align(mask, landmarks)
+        except ValueError:
+            return False
+
+        return int(aligned_mask.min()) == 255
 
     def _usable_faces(self, frame, width, height):
         """

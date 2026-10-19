@@ -30,6 +30,7 @@ browser needs TLS configured - see `config/settings.py`.
 from __future__ import annotations
 
 import logging
+from collections import Counter
 
 import mysql.connector
 from flask import (
@@ -43,7 +44,12 @@ from flask import (
 
 from infra import dataset_store
 from infra.db import db_cursor
-from infra.uploads import UploadRejected, decode_frame
+from infra.uploads import (
+    UploadRejected,
+    canonical_region,
+    canonicalise,
+    decode_native,
+)
 from repositories import enrolments as enrolments_repo
 from repositories import students as students_repo
 from repositories import subjects as subjects_repo
@@ -253,6 +259,74 @@ def enrol_start():
     }), 201
 
 
+def _note_upload(capture_session, width, size):
+    """
+    Count the width and size of one upload against its capture.
+
+    The capture page sends smaller frames when replies are slow (a Cloudflare
+    tunnel, a phone on mobile data), down to MIN_NATIVE_FRAME_WIDTH. The
+    saved crops still pass every quality gate, but a crop cut from a 960-wide
+    frame has less detail than one from 1920, and an accuracy figure has to be
+    able to say which captures were which. Read from the decoded frame, so it
+    is what arrived rather than what the browser claims.
+    """
+    uploads = getattr(capture_session, "uploads", None)
+
+    if uploads is None:
+        uploads = capture_session.uploads = {"widths": Counter(), "bytes": 0}
+
+    uploads["widths"][width] += 1
+    uploads["bytes"] += size
+
+
+# Set by static/js/enrol.js when it sent only the face and greyed out the rest:
+# "x,y,width,height" in the upload's own pixels.
+SENT_REGION_HEADER = "X-Face-Region"
+
+
+def _sent_region(native):
+    """
+    The header's region on the canonical frame, None for a whole frame, or
+    False if the header is present and unusable.
+
+    ⚠️ Unusable is refused, not ignored: ignoring it would judge a mostly-grey
+    frame as if all of it were real, which is the one thing the region exists
+    to prevent.
+    """
+    raw = request.headers.get(SENT_REGION_HEADER)
+
+    if raw is None:
+        return None
+
+    try:
+        region = tuple(int(part) for part in raw.split(","))
+    except ValueError:
+        return False
+
+    if len(region) != 4 or region[2] <= 0 or region[3] <= 0:
+        return False
+
+    height, width = native.shape[:2]
+
+    return canonical_region(region, (width, height)) or False
+
+
+def _describe_uploads(capture_session):
+    """One log-line summary of what a capture was built from."""
+    uploads = getattr(capture_session, "uploads", None)
+
+    if not uploads:
+        return "no frames"
+
+    frames = sum(uploads["widths"].values())
+    widths = ", ".join(
+        f"{width}px x{count}"
+        for width, count in sorted(uploads["widths"].items(), reverse=True)
+    )
+
+    return f"{frames} frames ({widths}), {uploads['bytes'] // frames // 1024} KB average"
+
+
 @enrolment_bp.route('/enrol/frame', methods=['POST'])
 @role_required('admin')
 @json_api
@@ -265,15 +339,26 @@ def enrol_frame():
             "No capture is in progress. Start one first.", status=409
         )
 
+    body = request.get_data()
+
     try:
-        frame = decode_frame(request.get_data(), request.content_type)
+        native = decode_native(body, request.content_type)
     except UploadRejected as error:
         # Safe to relay: infra/uploads.py's messages describe the picture, not
         # the server, and a test asserts they cannot leak a path or a library.
         return enrolment_json(str(error))
 
+    _note_upload(capture_session, native.shape[1], len(body))
+
+    sent_region = _sent_region(native)
+
+    if sent_region is False:
+        return enrolment_json("The face region of that frame could not be read.")
+
     try:
-        verdict = capture_session.offer_frame(frame)
+        verdict = capture_session.offer_frame(
+            canonicalise(native), sent_region=sent_region
+        )
     except EnrolmentComplete:
         return jsonify({
             "success": True,
@@ -424,7 +509,10 @@ def enrol_finish():
 
     enrolment_slot.release()
 
-    logger.info("Enrolment complete for %s; starting a retrain", student_id)
+    logger.info(
+        "Enrolment complete for %s from %s; starting a retrain",
+        student_id, _describe_uploads(capture_session),
+    )
     training_job.start(started_by=session.get('user'))
 
     # ⚠️ **flash(), not the JSON message** (US-10). The page shows the message
@@ -475,9 +563,10 @@ def enrol_cancel():
         return jsonify({"success": True, "message": "Nothing to cancel."})
 
     logger.info(
-        "Enrolment cancelled for %s after %d image(s)",
+        "Enrolment cancelled for %s after %d image(s), from %s",
         capture_session.student_id,
         capture_session.captured,
+        _describe_uploads(capture_session),
     )
 
     enrolment_slot.abandon()

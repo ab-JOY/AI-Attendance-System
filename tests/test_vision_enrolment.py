@@ -941,3 +941,103 @@ def test_finishing_frees_the_slot():
 
 def test_finishing_an_empty_registry_is_harmless():
     assert EnrolmentRegistry().finish() is None
+
+
+# ==============================
+# Idle, not total, time
+# ==============================
+
+
+def test_a_capture_that_keeps_receiving_frames_never_ages():
+    """
+    `age_seconds` is what EnrolmentSlot sweeps an abandoned capture by. It
+    used to count from Start, so a capture still receiving frames over a slow
+    link was thrown away once it passed the five-minute "idle" timeout.
+    """
+    harness = Harness(faces=[])
+
+    for _ in range(20):
+        harness.clock.advance(60)
+        harness.offer()
+
+        assert harness.session.age_seconds == 0
+
+    harness.clock.advance(45)
+
+    assert harness.session.age_seconds == 45
+
+
+def test_a_capture_with_no_frames_ages_from_its_start():
+    harness = Harness()
+
+    harness.clock.advance(400)
+
+    assert harness.session.age_seconds == 400
+
+
+# ==============================
+# Frames where only the face was sent
+# ==============================
+
+# The fake aligner's crop is this window of whatever it is given, so whether
+# the crop stays inside a sent region is a fact the test controls exactly.
+CROP_WINDOW = (800, 300, 300, 400)  # x, y, width, height
+
+
+def windowed_align(image, _landmarks):
+    if image.ndim == 2:  # the guard's mask
+        x, y, width, height = CROP_WINDOW
+        return image[y : y + height, x : x + width]
+
+    rng = np.random.default_rng(1234)
+    return rng.integers(40, 210, size=(200, 200), dtype=np.uint8)
+
+
+def held_harness():
+    harness = Harness(align=windowed_align)
+    harness.offer(5)
+    return harness
+
+
+def test_a_crop_inside_the_sent_region_is_saved():
+    harness = held_harness()
+    x, y, width, height = CROP_WINDOW
+
+    verdict = harness.session.offer_frame(
+        canonical_frame(), sent_region=(x - 10, y - 10, width + 20, height + 20)
+    )
+
+    assert verdict.accepted
+    assert len(harness.saved) == 1
+
+
+@pytest.mark.parametrize("cut", ["left", "top", "right", "bottom", "edge"])
+def test_a_crop_reaching_outside_the_sent_region_is_refused(cut):
+    """
+    The browser sent grey outside the region. A crop taking any of it would
+    pass every quality gate and be saved as the student's face.
+    """
+    harness = held_harness()
+    x, y, width, height = CROP_WINDOW
+
+    region = {
+        "left": (x + 5, y, width, height),
+        "top": (x, y + 5, width, height),
+        "right": (x, y, width - 5, height),
+        "bottom": (x, y, width, height - 5),
+        # Exactly the window but one pixel short: strict, not "nearly".
+        "edge": (x, y, width - 1, height),
+    }[cut]
+
+    verdict = harness.session.offer_frame(canonical_frame(), sent_region=region)
+
+    assert not verdict.accepted
+    assert verdict.message == ALIGN_FAILED
+    assert harness.saved == []
+    assert verdict.hold == 0, "A refused frame must reset the hold"
+
+
+def test_a_whole_frame_is_not_checked_against_any_region():
+    harness = held_harness()
+
+    assert harness.session.offer_frame(canonical_frame()).accepted

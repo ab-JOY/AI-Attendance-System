@@ -420,3 +420,129 @@ def test_a_real_frame_is_accepted_as_a_jpeg_upload(client):
     frame = decode_frame(io.BytesIO(body).getvalue(), "image/jpeg")
 
     assert frame.shape[:2] == (CANONICAL_FRAME_HEIGHT, CANONICAL_FRAME_WIDTH)
+
+
+def test_smaller_uploads_are_accepted_and_recorded_at_their_real_width(client):
+    """
+    On a slow link the capture page steps down to MIN_NATIVE_FRAME_WIDTH. The
+    server must still judge those frames, and must record what actually
+    arrived so a capture built from smaller frames can be told apart later.
+    """
+    import web.enrolment as enrolment_module
+    from vision.pose import MIN_NATIVE_FRAME_WIDTH
+
+    sign_in(client)
+    start(client)
+
+    small = cv2.resize(
+        blank_frame(),
+        (MIN_NATIVE_FRAME_WIDTH, MIN_NATIVE_FRAME_WIDTH * 9 // 16),
+    )
+
+    assert send_frame(client).status_code == 200
+    assert send_frame(client, small).status_code == 200
+
+    uploads = enrolment_module.enrolment_slot.current().uploads
+
+    assert dict(uploads["widths"]) == {
+        CANONICAL_FRAME_WIDTH: 1, MIN_NATIVE_FRAME_WIDTH: 1,
+    }
+    assert uploads["bytes"] > 0
+
+
+def test_an_upload_narrower_than_the_floor_is_still_refused(client):
+    from vision.pose import MIN_NATIVE_FRAME_WIDTH
+
+    sign_in(client)
+    start(client)
+
+    narrow = cv2.resize(blank_frame(), (MIN_NATIVE_FRAME_WIDTH - 2, 500))
+    response = send_frame(client, narrow)
+
+    assert response.status_code == 400
+    assert "pixels wide" in response.get_json()["message"]
+
+
+def send_region(client, frame, region):
+    return client.post(
+        "/enrol/frame",
+        data=jpeg_bytes(frame),
+        content_type="image/jpeg",
+        headers={"X-Face-Region": region},
+    )
+
+
+@pytest.mark.parametrize(
+    "region", ["", "1,2,3", "a,b,c,d", "0,0,0,10", "0,0,10,-5", "5000,5000,10,10"]
+)
+def test_an_unreadable_face_region_is_refused_not_ignored(client, region):
+    """Ignoring it would judge a mostly grey frame as if all of it were real."""
+    sign_in(client)
+    start(client)
+
+    response = send_region(client, blank_frame(), region)
+
+    assert response.status_code == 400
+    assert not response.get_json()["success"]
+
+
+def test_a_frame_with_a_face_region_is_judged(client):
+    sign_in(client)
+    start(client)
+
+    response = send_region(client, blank_frame(), "100,100,600,600")
+
+    assert response.status_code == 200
+    assert response.get_json()["success"]
+
+
+@pytest.mark.slow
+@pytestmark_dataset
+def test_real_faces_cut_by_the_sent_region_are_never_saved(client):
+    """
+    Real MediaPipe and the real `align_face`, through the route: the same
+    frame that gets past alignment with the whole face sent is refused when
+    the region cuts into the face. This is the guard working on the geometry
+    of a real crop, not on a fake one.
+    """
+    from vision.enrolment import ALIGN_FAILED
+
+    crops = real_crops()
+
+    if not crops:
+        pytest.skip("no populated dataset folder with enough images")
+
+    sign_in(client)
+    assert start(client).status_code == 201
+
+    # The composite's face square, in canonical pixels.
+    x = (CANONICAL_FRAME_WIDTH - COMPOSITE_SIZE) // 2
+    y = (CANONICAL_FRAME_HEIGHT - COMPOSITE_SIZE) // 2
+    whole = f"{x - 40},{y - 40},{COMPOSITE_SIZE + 80},{COMPOSITE_SIZE + 80}"
+    centre = COMPOSITE_SIZE // 4
+    cut = f"{x + centre},{y + centre},{COMPOSITE_SIZE // 2},{COMPOSITE_SIZE // 2}"
+
+    # Refused before alignment, so they say nothing about the region.
+    before_alignment = {
+        "No face detected.", "Only one face is allowed in frame.",
+        "Center your face.", "Move farther.", "Move closer.",
+    }
+
+    compared = 0
+
+    for crop in crops:
+        frame = composite(crop)
+
+        whole_message = send_region(client, frame, whole).get_json()["progress"]["message"]
+
+        if whole_message in before_alignment or whole_message == ALIGN_FAILED:
+            continue
+
+        compared += 1
+        cut_body = send_region(client, frame, cut).get_json()
+
+        assert cut_body["progress"]["message"] == ALIGN_FAILED
+        assert not cut_body["progress"]["accepted"]
+
+    if not compared:
+        pytest.skip("no composited frame reached alignment")
