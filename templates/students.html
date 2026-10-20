@@ -88,83 +88,23 @@
             </select>
 
             <label for="section">Section</label>
-            <input
-                type="text"
+            <select
                 id="section"
                 name="section"
-                maxlength="100"
-                placeholder="Enter Section"
                 required>
 
-            {#
-                US-10. Registering a student used to write the `students` row
-                and nothing else, so the relation the camera actually checks -
-                `enrolments` - was only ever created on a different screen this
-                form never mentioned. The ordinary path therefore ended in
-                "Not Enrolled" for a student who had just been enrolled.
-
-                ⚠️ This does not replace Subjects → Class List. A student's
-                classes change every term, and this form is only ever seen
-                once. It is the first class list, not the only way to have one.
-
-                Nothing is written when this is submitted: the ids ride along
-                with the capture and are applied with the student row at the
-                end, in one transaction (FS-9).
-            #}
-            {#
-                DM-7. One group per section a subject is taught to, so the
-                section is the heading rather than a suffix on every subject
-                name - and each group says which program it belongs to, which
-                is what static/js/students.js reads: only the chosen program's
-                groups are shown, and the group for the student's own year
-                level and section is selected for them.
-
-                ⚠️ The filter is a convenience. /enrol/finish is what refuses
-                a subject of another program (`subjects_repo.existing_ids`).
-
-                A group with no program is a subject not linked to a section
-                yet. It belongs to no program, so it is offered to all of them.
-            #}
-            <label for="subject_ids">
-                Classes
-                <span class="hint">
-                    optional — hold Ctrl (or ⌘) to choose more than one
-                </span>
-            </label>
-            <select
-                id="subject_ids"
-                name="subject_ids"
-                multiple
-                size="6"
-                data-class-picker
-                aria-describedby="subject_ids_help">
-
-                {% for group in class_groups %}
-                    <optgroup
-                        label="{{ group.label }}"
-                        data-program-id="{{ group.program_id or '' }}"
-                        data-year-level="{{ group.year_level or '' }}"
-                        data-section="{{ group.section or '' }}">
-                        {% for subject in group.subjects %}
-                            <option value="{{ subject.id }}">
-                                {{ subject.subject_code }} - {{ subject.subject_name }}
-                            </option>
-                        {% endfor %}
-                    </optgroup>
+                <option value="">Select Section</option>
+                {% for section in ["A", "B", "C", "D"] %}
+                    <option value="{{ section }}">Section {{ section }}</option>
                 {% endfor %}
 
             </select>
 
-            <p id="subject_ids_help" class="hint">
-                Only the subjects of the chosen program are listed, under the
-                year level and section each is taught to. The subjects of the
-                student's own section are selected for you; change the
-                selection for a student who takes a class with another section.
-                A student who is in no class is recognised by the camera but
-                cannot have attendance recorded. This can be set later from
-                Subjects → Class List.
-            </p>
-
+            {#
+                No class list here: a student is put into their classes from
+                Subjects → Class List. /enrol treats a missing `subject_ids`
+                as an empty list.
+            #}
             <button type="submit">
                 Register Student & Capture Face
             </button>
@@ -271,5 +211,4 @@
 
 {% block scripts %}
 <script src="{{ url_for('static', filename='js/training.js') }}" defer></script>
-<script src="{{ url_for('static', filename='js/students.js') }}" defer></script>
 {% endblock %}

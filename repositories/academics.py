@@ -20,7 +20,7 @@ MAX_SECTION_NAME = 100
 
 # What the forms offer. A bound on the value, not a claim about any curriculum:
 # without one a typed 40 becomes a section nobody can find again.
-YEAR_LEVELS = (1, 2, 3, 4, 5, 6)
+YEAR_LEVELS = (1, 2, 3, 4)
 
 
 def departments(cursor):

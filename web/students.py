@@ -16,7 +16,6 @@ from infra import dataset_store
 from infra.db import db_cursor
 from repositories import academics as academics_repo
 from repositories import students as students_repo
-from repositories import subjects as subjects_repo
 from security.access import role_required
 from security.passwords import PasswordTooLongError, hash_password
 from security.paths import (
@@ -114,18 +113,15 @@ def class_groups(offerings):
 @students_bp.route('/students')
 @role_required('admin')
 def students():
-    # The registration form on this page now offers the student's first class
-    # list (US-10), so it needs the offerings to choose from - the same
-    # selection the attendance dropdown uses.
+    # No class list on this form: a new student is put into their classes
+    # from Subjects -> Class List.
     with db_cursor(dictionary=True) as cursor:
         records = students_repo.all_students(cursor)
-        offerings = subjects_repo.for_selection(cursor)
         programs = academics_repo.programs(cursor)
 
     return render_template(
         'students.html',
         students=records,
-        class_groups=class_groups(offerings),
         programs=programs,
         year_levels=academics_repo.YEAR_LEVELS,
     )

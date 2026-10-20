@@ -124,10 +124,6 @@ def student_lists(monkeypatch):
     monkeypatch.setattr(
         students_module.students_repo, "all_students", lambda _cursor: STUDENTS
     )
-    monkeypatch.setattr(
-        students_module.subjects_repo, "for_selection", lambda _cursor: []
-    )
-
     for name in ("departments", "programs", "sections"):
         monkeypatch.setattr(
             students_module.academics_repo, name, lambda _cursor: []
@@ -274,13 +270,29 @@ class ClassPicker(HTMLParser):
 
 
 def class_picker(client, monkeypatch, offerings):
-    import web.students as students_module
+    """The picker as Face Capture draws it - /students no longer has one."""
+    import web.enrolment as enrolment_module
 
+    monkeypatch.setattr(enrolment_module, "db_cursor", fake_cursor)
     monkeypatch.setattr(
-        students_module.subjects_repo, "for_selection", lambda _cursor: offerings
+        enrolment_module.subjects_repo, "for_selection",
+        lambda _cursor, instructor_id=None: offerings,
+    )
+    monkeypatch.setattr(
+        enrolment_module.enrolments_repo, "enrolled_in",
+        lambda _cursor, _subject_id: [],
+    )
+    monkeypatch.setattr(
+        enrolment_module.academics_repo, "programs", lambda _cursor: []
     )
 
-    response = client.get("/students")
+    from security.access import INSTRUCTOR_KEY
+
+    with client.session_transaction() as session:
+        session["role"] = "instructor"
+        session[INSTRUCTOR_KEY] = 1
+
+    response = client.get("/class_capture")
 
     assert response.status_code == 200, response.get_data(as_text=True)[:400]
 
@@ -339,8 +351,43 @@ def test_a_subject_is_named_without_its_section(client, student_lists, monkeypat
     ]
 
 
-def test_the_registration_page_loads_the_script_that_filters_the_classes(
-    client, student_lists
+def test_the_registration_page_offers_no_class_list(client, student_lists):
+    """Classes are set from Subjects -> Class List, not at registration."""
+    page = client.get("/students").get_data(as_text=True)
+
+    assert "data-class-picker" not in page
+    assert 'name="subject_ids"' not in page
+
+
+def test_the_registration_page_offers_sections_a_to_d(client, student_lists):
+    page = client.get("/students").get_data(as_text=True)
+
+    for section in "ABCD":
+        assert f'<option value="{section}">Section {section}</option>' in page
+
+    assert '<option value="5">' not in page
+
+
+@pytest.mark.parametrize("saved, selected", [("B", "B"), ("b", "B"), ("4B", None)])
+def test_the_edit_page_offers_sections_a_to_d(
+    client, student_lists, monkeypatch, saved, selected
 ):
-    """Without it every program's subjects are listed, as before."""
-    assert "js/students.js" in client.get("/students").get_data(as_text=True)
+    """The saved section is preselected; one outside A-D must be re-chosen."""
+    import web.students as students_module
+
+    monkeypatch.setattr(
+        students_module.students_repo, "details",
+        lambda _cursor, _student_id: {
+            "student_id": "S1", "name": "A Student", "program_id": 5,
+            "year_level": 1, "section": saved,
+        },
+    )
+
+    page = client.get("/edit_student/S1").get_data(as_text=True)
+    chosen = [
+        section for section in "ABCD"
+        if f'<option value="{section}"\n                        selected>' in page
+    ]
+
+    assert all(f'<option value="{section}"' in page for section in "ABCD")
+    assert chosen == ([selected] if selected else [])

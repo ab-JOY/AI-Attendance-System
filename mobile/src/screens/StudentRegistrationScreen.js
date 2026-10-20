@@ -80,8 +80,8 @@ export default function StudentRegistrationScreen({ navigation }) {
 
     // The server stores a student against a section, which is a program, a
     // year level and a name - so it refuses a year level that is not a number.
-    if (!/^[1-6]$/.test(formData.year_level.trim())) {
-      setError('Year level must be a number from 1 to 6.');
+    if (!/^[1-4]$/.test(formData.year_level.trim())) {
+      setError('Year level must be a number from 1 to 4.');
       return;
     }
 

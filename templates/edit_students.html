@@ -81,13 +81,23 @@
             <!-- Section -->
             <label for="section"><strong>Section</strong></label>
 
-            <input
-                type="text"
+            {# A student saved under any other section name gets no option
+               selected, so the form cannot be saved until A-D is chosen.
+               Matched case-insensitively, as the database matches them. #}
+            <select
                 id="section"
                 name="section"
-                value="{{ student.section or '' }}"
-                maxlength="100"
                 required>
+
+                <option value="">Select Section</option>
+                {% for section in ["A", "B", "C", "D"] %}
+                    <option value="{{ section }}"
+                        {% if (student.section or '')|upper == section %}selected{% endif %}>
+                        Section {{ section }}
+                    </option>
+                {% endfor %}
+
+            </select>
 
             <!-- Student Password -->
             <label for="password"><strong>New Password (Optional)</strong></label>
