@@ -17,6 +17,7 @@ from infra.db import db_cursor
 from repositories import attendance as attendance_repo
 from security.paths import UnsafeStudentPathError, validate_student_id
 from services.punctuality import derive_status
+from train_model import MODEL_FILES_LOCK
 from vision.geometry import FaceBox, get_face_box
 from vision.landmarks import LEFT_EYE_OUTER, NOSE_TIP, RIGHT_EYE_OUTER
 from vision.liveness import LivenessChallenge, LivenessConfig
@@ -134,62 +135,67 @@ def load_model_and_labels():
     new_recognizer = (
         cv2.face.LBPHFaceRecognizer_create()
     )
-    new_recognizer.read(TRAINER_FILE)
+    # Both files are open only inside the lock, so a retrain finishing
+    # meanwhile waits to rename them rather than failing (lessons.md L36).
+    with MODEL_FILES_LOCK:
+        new_recognizer.read(TRAINER_FILE)
+
+        with open(
+            LABELS_FILE,
+            encoding="utf-8"
+        ) as labels_file:
+            label_lines = labels_file.readlines()
 
     new_label_map = {}
     loaded_student_ids = set()
 
-    with open(
-        LABELS_FILE,
-        encoding="utf-8"
-    ) as labels_file:
-        for line_number, line in enumerate(
-            labels_file,
-            start=1
-        ):
-            line = line.strip()
+    for line_number, line in enumerate(
+        label_lines,
+        start=1
+    ):
+        line = line.strip()
 
-            if not line:
-                continue
+        if not line:
+            continue
 
-            try:
-                label_text, id_text = line.split(
-                    ",",
-                    1
-                )
+        try:
+            label_text, id_text = line.split(
+                ",",
+                1
+            )
 
-                label = int(label_text.strip())
+            label = int(label_text.strip())
 
-                # `{label},{student_id}`. It was `{label},{id}_{name}` before
-                # todo.md §7.5, and validate_student_id refuses an underscore,
-                # so an un-migrated labels.txt fails here with the line quoted
-                # rather than loading a model whose identities are wrong.
-                student_id = validate_student_id(id_text)
+            # `{label},{student_id}`. It was `{label},{id}_{name}` before
+            # todo.md §7.5, and validate_student_id refuses an underscore,
+            # so an un-migrated labels.txt fails here with the line quoted
+            # rather than loading a model whose identities are wrong.
+            student_id = validate_student_id(id_text)
 
-                if label in new_label_map:
-                    raise ValueError(
-                        f"Duplicate LBPH label {label}"
-                    )
-
-                if student_id in loaded_student_ids:
-                    raise ValueError(
-                        f"Duplicate student ID {student_id}"
-                    )
-
-                new_label_map[label] = {
-                    "student_id": student_id,
-                    "name": student_id,
-                }
-
-                loaded_student_ids.add(
-                    student_id
-                )
-
-            except (ValueError, UnsafeStudentPathError) as error:
+            if label in new_label_map:
                 raise ValueError(
-                    "Invalid labels.txt entry on line "
-                    f"{line_number}: {line} ({error})"
-                ) from error
+                    f"Duplicate LBPH label {label}"
+                )
+
+            if student_id in loaded_student_ids:
+                raise ValueError(
+                    f"Duplicate student ID {student_id}"
+                )
+
+            new_label_map[label] = {
+                "student_id": student_id,
+                "name": student_id,
+            }
+
+            loaded_student_ids.add(
+                student_id
+            )
+
+        except (ValueError, UnsafeStudentPathError) as error:
+            raise ValueError(
+                "Invalid labels.txt entry on line "
+                f"{line_number}: {line} ({error})"
+            ) from error
 
     if not new_label_map:
         raise ValueError(
@@ -921,6 +927,20 @@ def start_camera(subject, camera=None):
 def stop_camera():
     """End the session and release the camera."""
     session.stop()
+
+
+def preload_model_in_background():
+    """
+    Read the model on a daemon thread, so Start does not wait 8-21 s for it.
+
+    See `RecognitionSession.preload_model`. Called when the server starts;
+    after a retrain, the training job calls `session.preload_model()` itself.
+    """
+    threading.Thread(
+        target=session.preload_model,
+        name="model-preload",
+        daemon=True,
+    ).start()
 
 
 # ⚠️ `attendance_is_running()` used to sit here and is gone (Phase 5).

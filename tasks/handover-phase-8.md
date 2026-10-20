@@ -249,3 +249,33 @@ See `todo.md` §13. Uncommitted, on `attendance-browser-camera`.
   Add refuses a second spelling, and Edit renames all sections of the code
   (`subjects_repo.name_for_code` / `rename_code`). `rename_code` compares as BINARY;
   a plain `<>` misses case-only renames under this collation (mutation-checked).
+
+---
+
+## 10. Addendum 2026-10-20: Start no longer waits for trainer.yml
+
+**Reported:** "after starting the session it takes several seconds before the camera
+opens." **Measured (logs/app.log):** every Start after a capture spent **8-21 s** reading
+`trainer.yml` (338 MB YAML at 18 students; it grows with each one). With the model
+unchanged, Start took 0.02 s. The browser camera opens nothing at Start, so the read
+was the whole delay.
+
+- `RecognitionSession.preload_model()` reads the model off the request thread into a
+  *staged* slot; `_refresh_model()` adopts it when its signature still matches the disk,
+  and waits on `_model_lock` for a preload in progress instead of reading twice. A
+  running session never swaps models.
+- **Triggers:** `services.training.train_and_preload` (inside the training job, after a
+  successful retrain; the job shows "Preparing the model for attendance") and
+  `preload_model_in_background()` at start-up in `serve.py` and `app.py`. A retrain run
+  from the command line is not covered; Start then reads the model as before.
+- **L36 guard:** `train_model.MODEL_FILES_LOCK` is held by `load_model_and_labels()` while
+  the files are open and by `write_model_atomically()` around its renames. A retrain now
+  waits for a read rather than failing with WinError 32. This was already a possible
+  failure for a Start that overlapped a retrain.
+- **Memory:** while a session runs, a newer staged model can sit beside the one in use.
+- **Tests:** 7 in `test_recognition_session.py`, 1 in `test_write_model_atomically.py`,
+  2 in `test_background_jobs.py`. Adoption and the lock were both mutation-checked. Fast
+  suite: 1,670 passed, 92 skipped.
+- **Not verified:** the timing with the real model in the running server. After a
+  restart the log should show `Model loaded in the background`, then at Start
+  `Using the model loaded in the background`.

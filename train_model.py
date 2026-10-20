@@ -1,6 +1,7 @@
 import logging
 import os
 import sys
+import threading
 
 import cv2
 import numpy as np
@@ -28,6 +29,11 @@ TRAINER_DIR = str(settings.trainer_dir)
 TRAINER_FILE = str(settings.trainer_file)
 
 LABELS_FILE = str(settings.labels_file)
+
+# Held while the live trainer.yml/labels.txt pair is renamed, and by
+# recognize_face.load_model_and_labels() while it reads them. In-process
+# only: training runs on a thread of the web server (services/training.py).
+MODEL_FILES_LOCK = threading.Lock()
 
 # The new capture program normally creates 100 images.
 # Requiring at least 70 prevents incomplete datasets from
@@ -182,32 +188,37 @@ def write_model_atomically(recognizer, label_dict):
                 os.remove(leftover)
         raise
 
-    # 2. Move the previous good pair aside. A pair is only worth
-    #    keeping if both halves are present; an orphaned trainer.yml
-    #    with no labels.txt is unusable and is simply overwritten.
-    had_previous_model = (
-        os.path.exists(TRAINER_FILE)
-        and os.path.exists(LABELS_FILE)
-    )
+    # Steps 2 and 3 rename the live pair, which Windows refuses while this
+    # process is reading it (lessons.md L36). The attendance model is now
+    # also read in the background after every retrain, so the renames wait
+    # for a read in progress instead of failing the retrain.
+    with MODEL_FILES_LOCK:
+        # 2. Move the previous good pair aside. A pair is only worth
+        #    keeping if both halves are present; an orphaned trainer.yml
+        #    with no labels.txt is unusable and is simply overwritten.
+        had_previous_model = (
+            os.path.exists(TRAINER_FILE)
+            and os.path.exists(LABELS_FILE)
+        )
 
-    if had_previous_model:
-        for backup in (backup_trainer, backup_labels):
-            if os.path.exists(backup):
-                os.remove(backup)
-
-        os.replace(TRAINER_FILE, backup_trainer)
-        os.replace(LABELS_FILE, backup_labels)
-
-    # 3. Promote the new pair, restoring the backup if this fails.
-    try:
-        os.replace(temporary_trainer, TRAINER_FILE)
-        os.replace(temporary_labels, LABELS_FILE)
-
-    except Exception:
         if had_previous_model:
-            os.replace(backup_trainer, TRAINER_FILE)
-            os.replace(backup_labels, LABELS_FILE)
-        raise
+            for backup in (backup_trainer, backup_labels):
+                if os.path.exists(backup):
+                    os.remove(backup)
+
+            os.replace(TRAINER_FILE, backup_trainer)
+            os.replace(LABELS_FILE, backup_labels)
+
+        # 3. Promote the new pair, restoring the backup if this fails.
+        try:
+            os.replace(temporary_trainer, TRAINER_FILE)
+            os.replace(temporary_labels, LABELS_FILE)
+
+        except Exception:
+            if had_previous_model:
+                os.replace(backup_trainer, TRAINER_FILE)
+                os.replace(backup_labels, LABELS_FILE)
+            raise
 
 
 # =====================================================

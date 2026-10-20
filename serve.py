@@ -27,6 +27,7 @@ from waitress import serve
 
 from app import app, check_database_on_startup, sweep_abandoned_enrolments
 from config.settings import settings as app_config
+from recognize_face import preload_model_in_background
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,9 @@ if __name__ == '__main__':
         sys.exit(1)
 
     sweep_abandoned_enrolments()
+
+    # So the first Start after a restart does not wait for trainer.yml.
+    preload_model_in_background()
 
     if app_config.proxy_hops == 0:
         # Not fatal: serving browsers directly is a legitimate setup. But behind

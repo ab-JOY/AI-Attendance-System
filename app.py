@@ -14,6 +14,7 @@ module.
 """
 
 import logging
+import os
 import sys
 
 from config.logging_config import configure_logging
@@ -128,6 +129,13 @@ if __name__ == '__main__':
         sys.exit(1)
 
     sweep_abandoned_enrolments()
+
+    # So the first Start does not wait for trainer.yml. With debug on, the
+    # reloader runs this block twice; only the child (WERKZEUG_RUN_MAIN) serves.
+    if not app_config.flask_debug or os.environ.get("WERKZEUG_RUN_MAIN"):
+        from recognize_face import preload_model_in_background
+
+        preload_model_in_background()
 
     ssl_context = app_config.ssl_context
 

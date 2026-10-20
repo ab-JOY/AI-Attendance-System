@@ -205,6 +205,14 @@ class RecognitionSession:
         self._label_map: dict[int, dict[str, str]] = {}
         self._model_signature: Any = None
 
+        # Serialises model loads, and guards the three fields above and the
+        # staged model. Taken *after* `_lock` (by start) or alone (by
+        # preload_model), never the other way round.
+        self._model_lock = threading.Lock()
+        # `(signature, recognizer, label_map)` loaded by preload_model() and
+        # not yet in use. start() adopts it; a running session never swaps.
+        self._staged_model: tuple[Any, Any, dict[int, dict[str, str]]] | None = None
+
         self._running = False
         self._subject: Any = None
         self._recognized: dict[str, str | None] = {}
@@ -255,36 +263,93 @@ class RecognitionSession:
 
         Returns False when there is no usable model, which is the one condition
         `start()` cannot recover from - there is nothing to recognise against.
+
+        Uses the model `preload_model()` staged when it matches the one on
+        disk, and waits for a preload in progress rather than loading twice.
         """
-        signature = self._hooks.model_signature()
+        with self._model_lock:
+            signature = self._hooks.model_signature()
 
-        if signature is None:
-            logger.error("No trained model available, cannot start attendance")
-            return False
+            if signature is None:
+                logger.error("No trained model available, cannot start attendance")
+                return False
 
-        if signature == self._model_signature and self._recognizer is not None:
-            logger.info(
-                "Model unchanged since it was last loaded, reusing it (%d identities)",
-                len(self._label_map),
-            )
+            if signature == self._model_signature and self._recognizer is not None:
+                logger.info(
+                    "Model unchanged since it was last loaded, reusing it (%d identities)",
+                    len(self._label_map),
+                )
+                return True
+
+            staged, self._staged_model = self._staged_model, None
+
+            if staged is not None and staged[0] == signature:
+                _, recognizer, label_map = staged
+                logger.info("Using the model loaded in the background")
+            else:
+                try:
+                    recognizer, label_map = self._hooks.load_model()
+                except Exception:
+                    logger.exception("Model load failed, cannot start attendance")
+                    return False
+
+                if recognizer is None or not label_map:
+                    logger.error("Model loaded but contains no identities")
+                    return False
+
+            self._recognizer = recognizer
+            self._label_map = label_map
+            self._model_signature = signature
+
+            logger.info("Model loaded: %d student identities", len(label_map))
             return True
 
-        try:
-            recognizer, label_map = self._hooks.load_model()
-        except Exception:
-            logger.exception("Model load failed, cannot start attendance")
-            return False
+    def preload_model(self) -> None:
+        """
+        Load the model on disk now, so the next `start()` does not wait for it.
 
-        if recognizer is None or not label_map:
-            logger.error("Model loaded but contains no identities")
-            return False
+        Reading trainer.yml took 8-21 s at Start (13-18 students, 338 MB,
+        logs/app.log, 2026-10-18..20), every time the model had changed - which
+        is after every capture. Call this off the request thread: after a
+        retrain, and when the server starts. A running session keeps the model
+        it started with; the loaded one waits for the next start().
 
-        self._recognizer = recognizer
-        self._label_map = label_map
-        self._model_signature = signature
+        Never raises. A failure here costs only the head start: start() loads
+        the model itself and reports the failure where the operator sees it.
+        """
+        with self._model_lock:
+            signature = self._hooks.model_signature()
 
-        logger.info("Model loaded: %d student identities", len(label_map))
-        return True
+            if signature is None:
+                return
+
+            if signature == self._model_signature and self._recognizer is not None:
+                return
+
+            if self._staged_model is not None and self._staged_model[0] == signature:
+                return
+
+            # Dropped before loading, so two stale copies are never held at once.
+            self._staged_model = None
+
+            try:
+                recognizer, label_map = self._hooks.load_model()
+            except Exception:
+                logger.warning(
+                    "Background model load failed; Start will load it instead",
+                    exc_info=True,
+                )
+                return
+
+            if recognizer is None or not label_map:
+                return
+
+            self._staged_model = (signature, recognizer, label_map)
+
+            logger.info(
+                "Model loaded in the background: %d student identities",
+                len(label_map),
+            )
 
     # -- lifecycle ---------------------------------------------------------
 

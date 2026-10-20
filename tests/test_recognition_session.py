@@ -280,6 +280,113 @@ def test_a_retrained_model_is_picked_up(session, recorder):
 
 
 # ---------------------------------------------------------------------------
+# Loading the model ahead of Start
+#
+# Start waited 8-21 s for trainer.yml after every capture (logs/app.log,
+# 2026-10-18..20). preload_model() reads it beforehand; start() adopts it.
+# ---------------------------------------------------------------------------
+
+
+def test_start_uses_the_preloaded_model_instead_of_reading_it(session, recorder):
+    session.preload_model()
+    assert recorder.load_calls == 1
+
+    assert session.start("CS401") is True
+    assert recorder.load_calls == 1, "Start read the model the preload had read"
+
+
+def test_preloading_twice_reads_the_model_once(session, recorder):
+    session.preload_model()
+    session.preload_model()
+
+    assert recorder.load_calls == 1
+
+
+def test_preloading_an_unchanged_model_reads_nothing(session, recorder):
+    session.start("CS401")
+    session.preload_model()
+
+    assert recorder.load_calls == 1
+
+
+def test_a_preload_never_changes_the_model_of_a_running_session(recorder):
+    models = []
+
+    def load_model():
+        model = object()
+        models.append(model)
+        return model, {0: {"student_id": "SEC-TEST-NOBODY", "name": "Nobody"}}
+
+    session = RecognitionSession(hooks=recorder.hooks(load_model=load_model))
+    session.start("CS401")
+
+    recorder.signature = ("sig", 2)  # a retrain mid-session
+    session.preload_model()
+
+    assert session.snapshot().recognizer is models[0]
+
+    session.stop()
+    session.start("CS401")
+
+    assert session.snapshot().recognizer is models[1]
+    assert len(models) == 2, "the next Start re-read the preloaded model"
+
+
+def test_a_preload_of_an_older_model_is_not_used(session, recorder):
+    session.preload_model()
+
+    recorder.signature = ("sig", 2)  # retrained after the preload
+    session.start("CS401")
+
+    assert recorder.load_calls == 2, "started on the model the retrain replaced"
+
+
+def test_a_failed_preload_is_quiet_and_start_still_loads(recorder):
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("trainer.yml is being replaced")
+        return object(), {0: {"student_id": "SEC-TEST-NOBODY", "name": "Nobody"}}
+
+    session = RecognitionSession(hooks=recorder.hooks(load_model=flaky))
+
+    session.preload_model()  # must not raise
+    assert session.start("CS401") is True
+    assert len(calls) == 2
+
+
+def test_start_waits_for_a_preload_in_progress_rather_than_reading_twice(recorder):
+    loading = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def slow_load():
+        calls.append(1)
+        loading.set()
+        release.wait(5)
+        return object(), {0: {"student_id": "SEC-TEST-NOBODY", "name": "Nobody"}}
+
+    session = RecognitionSession(hooks=recorder.hooks(load_model=slow_load))
+
+    preload = threading.Thread(target=session.preload_model)
+    preload.start()
+    assert loading.wait(5)
+
+    started = []
+    start = threading.Thread(target=lambda: started.append(session.start("CS401")))
+    start.start()
+
+    release.set()
+    preload.join(5)
+    start.join(5)
+
+    assert started == [True]
+    assert len(calls) == 1, "Start read the model while the preload was reading it"
+
+
+# ---------------------------------------------------------------------------
 # Stopping
 # ---------------------------------------------------------------------------
 

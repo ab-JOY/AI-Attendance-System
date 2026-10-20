@@ -149,6 +149,35 @@ def test_failure_during_promotion_restores_the_backup(model_paths, monkeypatch):
     assert labels.read_text(encoding="utf-8") == "0,good_folder\n"
 
 
+def test_the_live_pair_is_not_renamed_while_it_is_being_read(model_paths):
+    """
+    lessons.md L36: Windows refuses to rename a file this process has open, and
+    the attendance model is now read in the background after every retrain.
+    So the renames wait for MODEL_FILES_LOCK, which the reader holds.
+    """
+    import threading
+
+    trainer, _labels = model_paths
+    train_model.write_model_atomically(FakeRecognizer("old-model"), {0: "old"})
+
+    done = threading.Event()
+
+    def retrain():
+        train_model.write_model_atomically(FakeRecognizer("new-model"), {0: "new"})
+        done.set()
+
+    with train_model.MODEL_FILES_LOCK:  # a reader has the files open
+        writer = threading.Thread(target=retrain)
+        writer.start()
+
+        assert not done.wait(0.3), "renamed the model while it was being read"
+        assert trainer.read_text(encoding="utf-8") == "old-model"
+
+    assert done.wait(5)
+    writer.join(5)
+    assert trainer.read_text(encoding="utf-8") == "new-model"
+
+
 def tmp_sibling(path, suffix):
     """Path with `suffix` appended to the full filename, matching the code."""
     return path.parent / (path.name + suffix)

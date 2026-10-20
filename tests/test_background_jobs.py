@@ -445,3 +445,28 @@ def test_an_instructor_may_watch_training_they_did_not_start(client, fake_traini
     assert response.get_json()["state"] == IDLE
 
     job.wait()
+
+
+# ---------------------------------------------------------------------------
+# After a retrain, the model is read for attendance inside the job
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("trained", [True, False])
+def test_a_successful_retrain_preloads_the_model_and_a_failed_one_does_not(
+    monkeypatch, trained
+):
+    """Start waited 8-21 s for trainer.yml after every capture (vision/session.py)."""
+    import recognize_face
+    import services.training as training_module
+
+    monkeypatch.setattr(
+        training_module, "train_model", lambda report=None: (trained, "done")
+    )
+    preloads = []
+    monkeypatch.setattr(
+        recognize_face.session, "preload_model", lambda: preloads.append(1)
+    )
+
+    assert training_module.train_and_preload() == (trained, "done")
+    assert preloads == ([1] if trained else [])
