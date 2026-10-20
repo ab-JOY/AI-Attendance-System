@@ -1215,6 +1215,135 @@ def test_adding_a_section_enrols_exactly_that_section(client, scratch_database):
     assert "already on the class list" in again.get_data(as_text=True)
 
 
+def _class_list_of(subject_id):
+    from infra.db import db_cursor
+
+    with db_cursor() as cursor:
+        cursor.execute(
+            "SELECT student_id FROM enrolments WHERE subject_id = %s "
+            "ORDER BY student_id",
+            (subject_id,),
+        )
+        return [row[0] for row in cursor.fetchall()]
+
+
+def test_a_student_of_the_subjects_own_section_is_added(client, scratch_database):
+    from infra.db import db_cursor
+
+    with db_cursor(commit=True) as cursor:
+        subject_id = make_offering(cursor, "INT-TEST-101", "BSCS", 1, "A")
+        make_student(cursor, "INT-TEST-0001", program="BSCS", year_level=1, section="A")
+
+    sign_in_as(client)
+
+    response = client.post(
+        "/enrol_student",
+        data={"subject_id": str(subject_id), "student_id": "INT-TEST-0001"},
+        follow_redirects=True,
+    )
+
+    assert _class_list_of(subject_id) == ["INT-TEST-0001"]
+    assert "as an irregular student" not in response.get_data(as_text=True)
+
+
+@pytest.mark.parametrize("year_level, section", [(1, "B"), (3, "A")])
+def test_another_section_is_refused_unless_added_as_irregular(
+    client, scratch_database, year_level, section,
+):
+    """
+    A Section B student on a Section A subject, or a third-year on a first-year
+    subject, is not part of the class - unless the operator says they are
+    taking it as an irregular student.
+    """
+    from infra.db import db_cursor
+
+    with db_cursor(commit=True) as cursor:
+        subject_id = make_offering(cursor, "INT-TEST-101", "BSCS", 1, "A")
+        make_student(cursor, "INT-TEST-0002", program="BSCS",
+                     year_level=year_level, section=section)
+
+    sign_in_as(client)
+    form = {"subject_id": str(subject_id), "student_id": "INT-TEST-0002"}
+
+    refused = client.post("/enrol_student", data=form)
+
+    assert refused.status_code == 400
+    assert "irregular" in refused.get_data(as_text=True)
+    assert _class_list_of(subject_id) == []
+
+    added = client.post(
+        "/enrol_student", data={**form, "irregular": "1"}, follow_redirects=True,
+    )
+
+    assert "as an irregular student" in added.get_data(as_text=True)
+    assert _class_list_of(subject_id) == ["INT-TEST-0002"]
+
+
+def test_another_programs_student_is_refused_even_as_irregular(
+    client, scratch_database,
+):
+    from infra.db import db_cursor
+
+    with db_cursor(commit=True) as cursor:
+        subject_id = make_offering(cursor, "INT-TEST-101", "BSCS", 1, "A")
+        make_student(cursor, "INT-TEST-0003", program="BSN", year_level=1, section="A")
+
+    sign_in_as(client)
+
+    response = client.post(
+        "/enrol_student",
+        data={"subject_id": str(subject_id), "student_id": "INT-TEST-0003",
+              "irregular": "1"},
+    )
+
+    assert response.status_code == 400
+    assert _class_list_of(subject_id) == []
+
+
+def test_anybody_can_be_added_to_a_subject_with_no_section(client, scratch_database):
+    from infra.db import db_cursor
+
+    with db_cursor(commit=True) as cursor:
+        subject_id = make_subject(cursor)
+        make_student(cursor, "INT-TEST-0003", program="BSN", year_level=2, section="C")
+
+    sign_in_as(client)
+
+    client.post(
+        "/enrol_student",
+        data={"subject_id": str(subject_id), "student_id": "INT-TEST-0003"},
+    )
+
+    assert _class_list_of(subject_id) == ["INT-TEST-0003"]
+
+
+def test_the_class_list_marks_and_offers_irregular_students(client, scratch_database):
+    from infra.db import db_cursor
+    from repositories import enrolments as enrolments_repo
+
+    with db_cursor(commit=True) as cursor:
+        subject_id = make_offering(cursor, "INT-TEST-101", "BSCS", 1, "A")
+        make_student(cursor, "INT-TEST-0001", program="BSCS", year_level=1, section="A")
+        make_student(cursor, "INT-TEST-0002", program="BSCS", year_level=3, section="B")
+        make_student(cursor, "INT-TEST-0004", program="BSCS", year_level=2, section="D")
+        make_enrolment(cursor, "INT-TEST-0001", subject_id)
+        make_enrolment(cursor, "INT-TEST-0002", subject_id)
+
+    with db_cursor(dictionary=True) as cursor:
+        enrolled = enrolments_repo.enrolled_in(cursor, subject_id)
+
+    assert {row["student_id"]: int(row["irregular"]) for row in enrolled} == {
+        "INT-TEST-0001": 0,
+        "INT-TEST-0002": 1,
+    }
+
+    sign_in_as(client)
+    page = client.get(f"/subject_enrolments/{subject_id}").get_data(as_text=True)
+
+    assert page.count("· Irregular") == 1
+    assert "Add as irregular" in page
+
+
 def test_a_subject_with_no_section_cannot_have_one_added(client, scratch_database):
     from infra.db import db_cursor
 

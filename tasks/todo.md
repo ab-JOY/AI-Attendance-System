@@ -1243,3 +1243,18 @@ to the data model the manuscript describes, for little gain over these two rules
 - [x] Live database checked read-only first: no code has two names (13 codes).
 - [x] Fast suite **1,698 passed, 93 skipped**. Integration **48 passed**. 3 mutations caught
       (name rule, sibling rename, binary compare). Autofill checked in headless Edge.
+
+## 14. DM-12 — a class list is the subject's section; irregular students are explicit (2026-10-20)
+
+| | |
+|---|---|
+| **DM-12** any student of the program could be added to any offering, and the server checked nothing | The Class List listed the offering's program, any year and section, with one Add. `/enrol_student` wrote whatever student id it was sent, so a Section B student went onto a Section A list with one click, and a forged request could add another program's student |
+
+- [x] `enrolments_repo.placement()`: REGULAR (own section), IRREGULAR (same program, other year or section), OTHER_PROGRAM (another or no program), UNLINKED (offering has no section, so anybody)
+- [x] `/enrol_student` refuses OTHER_PROGRAM, and refuses IRREGULAR unless the form sends `irregular=1`
+- [x] Page: own section first (Add / Add all), then *Irregular students* (Add as irregular, with a confirmation prompt); enrolled rows tagged Irregular
+- [x] Irregular is **derived** (student section ≠ offering section), not stored. No migration
+- [x] Tests: `tests/test_class_list_placement.py` (16), 6 integration tests. Mutation-checked: removing either guard fails 3 tests
+
+**Review.** Fast suite 1,727 passed, 99 skipped. Class-list integration tests 23 passed on a scratch schema.
+**Open (the user's):** cross-program irregulars (e.g. a GE or minor subject shared by departments, a shiftee); registration-time class ticking (US-10) still allows any section of the student's program without asking.

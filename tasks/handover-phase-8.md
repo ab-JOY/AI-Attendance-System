@@ -279,3 +279,19 @@ was the whole delay.
 - **Not verified:** the timing with the real model in the running server. After a
   restart the log should show `Model loaded in the background`, then at Start
   `Using the model loaded in the background`.
+
+---
+
+## 11. Addendum 2026-10-20: irregular students on class lists (DM-12)
+
+See `todo.md` §14. Uncommitted, on `attendance-browser-camera`.
+
+- `/enrol_student` now asks `enrolments_repo.placement()` before writing. A student of the
+  offering's own section is added. Same program, other year or section, needs
+  `irregular=1` (the page's *Add as irregular* button). Another program is a 400, even with
+  `irregular=1`. An offering linked to no section still takes anybody.
+- **Irregular is derived, not stored:** `enrolled_in()` returns `irregular`, computed as the
+  student's section ≠ the offering's (`<=>`, so a student with no section counts as irregular).
+  Moving a student between sections re-labels them on every list.
+- `/enrol_section` is unchanged (it adds only the offering's own section).
+- **Not changed:** the registration form's Classes ticks (`existing_ids`, program check only).

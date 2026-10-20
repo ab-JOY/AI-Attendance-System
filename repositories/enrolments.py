@@ -26,12 +26,23 @@ ROSTER_COLUMNS = (
 
 
 def enrolled_in(cursor, subject_id):
-    """Everyone taking this offering."""
+    """
+    Everyone taking this offering.
+
+    `irregular` is 1 for a student who is not in the section the offering is
+    taught to: a student taking a subject outside their own block. Derived
+    rather than stored, so moving a student to another section re-labels them
+    and nothing has to be kept in step. An offering linked to no section has
+    no block, so nobody on it is irregular.
+    """
     cursor.execute(
         f"""
-        SELECT {ROSTER_COLUMNS}
+        SELECT {ROSTER_COLUMNS},
+               (o.section_id IS NOT NULL
+                AND NOT (s.section_id <=> o.section_id)) AS irregular
         FROM enrolments e
         JOIN students s ON s.student_id = e.student_id
+        JOIN subjects o ON o.id = e.subject_id
         {ACADEMIC_JOIN}
         WHERE e.subject_id = %s
         ORDER BY s.name ASC
@@ -80,6 +91,72 @@ def not_enrolled_in(cursor, subject_id, program_id=None, section_id=None):
     )
 
     return cursor.fetchall()
+
+
+# Where a student stands against one offering - what `placement()` returns.
+#
+# REGULAR: in the section the offering is taught to.
+# IRREGULAR: same program, another year level or section - a back subject, an
+#   advanced subject, a student off the block schedule. Allowed, but only when
+#   the operator says so.
+# OTHER_PROGRAM: another program, or no placement at all. Refused.
+# UNLINKED: the offering has no section (migration 010 could not link it), so
+#   it has no block to be regular in and is offered to everybody.
+REGULAR = "regular"
+IRREGULAR = "irregular"
+OTHER_PROGRAM = "other_program"
+UNLINKED = "unlinked"
+
+
+def placement(cursor, student_id, subject_id):
+    """
+    One of the four constants above, or None if the student or the offering
+    does not exist.
+
+    The guard behind adding one student to a class list. The screen only
+    offers the offering's own program and separates its own section from
+    everybody else, but the request comes back from a browser.
+    """
+    cursor.execute(
+        """
+        SELECT st.section_id AS student_section,
+               sec.program_id AS student_program,
+               o.section_id AS offering_section,
+               osec.program_id AS offering_program
+        FROM students st
+        JOIN subjects o ON o.id = %s
+        LEFT JOIN sections sec ON sec.id = st.section_id
+        LEFT JOIN sections osec ON osec.id = o.section_id
+        WHERE st.student_id = %s
+        """,
+        (subject_id, student_id),
+    )
+
+    row = cursor.fetchone()
+
+    if row is None:
+        return None
+
+    if not isinstance(row, dict):
+        row = dict(zip(
+            ("student_section", "student_program",
+             "offering_section", "offering_program"),
+            row,
+            strict=True,
+        ))
+
+    if row["offering_section"] is None:
+        return UNLINKED
+
+    if row["student_section"] == row["offering_section"]:
+        return REGULAR
+
+    # A student with no section has no program, and None never matches.
+    if (row["student_program"] is not None
+            and row["student_program"] == row["offering_program"]):
+        return IRREGULAR
+
+    return OTHER_PROGRAM
 
 
 def enrol_section(cursor, subject_id, section_id):

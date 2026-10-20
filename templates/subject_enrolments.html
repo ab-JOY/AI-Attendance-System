@@ -43,7 +43,10 @@
                     <td>{{ student.name }}</td>
                     <td>{{ student.program }}</td>
                     <td>{{ student.year_level }}</td>
-                    <td>{{ student.section }}</td>
+                    <td>
+                        {{ student.section }}
+                        {% if student.irregular %}<strong>· Irregular</strong>{% endif %}
+                    </td>
                     <td>
                         <form
                             action="{{ url_for('subjects.unenrol_student') }}"
@@ -71,19 +74,61 @@
     <h2 style="margin-top:36px;">Add a student</h2>
 
     {#
-        DM-7. The subject is taught to a section, so its usual class list is
-        that section - one button - and the table below is for everybody else
-        in the same program: an irregular student, or one repeating the
-        subject. Students of other programs are not offered.
+        DM-7. The subject is taught to one section, so its usual class list is
+        that section: one button, or Add per student. Everybody else in the
+        same program - a back subject, a subject off their block - is listed
+        separately and added only as irregular, which the server checks
+        (`enrol_student`). Students of other programs are not offered.
     #}
+    {% macro add_table(students, irregular=False) %}
+        <table class="subject-table">
+            <tr>
+                <th>Student ID</th>
+                <th>Name</th>
+                <th>Program</th>
+                <th>Year</th>
+                <th>Section</th>
+                <th>Action</th>
+            </tr>
+
+            {% for student in students %}
+                <tr>
+                    <td>{{ student.student_id }}</td>
+                    <td>{{ student.name }}</td>
+                    <td>{{ student.program }}</td>
+                    <td>{{ student.year_level }}</td>
+                    <td>{{ student.section }}</td>
+                    <td>
+                        <form
+                            action="{{ url_for('subjects.enrol_student') }}"
+                            method="POST"
+                            style="display:inline;"
+                            {% if irregular %}
+                            data-confirm="{{ student.name }} is in Year {{ student.year_level }}, Section {{ student.section }}. Add them to this class as an irregular student?"
+                            {% endif %}
+                        >
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <input type="hidden" name="subject_id" value="{{ subject.id }}">
+                            <input type="hidden" name="student_id" value="{{ student.student_id }}">
+
+                            {% if irregular %}
+                                <input type="hidden" name="irregular" value="1">
+                                <button type="submit">Add as irregular</button>
+                            {% else %}
+                                <button type="submit">Add</button>
+                            {% endif %}
+                        </form>
+                    </td>
+                </tr>
+            {% endfor %}
+        </table>
+    {% endmacro %}
+
     {% if subject.section_id %}
         {% set own = available|selectattr('own_section')|list %}
+        {% set others = available|rejectattr('own_section')|list %}
 
-        <p class="hint">
-            Listing {{ subject.course }} students only, Section
-            {{ subject.section }} first. A student with no program is not
-            listed until one is set from Manage Students.
-        </p>
+        <h3>Year {{ subject.year_level }}, Section {{ subject.section }}</h3>
 
         {% if own %}
             <form
@@ -99,57 +144,44 @@
                     Section {{ subject.section }}
                 </button>
             </form>
+
+            {{ add_table(own) }}
+        {% else %}
+            <p role="status">
+                Every student of Year {{ subject.year_level }}, Section
+                {{ subject.section }} is already on the class list.
+            </p>
+        {% endif %}
+
+        <h3 style="margin-top:28px;">Irregular students</h3>
+
+        <p class="hint">
+            Other {{ subject.course }} students, of any year level or section,
+            who are taking this subject outside their own section: a back
+            subject, or a subject off their block schedule. They are marked
+            Irregular on the class list. Students of other programs, and
+            students with no program, are not listed.
+        </p>
+
+        {% if others %}
+            {{ add_table(others, irregular=True) }}
+        {% else %}
+            <p role="status">
+                No other {{ subject.course }} student is left to add.
+            </p>
         {% endif %}
     {% else %}
         <p class="hint">
             This subject is not linked to a section yet, so every student is
             listed. Edit the subject and choose its program, year level and
-            section to list only its own program.
+            section to list only its own section and program.
         </p>
-    {% endif %}
 
-    {% if available %}
-        <table class="subject-table">
-            <tr>
-                <th>Student ID</th>
-                <th>Name</th>
-                <th>Program</th>
-                <th>Year</th>
-                <th>Section</th>
-                <th>Action</th>
-            </tr>
-
-            {% for student in available %}
-                <tr>
-                    <td>{{ student.student_id }}</td>
-                    <td>{{ student.name }}</td>
-                    <td>{{ student.program }}</td>
-                    <td>{{ student.year_level }}</td>
-                    <td>{{ student.section }}</td>
-                    <td>
-                        <form
-                            action="{{ url_for('subjects.enrol_student') }}"
-                            method="POST"
-                            style="display:inline;"
-                        >
-                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                            <input type="hidden" name="subject_id" value="{{ subject.id }}">
-                            <input type="hidden" name="student_id" value="{{ student.student_id }}">
-
-                            <button type="submit">Add</button>
-                        </form>
-                    </td>
-                </tr>
-            {% endfor %}
-        </table>
-    {% else %}
-        <p role="status">
-            {% if subject.section_id %}
-                Every {{ subject.course }} student is already enrolled in this subject.
-            {% else %}
-                Every student is already enrolled in this subject.
-            {% endif %}
-        </p>
+        {% if available %}
+            {{ add_table(available) }}
+        {% else %}
+            <p role="status">Every student is already enrolled in this subject.</p>
+        {% endif %}
     {% endif %}
 
     <p style="margin-top:24px;">

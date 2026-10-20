@@ -678,16 +678,56 @@ def _class_list_form():
 @subjects_bp.route('/enrol_student', methods=['POST'])
 @role_required('admin')
 def enrol_student():
-    """Add one student to one offering."""
+    """
+    Add one student to one offering.
+
+    An offering is taught to one section, and its students are added freely.
+    A student of the same program in another year level or section - an
+    irregular student taking a back subject or one off their block - is added
+    only when the form says `irregular=1`, which the page sends from its own
+    "Add as irregular" button. Another program's student is refused.
+    """
     parsed, failure = _class_list_form()
 
     if failure is not None:
         return failure
 
     subject_id, student_id = parsed
+    as_irregular = request.form.get('irregular') == '1'
 
     try:
-        with db_cursor(commit=True) as cursor:
+        # Every refusal below returns before anything is written, so the
+        # commit on leaving the block has nothing to commit.
+        with db_cursor(dictionary=True, commit=True) as cursor:
+            placement = enrolments_repo.placement(cursor, student_id, subject_id)
+
+            if placement is None:
+                return error_page(409, "That student or subject no longer exists.")
+
+            if placement == enrolments_repo.OTHER_PROGRAM:
+                logger.warning(
+                    "Refused enrolment of %s into %s: another program",
+                    student_id, subject_id,
+                )
+                return error_page(
+                    400,
+                    f"{student_id} is not in the program this subject is "
+                    "offered to.",
+                )
+
+            if placement == enrolments_repo.IRREGULAR and not as_irregular:
+                logger.warning(
+                    "Refused enrolment of %s into %s: another section, "
+                    "not marked irregular",
+                    student_id, subject_id,
+                )
+                return error_page(
+                    400,
+                    f"{student_id} is not in the section this subject is "
+                    "taught to. Add them as an irregular student if they "
+                    "are taking it.",
+                )
+
             enrolments_repo.enrol(cursor, student_id, subject_id)
 
     except mysql.connector.IntegrityError:
@@ -703,9 +743,18 @@ def enrol_student():
         logger.exception("Could not enrol %s into subject %s", student_id, subject_id)
         return error_page(500)
 
-    logger.info("Enrolled %s into subject %s", student_id, subject_id)
+    irregular = placement == enrolments_repo.IRREGULAR
 
-    flash(f"{student_id} was added to the class list.", "success")
+    logger.info(
+        "Enrolled %s into subject %s%s",
+        student_id, subject_id, " as irregular" if irregular else "",
+    )
+
+    flash(
+        f"{student_id} was added to the class list"
+        f"{' as an irregular student' if irregular else ''}.",
+        "success",
+    )
 
     return redirect(url_for('subjects.subject_enrolments', subject_id=subject_id))
 
@@ -718,8 +767,8 @@ def enrol_section():
 
     The offering names a section and so does each student, so the usual class
     list - everybody in that section - is one statement rather than one click
-    per student. Students from other sections are still added one at a time,
-    which is how an irregular student gets onto the list.
+    per student. Students from other sections are added one at a time, as
+    irregular students (`enrol_student`).
     """
     subject_id = optional_id(request.form.get('subject_id'))
 
