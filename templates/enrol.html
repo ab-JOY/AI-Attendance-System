@@ -40,6 +40,7 @@
         data-record='{{ record | tojson }}'
         data-password-token="{{ password_token or '' }}"
         data-total="{{ total }}"
+        data-mode="{{ mode }}"
         data-min-native-width="{{ min_native_width }}"
         data-start-url="{{ url_for('enrolment.enrol_start') }}"
         data-frame-url="{{ url_for('enrolment.enrol_frame') }}"
@@ -49,12 +50,39 @@
         hidden></div>
 
     <h1>
-        {% if mode == 'recapture' %}Recapture Face{% else %}Face Capture{% endif %}
+        {% if mode == 'recapture' %}Recapture Face
+        {% elif mode == 'add_session' %}Add Capture Session
+        {% else %}Face Capture{% endif %}
     </h1>
 
     <p>
         <strong>{{ student_name }}</strong> &mdash; {{ student_id }}
     </p>
+
+    {#
+        FS-20. An added session captures only the images it keeps, so the
+        student still has 100 and the model does not grow. The number is the
+        server's, from the dataset folder; the condition is the operator's.
+    #}
+    {% if mode == 'add_session' %}
+        <div class="form-container">
+            <p>
+                Session <strong>{{ session_number }}</strong> of up to {{ max_sessions }}.
+                This captures <strong>{{ total }}</strong> images, which replace
+                {{ total }} of this student's current 100. The rest are kept,
+                and the student is recognised with the current images until the
+                new capture is complete.
+            </p>
+
+            <label for="condition-select">What is different this time?</label>
+            <select id="condition-select" required>
+                <option value="">Choose one…</option>
+                {% for key, label in conditions.items() %}
+                    <option value="{{ key }}">{{ label }}</option>
+                {% endfor %}
+            </select>
+        </div>
+    {% endif %}
 
     <div class="capture-wrapper">
 

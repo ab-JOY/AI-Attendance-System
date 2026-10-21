@@ -33,6 +33,7 @@
     var RECORD = JSON.parse(page.getAttribute("data-record"));
     var PASSWORD_TOKEN = page.getAttribute("data-password-token");
     var TOTAL = Number(page.getAttribute("data-total"));
+    var MODE = page.getAttribute("data-mode");
 
     var START_URL = page.getAttribute("data-start-url");
     var FRAME_URL = page.getAttribute("data-frame-url");
@@ -120,6 +121,7 @@
     var cameraSelect = document.getElementById("camera-select");
     var cameraDetail = document.getElementById("camera-detail");
     var stageItems = document.querySelectorAll("#stage-list li");
+    var conditionSelect = document.getElementById("condition-select");
 
     var scratch = document.createElement("canvas");
     var stream = null;
@@ -409,7 +411,18 @@
     }
 
     function start() {
+        // FS-20. An added session says what was different; the server decides
+        // which session it is and which images it replaces.
+        var condition = conditionSelect ? conditionSelect.value : null;
+
+        if (MODE === "add_session" && !condition) {
+            say("Choose what is different about this session first.", "bad");
+            conditionSelect.focus();
+            return;
+        }
+
         startButton.disabled = true;
+        if (conditionSelect) { conditionSelect.disabled = true; }
         say("Starting…", "wait");
 
         post(START_URL, {
@@ -418,7 +431,9 @@
                 student_id: STUDENT_ID,
                 student_name: STUDENT_NAME,
                 record: RECORD,
-                password_token: PASSWORD_TOKEN
+                password_token: PASSWORD_TOKEN,
+                mode: MODE,
+                condition: condition
             })
         })
             .then(function (response) {
@@ -431,6 +446,7 @@
                 if (!body.success) {
                     say(body.message, "bad");
                     startButton.disabled = false;
+                    if (conditionSelect) { conditionSelect.disabled = false; }
                     return;
                 }
 
@@ -442,6 +458,7 @@
             .catch(function () {
                 say("Could not start the capture. Reload and try again.", "bad");
                 startButton.disabled = false;
+                if (conditionSelect) { conditionSelect.disabled = false; }
             });
     }
 

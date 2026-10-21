@@ -67,6 +67,8 @@ class StubCapture:
         self.student_id = STUDENT
         self.student_name = NAME
         self.record = record
+        # A full capture, not an added session (FS-20).
+        self.added_session = None
 
 
 class Recorder:

@@ -258,6 +258,29 @@
                         >
                             📷 Recapture Face
                         </button>
+                    </form>
+
+                    <br><br>
+
+                    <!-- ADD A CAPTURE SESSION (FS-20) -->
+                    {#
+                        Another sitting under a different light, or with or
+                        without glasses. It replaces part of the current 100
+                        images rather than adding to them, so the model does
+                        not grow.
+                    #}
+                    <form
+                        action="{{ url_for('enrolment.enrol') }}"
+                        method="POST"
+                        style="display:inline;"
+                    >
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <input type="hidden" name="mode" value="add_session">
+                        <input type="hidden" name="student_id" value="{{ student.student_id }}">
+
+                        <button type="submit" class="action-btn">
+                            ➕ Add Session
+                        </button>
 
                     </form>
 

@@ -34,6 +34,7 @@ train_model.py, for the same reason.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -195,6 +196,120 @@ def promote(student_id: str, expected: int) -> Path:
     )
 
     return final
+
+
+# =====================================================
+# ADDED SESSIONS (FS-20)
+#
+# `sessions.json` beside the images says which capture session each image
+# came from. Training reads `.jpg` only and never sees it. A folder without one
+# is a single session - every capture before FS-20, every recapture (promote
+# replaces the whole folder, manifest included), and every mobile capture.
+#
+# The map exists for Phase 6: training on one session and testing on another
+# is the cross-session evaluation the same-session 100% cannot give.
+# =====================================================
+
+MANIFEST_NAME = "sessions.json"
+MANIFEST_VERSION = 1
+
+
+def read_manifest(student_id: str, total: int) -> dict:
+    """
+    The student's session history, as written by `merge_session()`.
+
+    Raises `DatasetStoreError` when the student has no complete dataset, or the
+    manifest does not describe `total` images - an added session would then be
+    built on a folder nobody can vouch for.
+    """
+    folder = student_dataset_path(student_id)
+
+    if count_images(folder) != total:
+        raise DatasetStoreError(
+            f"{folder} does not hold a complete set of {total} images"
+        )
+
+    path = folder / MANIFEST_NAME
+
+    if not path.is_file():
+        return {
+            "version": MANIFEST_VERSION,
+            "sessions": [{"number": 1, "condition": None, "captured_on": None}],
+            "slots": [1] * total,
+        }
+
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        sessions = manifest["sessions"]
+        slots = manifest["slots"]
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise DatasetStoreError(f"Unreadable session manifest {path}") from error
+
+    numbers = [session.get("number") for session in sessions]
+
+    if (
+        numbers != list(range(1, len(sessions) + 1))
+        or len(slots) != total
+        or any(slot not in numbers for slot in slots)
+    ):
+        raise DatasetStoreError(f"Inconsistent session manifest {path}")
+
+    return manifest
+
+
+def merge_session(
+    student_id: str,
+    number: int,
+    condition: str,
+    slots: tuple[int, ...],
+    total: int,
+    captured_on: str,
+) -> None:
+    """
+    Fill the staging folder of an added session into a complete dataset.
+
+    The capture wrote only `slots`. Every other image is copied from the
+    student's current dataset, and the manifest records the new session. The
+    caller then promotes the staging folder exactly as for a full capture, so
+    the current dataset stays in place until the merged one is complete.
+    """
+    staging = student_staging_path(student_id)
+    final = student_dataset_path(student_id)
+
+    manifest = read_manifest(student_id, total)
+
+    if number != len(manifest["sessions"]) + 1:
+        raise DatasetStoreError(
+            f"{student_id} has {len(manifest['sessions'])} session(s); "
+            f"session {number} cannot follow"
+        )
+
+    new = set(slots)
+
+    for slot in range(1, total + 1):
+        target = student_image_path(staging, slot, total)
+
+        if slot in new:
+            if not target.is_file():
+                raise DatasetStoreError(f"Session {number} is missing {target.name}")
+            continue
+
+        shutil.copy2(student_image_path(final, slot, total), target)
+
+    manifest["sessions"].append(
+        {"number": number, "condition": condition, "captured_on": captured_on}
+    )
+    manifest["slots"] = [
+        number if slot in new else kept
+        for slot, kept in enumerate(manifest["slots"], start=1)
+    ]
+
+    (staging / MANIFEST_NAME).write_text(json.dumps(manifest, indent=1), encoding="utf-8")
+
+    logger.info(
+        "Session %d merged for %s: %d new image(s), %d kept",
+        number, student_id, len(new), total - len(new),
+    )
 
 
 def discard(student_id: str) -> None:

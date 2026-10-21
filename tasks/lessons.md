@@ -1749,3 +1749,23 @@ and was a bandwidth one.
 - **Shrink only as far as a test proves recognition survives.** 960 wide at
   quality 60 was chosen because the real-face smoke test still confirms and
   passes liveness there, not because it looked fine.
+
+## L40 - Check an allocation rule at every size it will run at before explaining it
+
+**2026-10-20, FS-20.** Added capture sessions had to share a student's 100
+images evenly. The first rule, "session k replaces every slot divisible by k",
+looked right and was explained to the user in detail, with a 25/25/25/25 table
+for four sessions. It is balanced only up to three. The multiples of 4 are all
+even, so session 4 took every one of its slots from session 2: **33/17/25/25**.
+A parametrised test over k = 2, 3, 4 caught it on the first run. The user had
+already been given the wrong table.
+
+**How to apply:**
+
+- **Compute the result for every size the rule will meet** (here, every session
+  up to the cap) before presenting the rule. A few lines in a scratch script
+  would have shown 33/17/25/25.
+- **Prefer a rule that states its goal** (take 1/k of each earlier session's
+  share) over one whose balance is a property of number theory.
+- **When a rule given to the user turns out wrong, tell them in the same reply**
+  that reports the fix, with the corrected numbers.

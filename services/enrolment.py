@@ -32,10 +32,12 @@ from face_preprocessing import align_face
 from infra import dataset_store
 from infra.facemesh import make_enrolment_detector
 from vision.enrolment import (
+    DEFAULT_PLAN,
     MAX_IMAGES,
     EnrolmentHooks,
     EnrolmentRegistry,
     EnrolmentSession,
+    plan_for_slots,
 )
 
 logger = logging.getLogger(__name__)
@@ -156,11 +158,15 @@ class EnrolmentSlot:
 
     def start(
         self, *, student_id, student_name, started_by, record,
-        password_hash=None
+        password_hash=None, added_session=None
     ):
         """
         Open a staging folder and a session. Returns it, or None if the slot
         is taken.
+
+        `added_session` (an `AddedSession`) captures only that session's slots
+        (FS-20); the caller has already worked them out from the student's
+        dataset.
 
         Raises `UnsafeStudentPathError` or `OSError` if the staging folder
         cannot be opened - the caller turns that into a 500, because a capture
@@ -170,13 +176,22 @@ class EnrolmentSlot:
 
         hooks, detector = _hooks_for(staging)
 
+        if added_session is None:
+            slots, plan = None, DEFAULT_PLAN
+        else:
+            slots = added_session.slots
+            plan = plan_for_slots(slots)
+
         capture_session = EnrolmentSession(
             student_id=student_id,
             student_name=student_name,
             hooks=hooks,
+            plan=plan,
             started_by=started_by,
             record=record,
             password_hash=password_hash,
+            slots=slots,
+            added_session=added_session,
         )
         capture_session.detector = detector
 

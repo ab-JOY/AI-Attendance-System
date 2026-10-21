@@ -2,6 +2,8 @@
 
 **System:** AI-Based Facial Recognition Attendance System
 **Compiled:** 2026-08-08, after Phase 2 (Security)
+**Updated:** 2026-10-20: §1.6, §2 and §5 brought up to date with browser
+capture, browser-camera attendance and the Cloudflare deployment
 **Audience:** the technical writer preparing the manuscript, and anyone
 answering questions at the defense.
 
@@ -105,16 +107,36 @@ first underscore; now it is that a machine which has not run the rename still
 holds old-format folders, against which an ID containing `_` is ambiguous. Real
 IDs look like `23-1-1-0559`.
 
-### 1.6 Browser-based face capture requires HTTPS
+### 1.6 Browser camera features require HTTPS
 
 Browsers expose the camera API (`getUserMedia`) only in a **secure context**:
 an HTTPS origin, or `localhost`. There is no flag, no permission prompt and no
 graceful degradation — on a plain-HTTP page served to another machine the call
 is simply rejected.
 
-This is a hard constraint rather than a recommendation, and it is the reason
-TLS is a prerequisite for the planned move of enrolment into the browser rather
-than a later hardening step.
+Face capture runs in the browser, and attendance can use the browser's webcam
+(§2.2), so **both require HTTPS** whenever the page is opened from another
+machine. In deployment this is met by **Cloudflare Tunnel**, which serves the
+site with a valid certificate:
+
+```
+browser --HTTPS--> Cloudflare --encrypted tunnel--> cloudflared --> Caddy 127.0.0.1:8080 --> serve.py 127.0.0.1:8000
+```
+
+- Traffic between the browser and Cloudflare is HTTPS, and between Cloudflare
+  and the classroom PC it travels through an encrypted tunnel that the PC opens
+  outwards. No router port is opened.
+- Caddy and the application listen only on the loopback address
+  (`FLASK_HOST=127.0.0.1` in `.env`), so the plain-HTTP hops never leave the
+  machine and other computers on the network cannot reach the application
+  directly.
+- The session cookie is sent only over HTTPS (`SESSION_COOKIE_SECURE=true`).
+
+**The one trade-off:** Cloudflare terminates HTTPS at its edge in order to
+forward the request, so face frames from capture and from browser-camera
+attendance are decrypted on Cloudflare's servers in transit. Cloudflare
+therefore acts as a data processor under RA 10173, and this must be disclosed
+in the privacy notice (`docs/data_privacy.md`).
 
 ### 1.7 MySQL-specific SQL
 
@@ -125,59 +147,83 @@ another database engine without rewriting them.
 
 ## 2. Architectural and deployment limitations
 
-### 2.1 Enrolment currently requires the operator to be at the server
+### 2.1 Enrolment runs in the browser ✅ *resolved, Phase 5*
 
-Enrolment opens an OpenCV window **on the server machine**. If the browser is
-on a different computer, the operator sees nothing and the request waits until
-somebody at the server presses a key.
+The original design opened an OpenCV window **on the server machine**, so an
+operator on another computer saw nothing. Enrolment now runs in the browser:
+the page sends webcam frames to the server, and **all vision logic stays on the
+server** (face geometry, blur, brightness, contrast and pose checks), so there
+is one implementation of each check. Admins can capture any student; an
+instructor can capture only students in the classes they teach.
 
-**Status: being replaced.** Enrolment is moving into the browser
-(`getUserMedia` + upload). Do not document the current design as final; see §5.
+**Remaining limitation:** through the Cloudflare tunnel the upload speed was
+measured at 15–70 KB/s, so the page automatically reduces the frame size, down
+to 960 pixels wide. A student captured this way has less facial detail than one
+captured locally at 1920 pixels. Every quality check still runs on every saved
+image at every size. Capture on `localhost` when image detail matters, for
+example for evaluation.
 
-### 2.2 Attendance uses the server's camera, by design
+### 2.2 Attendance can use the classroom camera or the browser's webcam
 
-This is *not* the same limitation as 2.1 and should not be written as one. The
-classroom camera is physically attached to the attendance station, and the live
-video is streamed to whatever browser is watching. That is the intended
-architecture for a fixed classroom installation, and it is not changing.
+There are two camera sources, chosen when a session starts:
 
-### 2.3 The web server is Flask's development server
+- **Classroom camera:** attached to the server, with the live video streamed to
+  the browser. This is the intended design for a fixed classroom installation.
+- **Browser camera:** the instructor's own webcam. The page uploads frames
+  (1280x720 for recognition) and draws the results itself. Through the tunnel
+  this ran at about 5 frames per second, against about 8 on `localhost`.
 
-`app.run()` binds the loopback interface. There is no production WSGI server
-and no reverse proxy. The development server is single-process and explicitly
-documented by Flask as unsuitable for production.
+In both modes **recognition runs on the server**; the browser only supplies a
+camera and a screen. The browser camera requires HTTPS (§1.6).
 
-This has a knock-on effect worth stating precisely: **the login lockout counter
-is held in memory**, so it is reset by a restart and would not be shared across
-multiple worker processes. That is an accurate model of a single-process
-deployment, and it stops being accurate the moment a real WSGI server with
-multiple workers is introduced.
+### 2.3 Production server: one process, behind a proxy
 
-### 2.4 One recognition session at a time is not enforced
+`serve.py` runs the application under waitress, **one process with 8 threads**,
+on the loopback address, behind Caddy and Cloudflare Tunnel (§1.6). Flask's
+development server (`app.py`) remains for development only. **Never run both at
+once**: two processes would compete for one camera and keep two separate
+sessions.
 
-Recognition state is held in module-level variables shared between the camera
-thread and the web server's request threads, without locking. Two simultaneous
-viewers of the live feed share and corrupt one state machine, and whichever
-stops first releases the camera for both.
+The single process is deliberate, because the recognition session and the
+login lockout are held in memory. Two consequences:
 
-In practice one operator runs one session, so this has not been hit. It is a
-known defect awaiting the recognition-engine work, not a property of the
-design.
+- **The login lockout is reset by a restart.** It is shared correctly within
+  the one process, and it stays per visitor behind the proxy (`PROXY_HOPS=2`),
+  so one locked-out visitor does not lock out everyone.
+- **The system cannot be scaled by adding worker processes** without first
+  moving that state out of memory.
 
-### 2.5 Windows-only camera handling (today)
+### 2.4 One recognition session at a time ✅ *enforced*
 
-The camera backend uses a DirectShow-specific OpenCV flag and a Windows API
-call for window placement. The system does not currently run on Linux or macOS.
-The planned move of enrolment into the browser removes both, since the code
-containing them is being deleted.
+The recognition state is now guarded by a lock, and only one live stream may
+drive it: a second viewer is refused (HTTP 409) instead of sharing and
+corrupting the session. Closing one browser tab no longer ends the session for
+everyone.
 
-### 2.6 Development uses a self-signed certificate
+**Remaining limitation:** one server takes attendance for **one class at a
+time**. Two classes needing attendance at the same time need two
+installations.
 
-**Decision, 2026-08-08:** TLS in deployment uses a proper certificate;
-development uses a self-signed one.
+### 2.5 Camera handling: Windows for the classroom camera
 
-Three practical points that belong in a setup appendix rather than being
-rediscovered:
+The classroom-camera mode uses DirectShow (Windows) to open the camera and
+Windows device APIs to list cameras by name. The browser-based features
+(capture and browser-camera attendance) work in any modern browser on any
+operating system. The server itself has been tested on Windows only.
+
+The legacy `capture_dataset.py` (an OpenCV window, also Windows-specific)
+remains in the repository but is not used by the web application.
+
+### 2.6 Certificates: Cloudflare in deployment, a local certificate in development
+
+**In deployment, Cloudflare holds the certificate** (§1.6). `serve.py` ignores
+`SSL_CERT_FILE` and `SSL_KEY_FILE`, and Caddy requests no certificate of its
+own.
+
+**In development**, `app.py` can serve HTTPS from a local certificate (`SSL_CERT_FILE`
+and `SSL_KEY_FILE`, created with `scripts/make_dev_cert.py`). This is needed only
+when the camera is used from another machine on the local network; `localhost`
+is already a secure context. Three points for that case:
 
 - **A certificate with no Subject Alternative Name is rejected outright by
   current browsers**, regardless of any exception the user tries to accept. If
@@ -290,13 +336,13 @@ answer to "how would you fix this?"
 
 ## 5. Known and planned — do not document these as final
 
-Four areas are actively changing. Anything written about them now will be
-wrong by the defense.
+Two areas are still changing. Anything written about them now may be wrong by
+the defense. Two others that were listed here are now done.
 
 | Area | Current state | Planned |
 |---|---|---|
-| Enrolment capture | OpenCV window on the server | Browser-based capture over HTTPS |
-| Transport | Plain HTTP | HTTPS: self-signed in development, real certificate in deployment |
+| Enrolment capture | ✅ Done: browser-based capture over HTTPS (§2.1) | — |
+| Transport | ✅ Done: HTTPS through Cloudflare Tunnel in deployment, a local certificate in development (§1.6, §2.6) | — |
 | Evaluation | Same-session, closed-set, N=3 | Multi-session recapture, impostor set, FAR/FRR/EER with a DET curve |
 | Recognition threshold | 58.0, uncalibrated | Re-derived from the DET curve above |
 
@@ -330,7 +376,7 @@ They are never enrolled, but their face is still captured and processed.
 | No consent record in the schema | Consent is collected on paper (§0.1 of the UAT manual). Nothing in the database records that it was given, or allows it to be withdrawn |
 | No encryption at rest for `dataset/` and `trainer/` | Face images and the templates derived from them sit on disk in the clear |
 | No automated retention or erasure | Deleting a student is a manual, multi-step process; nothing expires on its own |
-| Still the Flask development server | TLS is configured on it, which is not the same as a WSGI server behind a reverse proxy |
+| **Recognition depends on the capture conditions** | LBPH compares light/dark texture, so a student captured under one light, or without glasses, may not be recognised under another. **Mitigation (FS-20):** *Add Session* captures the student again under another condition, replacing part of the 100 images rather than adding to them. **Its effect on recognition has not been measured yet** |
 
 The first one deserves its own sentence in any section that claims
 anti-spoofing: **the current liveness check raises the effort required to spoof
@@ -351,6 +397,7 @@ Listed with the finding ID, so the write-up can trace each one.
 | Excel export ignores the report filters | **FS-11**. It also no longer leaves a copy of the register on disk (**PE-8**) |
 | Model loading blocks application startup — roughly 9 seconds | **PE-4**. Nothing loads at import; the model is re-read only when the file on disk changes |
 | Training runs inside the web request | Background job with a progress endpoint |
+| Still the Flask development server | **PO-4**. `serve.py` runs waitress behind Caddy and Cloudflare Tunnel (§2.3) |
 
 ---
 

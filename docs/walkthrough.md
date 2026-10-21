@@ -37,6 +37,11 @@ by capture, training, and recognition.
 | Model load time | **9.2 s** |
 | Recognition threshold | 58.0 (LBPH distance; lower is better) |
 
+> **Since 2026-10-20 (FS-20)** a student's 100 images may come from up to four
+> capture sessions (*Add Session*: other lighting, with or without glasses),
+> recorded in `dataset/{student_id}/sessions.json`. Every figure below was
+> measured on single-session captures.
+
 ---
 
 ## 2. Measured results

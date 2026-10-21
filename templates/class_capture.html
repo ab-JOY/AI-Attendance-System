@@ -77,6 +77,20 @@
                                     📷 Recapture Face
                                 </button>
                             </form>
+
+                            <form
+                                action="{{ url_for('enrolment.enrol') }}"
+                                method="POST"
+                                style="display:inline;"
+                            >
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                <input type="hidden" name="mode" value="add_session">
+                                <input type="hidden" name="student_id" value="{{ student.student_id }}">
+
+                                <button type="submit" class="action-btn">
+                                    ➕ Add Session
+                                </button>
+                            </form>
                         </td>
                     </tr>
                 {% endfor %}

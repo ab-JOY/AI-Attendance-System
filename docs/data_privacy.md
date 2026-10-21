@@ -17,6 +17,7 @@ the rest.
 | Data | Where it lives | Why it is needed |
 |---|---|---|
 | Face images (100 per student) | `dataset/{student_id}/` | Training data for the LBPH recogniser |
+| Capture-session record | `dataset/{student_id}/sessions.json` | Only when a session was added (FS-20): each session's number, date and a fixed condition (*different lighting*, *with glasses*, ...), and which session each image came from. Deleted with the folder |
 | Biometric template (LBPH histograms) | `trainer/trainer.yml` | Derived from the images; used to recognise a face at attendance time |
 | Label map | `trainer/labels.txt` | Maps a model label to a student ID; the name is read from `students` |
 | Student ID, name, department, programme, year, section | MySQL `students`, placed through `sections` → `programs` → `departments` | Identifies who an attendance record belongs to |

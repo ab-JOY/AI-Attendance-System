@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 import secrets
 from collections import Counter
+from datetime import date
 
 import mysql.connector
 from flask import (
@@ -70,7 +71,16 @@ from security.paths import (
 )
 from services.enrolment import DetectorClosed, EnrolmentSlot
 from services.training import training_job
-from vision.enrolment import DEFAULT_PLAN, MAX_IMAGES, EnrolmentComplete
+from vision.enrolment import (
+    CONDITIONS,
+    DEFAULT_PLAN,
+    MAX_IMAGES,
+    MAX_SESSIONS,
+    AddedSession,
+    EnrolmentComplete,
+    added_session_slots,
+    plan_for_slots,
+)
 from vision.pose import MIN_NATIVE_FRAME_WIDTH
 from web.errors import error_page
 from web.placement import parse_placement, section_id_for
@@ -203,6 +213,37 @@ def _owns_capture(capture_session):
     return token is not None and session.get(CAPTURE_OWNER_KEY) == token
 
 
+ADD_SESSION = "add_session"
+
+
+def _next_session(student_id):
+    """
+    `((number, slots), None)` for the student's next session, or `(None, why not)`.
+
+    Worked out from the dataset folder, not from the request (FS-20): the slots
+    are the images the new session replaces, so a client that could name them
+    could overwrite any image it liked.
+    """
+    try:
+        manifest = dataset_store.read_manifest(student_id, MAX_IMAGES)
+    except (dataset_store.DatasetStoreError, UnsafeStudentPathError):
+        logger.warning("No session can be added for %s", student_id, exc_info=True)
+        return None, (
+            "This student has no complete set of face images to add to. "
+            "Use Recapture Face instead."
+        )
+
+    number = len(manifest["sessions"]) + 1
+
+    if number > MAX_SESSIONS:
+        return None, (
+            f"This student already has {MAX_SESSIONS} capture sessions. Use "
+            "Recapture Face to start again from one."
+        )
+
+    return (number, added_session_slots(manifest["slots"])), None
+
+
 def _done_url():
     """Where the capture page goes when it is over, for this role."""
     if session.get('role') == 'admin':
@@ -268,8 +309,10 @@ def enrol():
         return error_page(400, str(error))
 
     password_token = None
+    plan = DEFAULT_PLAN
+    session_number = None
 
-    if mode == 'recapture':
+    if mode in ('recapture', ADD_SESSION):
         with db_cursor(dictionary=True) as cursor:
             student = students_repo.identity(cursor, student_id)
 
@@ -283,6 +326,15 @@ def enrol():
 
         name = student['name']
         record = {}
+
+        if mode == ADD_SESSION:
+            next_session, problem = _next_session(student_id)
+
+            if problem is not None:
+                return error_page(409, problem)
+
+            session_number, slots = next_session
+            plan = plan_for_slots(slots)
 
     else:
         try:
@@ -341,8 +393,11 @@ def enrol():
         mode=mode,
         record=record,
         password_token=password_token,
-        plan=DEFAULT_PLAN.describe(),
-        total=MAX_IMAGES,
+        plan=plan.describe(),
+        total=plan.total,
+        session_number=session_number,
+        max_sessions=MAX_SESSIONS,
+        conditions=CONDITIONS,
         # Passed rather than repeated in the page: the server refuses frames
         # from a camera narrower than this, and a number duplicated in
         # JavaScript is a number that drifts.
@@ -383,6 +438,22 @@ def enrol_start():
         if refusal is not None:
             return enrolment_json(refusal, status=403)
 
+    added_session = None
+
+    if payload.get('mode') == ADD_SESSION:
+        condition = payload.get('condition')
+
+        if not isinstance(condition, str) or condition not in CONDITIONS:
+            return enrolment_json("Choose what is different about this session.")
+
+        next_session, problem = _next_session(student_id)
+
+        if problem is not None:
+            return enrolment_json(problem, status=409)
+
+        number, slots = next_session
+        added_session = AddedSession(number=number, condition=condition, slots=slots)
+
     try:
         password_hash = enrolment_slot.take_password(
             payload.get(PASSWORD_TOKEN_KEY)
@@ -397,6 +468,9 @@ def enrol_start():
 
         if password_hash is not None:
             start_arguments["password_hash"] = password_hash
+
+        if added_session is not None:
+            start_arguments["added_session"] = added_session
 
         capture_session = enrolment_slot.start(
             **start_arguments,
@@ -565,8 +639,8 @@ def enrol_finish():
 
     if not capture_session.done:
         return enrolment_json(
-            f"Only {capture_session.captured} of {MAX_IMAGES} images have "
-            "been captured.",
+            f"Only {capture_session.captured} of {capture_session.plan.total} "
+            "images have been captured.",
             status=409,
             progress=capture_session.progress().as_dict(),
         )
@@ -574,7 +648,25 @@ def enrol_finish():
     student_id = capture_session.student_id
     student_name = capture_session.student_name
 
+    # ⚠️ Read from the server's session object, never from this request: an
+    # added session merges into the current images, everything else replaces
+    # them, and the client does not get to choose which (lessons.md L28).
+    added_session = capture_session.added_session
+
     try:
+        if added_session is not None:
+            # merge_session() refuses if the student's session count moved
+            # since Start (another route finished meanwhile). The slots follow
+            # from the count alone, so that is the whole check.
+            dataset_store.merge_session(
+                student_id,
+                number=added_session.number,
+                condition=added_session.condition,
+                slots=added_session.slots,
+                total=MAX_IMAGES,
+                captured_on=date.today().isoformat(),
+            )
+
         dataset_store.promote(student_id, expected=MAX_IMAGES)
     except (dataset_store.DatasetStoreError, UnsafeStudentPathError, OSError):
         logger.exception("Could not promote the enrolment for %s", student_id)
@@ -681,8 +773,13 @@ def enrol_finish():
     enrolment_slot.release()
 
     logger.info(
-        "Enrolment complete for %s from %s; starting a retrain",
-        student_id, _describe_uploads(capture_session),
+        "Enrolment complete for %s (%s) from %s; starting a retrain",
+        student_id,
+        (
+            f"session {added_session.number}, {added_session.condition}"
+            if added_session is not None else "full capture"
+        ),
+        _describe_uploads(capture_session),
     )
     training_job.start(started_by=session.get('user'))
 
@@ -691,7 +788,14 @@ def enrol_finish():
     # Students, so a warning that matters is a warning nobody finishes reading.
     # A flash survives the redirect and is rendered by base.html on the page
     # they land on.
-    if classes:
+    if added_session is not None and classes:
+        flash(
+            f"Session {added_session.number} "
+            f"({CONDITIONS[added_session.condition].lower()}) was added for "
+            f"{student_name}. They are recognised with it once the model is rebuilt.",
+            "success",
+        )
+    elif classes:
         flash(
             f"{student_name} was enrolled and added to {classes} "
             f"class{'es' if classes != 1 else ''}.",

@@ -37,7 +37,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -150,6 +150,98 @@ DEFAULT_PLAN = EnrolmentPlan()
 
 
 # =====================================================
+# ADDED SESSIONS (FS-20)
+#
+# A student captured in one sitting is known to the model under one light,
+# with or without glasses, and nothing else. LBPH compares light/dark texture,
+# so a face under a different light can fall outside the threshold. An added
+# session captures the same student again under another condition.
+#
+# ⚠️ **The total stays at MAX_IMAGES.** LBPH stores one histogram per image,
+# so a second hundred would double the model (~18.8 MB/student) and the
+# prediction cost, and bring the load ceiling in todo.md §3a closer. Session k
+# instead takes about 1/k of every earlier session's slots, evenly spaced
+# through each, and captures only those: two sessions share the hundred 50/50,
+# three 33/33/34, four 25/25/26/24.
+#
+# ⚠️ **Not "every slot divisible by k".** That was the first design, and it is
+# balanced only up to three sessions: the multiples of four are all even, so a
+# fourth session took them all from session 2 and left 33/17/25/25.
+#
+# Slots are contiguous per stage (1-25 STRAIGHT, 26-40 LEFT, ...), so a slot's
+# replacement is always taken under that slot's own instruction, and every
+# stage keeps its exact image count.
+# =====================================================
+
+MAX_SESSIONS = 4
+
+# What the operator says was different this time. A fixed set, so nothing typed
+# reaches the dataset folder's manifest.
+CONDITIONS: dict[str, str] = {
+    "lighting": "Different lighting",
+    "glasses": "With glasses",
+    "no_glasses": "Without glasses",
+    "room": "Different room",
+    "other": "Other",
+}
+
+
+@dataclass(frozen=True)
+class AddedSession:
+    """An added capture session: which one, what was different, which slots."""
+
+    number: int
+    condition: str
+    slots: tuple[int, ...]
+
+
+def added_session_slots(owners: list[int]) -> tuple[int, ...]:
+    """
+    The image numbers the next session captures, given who owns each now.
+
+    `owners[n - 1]` is the session that took image n (all 1 for a student
+    captured once). The next session k takes round(1/k) of each earlier
+    session's slots, spaced evenly through them, so every session keeps a
+    share of every stage.
+
+    Raises ValueError past MAX_SESSIONS.
+    """
+    number = max(owners) + 1
+
+    if number > MAX_SESSIONS:
+        raise ValueError(f"Session {number} is past the cap of {MAX_SESSIONS}")
+
+    picked: list[int] = []
+
+    for earlier in range(1, number):
+        held = [slot for slot, owner in enumerate(owners, start=1) if owner == earlier]
+        take = round(len(held) / number)
+
+        picked.extend(held[int((i + 0.5) * len(held) / take)] for i in range(take))
+
+    return tuple(sorted(picked))
+
+
+def plan_for_slots(slots: tuple[int, ...], base: EnrolmentPlan = DEFAULT_PLAN) -> EnrolmentPlan:
+    """
+    The base plan cut down to `slots`, keeping each slot's own stage.
+
+    A stage left with no slot is dropped rather than shown with zero images.
+    """
+    counts: dict[str, int] = {}
+
+    for slot in slots:
+        name = base.stage_for(slot - 1).name
+        counts[name] = counts.get(name, 0) + 1
+
+    return EnrolmentPlan(tuple(
+        replace(stage, images=counts[stage.name])
+        for stage in base.stages
+        if counts.get(stage.name)
+    ))
+
+
+# =====================================================
 # HOOKS AND VERDICT
 # =====================================================
 
@@ -171,7 +263,9 @@ class EnrolmentHooks:
     # Raises ValueError when the face cannot be aligned safely.
     align: Callable[[Any, Any], Any]
 
-    # (index, image) -> None. `index` is 1-based, matching {1..100}.jpg.
+    # (slot, image) -> None. `slot` is the image's number in the student's
+    # {1..100}.jpg set: the capture count for a full capture, and the next of
+    # the session's own slots for an added one.
     save: Callable[[int, Any], None]
 
     # Monotonic seconds. A parameter so CAPTURE_DELAY can be tested without
@@ -297,11 +391,23 @@ class EnrolmentSession:
         started_by: str | None = None,
         record: dict[str, Any] | None = None,
         password_hash: str | None = None,
+        slots: tuple[int, ...] | None = None,
+        added_session: AddedSession | None = None,
     ) -> None:
         self.student_id = student_id
         self.student_name = student_name
         self.started_by = started_by
         self.plan = plan
+
+        # Which image number each capture becomes. None is the full capture,
+        # where the nth image is n.jpg.
+        if slots is not None and len(slots) != plan.total:
+            raise ValueError(
+                f"{len(slots)} slots for a plan of {plan.total} images"
+            )
+
+        self.slots = slots
+        self.added_session = added_session
 
         # Opaque to this module. The caller puts whatever it will need at the
         # end here - for the application, the student's course and section, so
@@ -654,11 +760,12 @@ class EnrolmentSession:
 
     def _save(self, stage, aligned, box) -> FrameVerdict:
         index = self._captured + 1
+        slot = index if self.slots is None else self.slots[index - 1]
 
         # The counter advances only after the write returns. A failed write
         # that still incremented would leave a gap in {1..100}.jpg and a
         # session that reports complete with 99 images on disk.
-        self._hooks.save(index, aligned)
+        self._hooks.save(slot, aligned)
 
         self._captured = index
         self._last_capture_at = self._hooks.now()

@@ -1258,3 +1258,103 @@ to the data model the manuscript describes, for little gain over these two rules
 
 **Review.** Fast suite 1,727 passed, 99 skipped. Class-list integration tests 23 passed on a scratch schema.
 **Open (the user's):** cross-program irregulars (e.g. a GE or minor subject shared by departments, a shiftee); registration-time class ticking (US-10) still allows any section of the student's program without asking.
+
+---
+
+## 15. FS-20 — a student's face is captured under one condition only (2026-10-20) — **built; real-face test passed (user, 2026-10-20); committed and pushed at the user's request (2026-10-21)**
+
+| | |
+|---|---|
+| **FS-20** every student's 100 images come from one sitting, and recapture *replaces* them | LBPH compares light/dark texture patterns, so a student captured under one light (or without glasses) may not match under another. `dataset_store.promote()` rotates the old folder out and deletes it, so there is no way to hold one student under two conditions. This is also the leakage behind the same-session 100% (§3, walkthrough §4.1) |
+
+**Goal.** Let an admin or the student's instructor **add a capture session** to an already-enrolled
+student, for example under different lighting or wearing glasses, so the model learns more than one
+appearance. **The total stays at 100 images per student**, so model size (~18.8 MB/student), recognition
+speed and the ~30-student ceiling (§3a) do not move.
+
+**Design (default chosen; open points listed below).**
+
+- **Same capture, same gates.** The add-session capture runs the unchanged nine-stage, 100-image plan
+  (`vision/enrolment.py`), with every quality gate. No threshold changes; `RECOGNITION_THRESHOLD` stays 58.0.
+- **Interleaved merge, not append.** Session *k* takes `round(1/k)` of **each earlier session's** slots,
+  evenly spaced through them (`vision.enrolment.added_session_slots`), and **captures only those**: 50, then
+  34, then 24 images. Shares: 2 sessions → 50/50; 3 → 33/33/34; 4 → 25/25/26/24. Each stage keeps its exact
+  image count, and every pose stage holds every session.
+  ⚠️ *Corrected during the build.* The plan first said "replace slots where `index % k == 0`". A test showed it
+  is balanced only to three sessions: the multiples of 4 are all even, so session 4 took them all from session 2
+  (33/17/25/25). That rule was also explained to the user before it was corrected.
+- **Built in staging, promoted atomically.** The new capture lands in `dataset_staging/{id}/` as today. At finish,
+  the kept old images are copied into staging over the slots they keep, then the **existing**
+  `promote(expected=100)` rotates the folder in. A failure leaves the student's current images intact (FS-15).
+- **A manifest records provenance:** `dataset/{id}/sessions.json` lists each session (number, date,
+  condition) and which session each slot came from. Training ignores it (it reads `.jpg` only,
+  `VALID_IMAGE_EXTENSIONS`). A folder with no manifest is treated as one session. Phase 6 needs this map to
+  train on one session and test on another.
+- **Condition is a fixed choice, not free text:** *Different lighting*, *With glasses*, *Without glasses*,
+  *Different room*, *Other*. No free text reaches the disk.
+- **Recapture is unchanged:** it still replaces all 100 and resets the manifest to one session.
+- **The mode is decided on the server (L28).** `/enrol/start` validates `mode=add_session` (dataset folder
+  holds 100 images, its manifest is consistent, session count below the cap; the student row is checked by
+  `/enrol`, and by `_instructor_refusal` for instructors) and stores the session number and slots on the
+  capture session. `/enrol/finish` reads them from that server object, never from the request.
+- **Same access rules as recapture:** an admin, or an instructor who has the student on a class list
+  (`_instructor_refusal`). Retrains automatically at finish, as now.
+
+**Tasks**
+
+- [x] `infra/dataset_store.py`: `read_manifest()`, `merge_session()` (copies kept slots into staging, writes
+      `sessions.json`); the existing `promote()` then swaps the folder
+- [x] `vision/enrolment.py`: `MAX_SESSIONS`, `CONDITIONS`, `AddedSession`, `added_session_slots()`,
+      `plan_for_slots()`; `EnrolmentSession` saves each image into its slot. `services/enrolment.py` passes them
+- [x] `web/enrolment.py`: `/enrol` and `/enrol/start` accept `mode=add_session` + `condition`;
+      `/enrol/finish` merges for that mode
+- [x] UI: **➕ Add Session** beside *Recapture Face* (`manage_students.html`, `class_capture.html`); `enrol.html`
+      shows the session number, image count and a condition picker. *Not done:* the session count in the student list
+- [x] Tests: `tests/test_added_sessions.py` (44, one slow). Mutation-checked: the slot rule, a client-chosen
+      session number, replace-instead-of-merge, and the merge's order check are each caught
+- [x] Docs: `docs/limitations.md` §6.1, `docs/data_privacy.md` §1, `docs/walkthrough.md` §1
+
+**Review.** Full suite **1,773 passed, 99 skipped**; enrolment tests 177 passed after the last change; `ruff`
+clean on the changed files. **Removed during review:** a second "did the images change?" check in
+`/enrol/finish`. Mutation showed it could never be the deciding guard (the slots follow from the session count
+alone, which `merge_session()` already checks), so it was pure cost (L30).
+**Not verified:** the page in a real browser, and any real face (steps 2 and 3 below). Those are the user's test.
+
+**Verification (L25: a real face, not a synthetic one).**
+
+1. The fast suite and the slow enrolment tests pass.
+2. **On a scratch copy of one consenting student**, measured with the real model: LBPH distance on probe
+   frames taken under the *second* condition (other lighting / glasses), **before** and **after** adding the
+   session. Expected: the second-condition distances fall below 58.0 more often. If they do not, say so.
+3. False-acceptance check: the other enrolled students' distances to that student must not fall below 58.0.
+   A more varied gallery can bring strangers closer too.
+
+**Open (the user's):**
+
+1. **Session cap**: default **4** (25/25/26/24). Beyond that, recapture from scratch.
+2. **The manuscript**: training data would be described as "captured across one or more sessions";
+   the same-session figures stay as they are.
+3. **Glasses**: lens glare may be refused by the brightness/blur gates. That's correct behaviour, but it
+   is unmeasured. The first real glasses capture will show it.
+
+---
+
+## 16. FS-21 - a student standing slightly back is not verified (2026-10-21) - **NOT DOING: withdrawn by the user the same day, before any code. Kept as a record**
+
+| | |
+|---|---|
+| **FS-21** reported by the user: "even if the student is slightly far but not that far, the verifying [should] start fast" | Six things can stop a distant face at 1280x720: `RECOGNITION_PROFILE.min_face_width` 70 px, `face_area_ratio` floor 0.010 (~96x96 px), the "Move closer" hint below 87.5 px, `RECOGNITION_QUALITY` blur 50 on an upscaled crop, the LBPH confirmation bar (58.0), and the confirmation window (20 votes, 85%, 8 consecutive). **Which one fires is not logged** |
+
+**Key fact.** Enrolment's FAR stage trains faces down to an area ratio of **0.012** (`vision/pose.py`); recognition already
+accepts down to **0.010**. Faces further back were never trained on, so lowering the size gates alone may move the
+failure from "no box" to "Verifying" forever (rule 5) rather than fix it. Rough estimate only: the 0.010 floor is about
+1.4 m from a laptop webcam (assumes a ~70 degree horizontal field of view).
+
+- [ ] **Measure first (L2, L23, L25).** A transition-throttled log line per track: box px, area ratio, the refusing
+      gate, LBPH distance. The user stands at normal / slightly far / far for ~10 s each
+- [ ] Then exactly one of: lower the size gates to where genuine LBPH distance stays under 58; **or** train farther
+      faces (an Add Session condition, or a farther capture stage); **or** show the user the confirmation trade-off
+- [ ] Impostor check at the new size: other enrolled students must not fall under 58 as this student
+- [ ] Tests + mutation; leave uncommitted with FS-20 (the user's wish)
+
+**Unchanged in every branch:** `RECOGNITION_THRESHOLD` 58.0 and `LBPH_PARAMS`.
