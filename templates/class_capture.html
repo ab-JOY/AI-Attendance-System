@@ -44,6 +44,13 @@
             student{{ 's' if class.students|length != 1 }}
         </p>
 
+        <a
+            class="class-list-btn"
+            href="{{ url_for('subjects.subject_enrolments', subject_id=class.id) }}"
+        >
+            📋 Class List — add or remove students
+        </a>
+
         {% if class.students %}
             <table class="subject-table">
                 <tr>
@@ -97,8 +104,9 @@
             </table>
         {% else %}
             <p role="status">
-                Nobody is on this class list yet. Register a new student below,
-                or ask an administrator to add existing students to it.
+                Nobody is on this class list yet. Open its Class List to add
+                students who are already registered, or register a new student
+                below.
             </p>
         {% endif %}
     {% endfor %}

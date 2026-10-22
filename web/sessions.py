@@ -167,19 +167,30 @@ EMPTY_CLASS_LIST_REFUSAL = (
 
 # The remedy, which is a different sentence depending on who is reading it.
 #
-# ⚠️ **The Class List screen is `@role_required('admin')`.** Telling an
-# instructor to "add students under Subjects → Class List" sends them to a 403
-# for a screen they will never be allowed to open, which reads as the system
-# being broken rather than as their not being the person who fixes this. They
-# are told who is instead, and they get no button.
+# Administrators and instructors can both open the Class List screen - an
+# instructor only for their own subjects, which is the only kind they can
+# start a session on (`_may_use_subject` runs first). They reach it from
+# different pages, so the directions differ. Any other role is told who can
+# fix it and gets no button: a button that leads to a 403 reads as the system
+# being broken.
 EMPTY_CLASS_LIST_REMEDY_ADMIN = (
     " Add students under Subjects → Class List, then start the session again."
+)
+
+EMPTY_CLASS_LIST_REMEDY_INSTRUCTOR = (
+    " Add students under Face Capture → Class List, then start the session "
+    "again."
 )
 
 EMPTY_CLASS_LIST_REMEDY_OTHER = (
     " Ask an administrator to add students to this class list, then start the "
     "session again."
 )
+
+EMPTY_CLASS_LIST_REMEDIES = {
+    'admin': EMPTY_CLASS_LIST_REMEDY_ADMIN,
+    'instructor': EMPTY_CLASS_LIST_REMEDY_INSTRUCTOR,
+}
 
 
 def _class_list_is_empty(subject_id):
@@ -250,12 +261,11 @@ def _class_list_action(subject_id):
     """
     The "Open Class List" button for the empty-class-list dialog, or None.
 
-    None when the signed-in user is not an admin: `subjects.subject_enrolments`
-    is `@role_required('admin')`, so offering the button to anyone else sends
-    them to a 403 and turns a fixable roster problem into what looks like a
-    broken system.
+    None for any role that `subjects.subject_enrolments` would refuse: a
+    button that leads to a 403 turns a fixable roster problem into what looks
+    like a broken system.
     """
-    if session.get('role') != 'admin':
+    if session.get('role') not in EMPTY_CLASS_LIST_REMEDIES:
         return None
 
     return {
@@ -388,9 +398,8 @@ def start_attendance():
 
         return jsonify({
             "success": False,
-            "message": EMPTY_CLASS_LIST_REFUSAL + (
-                EMPTY_CLASS_LIST_REMEDY_ADMIN if action
-                else EMPTY_CLASS_LIST_REMEDY_OTHER
+            "message": EMPTY_CLASS_LIST_REFUSAL + EMPTY_CLASS_LIST_REMEDIES.get(
+                session.get('role'), EMPTY_CLASS_LIST_REMEDY_OTHER
             ),
             # The way out of the refusal, built here rather than in the
             # browser. US-8: a URL assembled in JavaScript is a route reference
@@ -398,11 +407,9 @@ def start_attendance():
             # parameterised - `/subject_enrolments/<id>` - so the alternative
             # is a template string with an id spliced into it.
             #
-            # ⚠️ **None for anyone who is not an admin**, because
-            # `subject_enrolments` is `@role_required('admin')` and a button
-            # that leads to 403 is worse than no button: it turns "add students
-            # to this class" into "the system is broken" for an instructor who
-            # cannot do anything about either. The dialog says who can instead.
+            # ⚠️ **None for a role the Class List screen refuses**, because a
+            # button that leads to 403 is worse than no button. An instructor
+            # gets it: this subject passed `_may_use_subject`, so it is theirs.
             "action": action,
         })
 

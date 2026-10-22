@@ -211,7 +211,6 @@ def test_video_feed_does_not_stream_to_anonymous_callers(client):
 # check, so a logged-in instructor could call them directly.
 ADMIN_ONLY_GET_ROUTES = [
     "/students",
-    "/subject_enrolments/1",
     "/manage_students",
     "/edit_student/SEC-TEST-NOBODY",
     "/subjects",
@@ -223,9 +222,10 @@ ADMIN_ONLY_GET_ROUTES = [
 ]
 
 ADMIN_ONLY_POST_ROUTES = [
-    "/enrol_student",
-    "/enrol_section",
-    "/unenrol_student",
+    # The class-list routes are not here: instructors manage the class lists
+    # of their own subjects. Which ones is tested in
+    # tests/test_instructor_class_list.py.
+    #
     # The five /enrol routes are not here: instructors capture the faces of
     # their own classes. What they may capture is tested in
     # tests/test_instructor_capture.py.

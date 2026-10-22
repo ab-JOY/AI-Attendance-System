@@ -315,6 +315,8 @@ def test_the_face_capture_page_lists_only_the_instructors_classes(
     assert asked_for == [INSTRUCTOR]
     assert b"SEC101" in response.data
     assert OWN_STUDENT.encode() in response.data
+    # Their own Class List, where registered students are imported.
+    assert f'href="/subject_enrolments/{OWN_SUBJECT}"'.encode() in response.data
     # The manual retrain is admin-only, so the button is not offered.
     assert b'id="retrain-button"\n            hidden' in response.data
 

@@ -103,7 +103,7 @@ classification is asserted by `tests/test_route_security.py`.
 | Role | Can reach |
 |---|---|
 | Anonymous | The login page only |
-| Instructor | Dashboard, attendance sessions, the live camera feed during a session, reports, their own password, and **face capture for their own classes**: recapturing a student on one of their class lists, or registering a new student into one of their classes (2026-10-19). Not retraining by hand, deletion, or anyone else's students |
+| Instructor | Dashboard, attendance sessions, the live camera feed during a session, reports, their own password, and **face capture for their own classes**: recapturing a student on one of their class lists, or registering a new student into one of their classes (2026-10-19). **The class lists of their own subjects** (2026-10-23): adding students who are already registered and removing them, which shows them the name, ID, year and section of every student in that subject's program. Not retraining by hand, deletion, or anyone else's subjects |
 | Administrator | Everything, including enrolment, deletion, instructor management and export |
 
 Notes on the boundaries:

@@ -185,6 +185,10 @@
     {% endif %}
 
     <p style="margin-top:24px;">
-        <a href="{{ url_for('subjects.subjects') }}">Back to subjects</a>
+        {% if session['role'] == 'admin' %}
+            <a href="{{ url_for('subjects.subjects') }}">Back to subjects</a>
+        {% else %}
+            <a href="{{ url_for('enrolment.class_capture') }}">Back to Face Capture</a>
+        {% endif %}
     </p>
 {% endblock %}

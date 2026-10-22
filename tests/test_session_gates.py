@@ -533,33 +533,28 @@ def test_the_way_out_points_at_the_subject_that_was_refused(
     assert body["action"]["url"].endswith("/42")
 
 
-def test_a_non_admin_is_not_offered_a_button_they_cannot_use(
+def test_an_instructor_is_offered_the_class_list_of_their_subject(
     client, monkeypatch, started
 ):
     """
-    ⚠️ **`subjects.subject_enrolments` is `@role_required('admin')`.**
-
-    Offering the button to an instructor sends them to a 403 for a screen they
-    will never be allowed to open, which turns "somebody needs to fill in this
-    roster" into "the system is broken" for the one person who cannot fix
-    either. They get the refusal and no button.
+    Instructors manage the class lists of their own subjects, and a session can
+    only be started on one of those, so the button leads somewhere they may go.
     """
     body = start(client, monkeypatch, enrolled=0, role="instructor")
 
     assert body["success"] is False
-    assert body["action"] is None
+    assert body["action"]["url"].endswith(f"/{SUBJECT_ID}")
 
 
-def test_a_non_admin_is_told_who_can_fix_it(client, monkeypatch, started):
+def test_an_instructor_is_given_their_own_directions(client, monkeypatch, started):
     """
-    The remedy is a different sentence for somebody who cannot perform it.
-    Telling an instructor to "add students under Subjects → Class List" is
-    directions to a locked door.
+    The remedy is a different sentence for each reader. Subjects is an admin
+    page; an instructor reaches the Class List from Face Capture.
     """
     body = start(client, monkeypatch, enrolled=0, role="instructor")
 
-    assert "Ask an administrator" in body["message"]
-    assert "Add students under" not in body["message"]
+    assert "Face Capture → Class List" in body["message"]
+    assert "Ask an administrator" not in body["message"]
 
 
 def test_the_page_carries_the_dialog(client, monkeypatch):

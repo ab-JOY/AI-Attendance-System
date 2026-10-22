@@ -1415,3 +1415,24 @@ table caption{
 .dialog-dismiss:hover{
     background:#CBD5E1;
 }
+
+/* The instructor's way into a class list from Face Capture. An <a>, so it
+   needs the button styling `button{}` gives for free; gold rather than the
+   navy of the capture buttons beside it, so it is found first. */
+.class-list-btn{
+    display:inline-block;
+    margin:4px 0 14px;
+    padding:12px 22px;
+    border-radius:10px;
+    background:#0A1F8F;
+    color:#f5f6f9;
+    font-weight:700;
+    font-size:1.05rem;
+    text-decoration:none;
+    box-shadow:0 2px 6px rgba(10,31,143,.25);
+    transition:.3s;
+}
+
+.class-list-btn:hover{
+    background:#142B4D;
+}

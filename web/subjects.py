@@ -3,8 +3,11 @@ Subject offerings and their class lists.
 
 The class-list screen (FS-3) is here rather than with students because the
 `enrolments` table is a fact about an *offering*: who is taking CS401 section B
-this term. Admin-only, deliberately - who is in a class decides whose absence
-is recorded, which is the same class of decision as adding a student.
+this term. Who is in a class decides whose absence is recorded, so the class
+list belongs to the people responsible for that class: an administrator, for
+any offering, and the instructor it is assigned to, for their own (expert
+panel request, 2026-10-23). An instructor only picks from students who are
+already registered; they cannot add an offering, a program or a section.
 """
 
 from __future__ import annotations
@@ -29,7 +32,7 @@ from repositories import academics as academics_repo
 from repositories import enrolments as enrolments_repo
 from repositories import instructors as instructors_repo
 from repositories import subjects as subjects_repo
-from security.access import role_required
+from security.access import instructor_scope, role_required
 from security.paths import UnsafeStudentPathError, validate_student_id
 from services.schedule import DAY_SEPARATOR, WEEKDAYS, meeting_days
 from web.errors import error_page
@@ -618,12 +621,53 @@ def delete_subject(id):
 # ==========================================================
 
 
+# What an instructor is told when a request names an offering assigned to
+# someone else. Their pages only link their own, so reaching this means the
+# offering was reassigned after the page loaded, or the URL was typed by hand.
+NOT_YOUR_CLASS_LIST = (
+    "That subject is not assigned to you, so you cannot change its class list."
+)
+
+
+def _refuse_other_instructors(cursor, subject_id):
+    """
+    A 403 page when the signed-in instructor does not teach this offering, or
+    None when they may use its class list.
+
+    Always None for an administrator, without touching the database.
+
+    ⚠️ **This is the guard, on every class-list route, read and write.** The
+    links on the Face Capture page only point at the instructor's own subjects,
+    but the routes take the subject id from the URL or the form, and that is
+    what a forged request would change.
+    """
+    instructor_id = instructor_scope()
+
+    if instructor_id is None:
+        return None
+
+    if subjects_repo.is_taught_by(cursor, subject_id, instructor_id):
+        return None
+
+    logger.warning(
+        "Refused class-list access: %r is not the instructor of subject %s",
+        session.get('user'), subject_id,
+    )
+
+    return error_page(403, NOT_YOUR_CLASS_LIST)
+
+
 @subjects_bp.route('/subject_enrolments/<int:subject_id>')
-@role_required('admin')
+@role_required('admin', 'instructor')
 def subject_enrolments(subject_id):
     """Who is taking this offering, and who could be added to it."""
     try:
         with db_cursor(dictionary=True) as cursor:
+            refusal = _refuse_other_instructors(cursor, subject_id)
+
+            if refusal is not None:
+                return refusal
+
             subject = subjects_repo.summary(cursor, subject_id)
 
             if subject is None:
@@ -676,7 +720,7 @@ def _class_list_form():
 
 
 @subjects_bp.route('/enrol_student', methods=['POST'])
-@role_required('admin')
+@role_required('admin', 'instructor')
 def enrol_student():
     """
     Add one student to one offering.
@@ -699,6 +743,11 @@ def enrol_student():
         # Every refusal below returns before anything is written, so the
         # commit on leaving the block has nothing to commit.
         with db_cursor(dictionary=True, commit=True) as cursor:
+            refusal = _refuse_other_instructors(cursor, subject_id)
+
+            if refusal is not None:
+                return refusal
+
             placement = enrolments_repo.placement(cursor, student_id, subject_id)
 
             if placement is None:
@@ -760,7 +809,7 @@ def enrol_student():
 
 
 @subjects_bp.route('/enrol_section', methods=['POST'])
-@role_required('admin')
+@role_required('admin', 'instructor')
 def enrol_section():
     """
     Add every student of the offering's own section to its class list (DM-7).
@@ -777,6 +826,11 @@ def enrol_section():
 
     try:
         with db_cursor(dictionary=True, commit=True) as cursor:
+            refusal = _refuse_other_instructors(cursor, subject_id)
+
+            if refusal is not None:
+                return refusal
+
             subject = subjects_repo.summary(cursor, subject_id)
 
             if subject is None:
@@ -820,7 +874,7 @@ def enrol_section():
 
 
 @subjects_bp.route('/unenrol_student', methods=['POST'])
-@role_required('admin')
+@role_required('admin', 'instructor')
 def unenrol_student():
     """
     Remove one student from one offering.
@@ -837,6 +891,11 @@ def unenrol_student():
 
     try:
         with db_cursor(commit=True) as cursor:
+            refusal = _refuse_other_instructors(cursor, subject_id)
+
+            if refusal is not None:
+                return refusal
+
             enrolments_repo.unenrol(cursor, student_id, subject_id)
 
     except mysql.connector.Error:

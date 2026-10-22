@@ -1358,3 +1358,28 @@ failure from "no box" to "Verifying" forever (rule 5) rather than fix it. Rough 
 - [ ] Tests + mutation; leave uncommitted with FS-20 (the user's wish)
 
 **Unchanged in every branch:** `RECOGNITION_THRESHOLD` 58.0 and `LBPH_PARAMS`.
+
+---
+
+## 17. Instructors manage the class lists of their own subjects (2026-10-23) - expert panel request
+
+The admin's Class List screen (FS-3, DM-7, DM-12) already imported registered students (whole section, one
+student, irregular on purpose, other programs refused). It was `@role_required('admin')`; the expert asked that
+instructors can import too.
+
+- [x] `/subject_enrolments`, `/enrol_student`, `/enrol_section`, `/unenrol_student` take `admin` and `instructor`
+- [x] `_refuse_other_instructors()` (web/subjects.py): 403 unless `subjects_repo.is_taught_by`, on all four, read
+      and write, **before** any repository call. Admin is never asked. Fails closed for a session without
+      `instructor_pk`
+- [x] Face Capture page: a *Class List* link per class; empty-class text points to it. The class list's back link
+      goes to Face Capture for an instructor
+- [x] Empty-roster dialog at `/start-attendance`: instructors now get the *Open Class List* button and
+      "Face Capture → Class List" (was "Ask an administrator")
+- [x] Remove is allowed too (attendance is kept on removal)
+- [x] Tests: `test_instructor_class_list.py` (14; with the guard removed 7 fail); `test_route_security.py` and
+      `test_session_gates.py` updated for the new rule. Fast suite **1,806 passed, 98 skipped**
+- [x] `docs/data_privacy.md` role table: instructors see the registry of their subject's program
+- [ ] Try it in the real app as an instructor (needs `serve.py` restarted, L42)
+
+**Manuscript (the user's):** user-roles / use-case diagram and the panel compliance sheet.
+
