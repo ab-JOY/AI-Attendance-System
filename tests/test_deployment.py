@@ -38,10 +38,13 @@ def serve_app(monkeypatch):
     def no_database(dictionary=False, commit=False):
         yield object()
 
-    # Every login fails: there is no such admin. Only the lockout is under test.
+    # Every login fails: there is no such account. Only the lockout is under test.
     monkeypatch.setattr(web.auth, "db_cursor", no_database)
     monkeypatch.setattr(
         web.auth.credentials_repo, "admin_by_username", lambda cursor, name: None
+    )
+    monkeypatch.setattr(
+        web.auth.credentials_repo, "instructor_by_id", lambda cursor, name: None
     )
     monkeypatch.setattr(web.auth, "login_rate_limiter", LoginRateLimiter(max_attempts=5))
 
@@ -72,7 +75,7 @@ def _login(port, forwarded_for):
         "POST",
         "/login",
         body=urllib.parse.urlencode(
-            {"role": "admin", "user_id": "admin", "password": "wrong"}
+            {"user_id": "admin", "password": "wrong"}
         ),
         headers={
             "Content-Type": "application/x-www-form-urlencoded",

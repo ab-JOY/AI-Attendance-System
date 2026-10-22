@@ -346,7 +346,7 @@ def test_login_itself_requires_a_token(client):
     assert_rejected_for_csrf(
         client.post(
             "/login",
-            data={"role": "admin", "user_id": "admin", "password": "admin"},
+            data={"user_id": "admin", "password": "admin"},
         )
     )
 

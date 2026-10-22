@@ -117,13 +117,15 @@ def test_login_puts_the_instructors_key_in_the_session(client, monkeypatch):
 
     monkeypatch.setattr(auth_module, "db_cursor", fake_cursor)
     monkeypatch.setattr(
+        auth_module.credentials_repo, "admin_by_username", lambda *_args: None
+    )
+    monkeypatch.setattr(
         auth_module.credentials_repo, "instructor_by_id", lambda *_args: account
     )
     monkeypatch.setattr(auth_module, "verify_password", lambda *_args: True)
     monkeypatch.setattr(auth_module, "is_known_default", lambda *_args: False)
 
     response = client.post("/login", data={
-        "role": "instructor",
         "user_id": "SEC-TEST-INSTR",
         "password": "whatever",
     })

@@ -123,29 +123,4 @@
             navToggle.setAttribute("aria-expanded", open ? "true" : "false");
         });
     }
-
-    /* =====================================================================
-     * The login page's placeholder swap
-     *
-     * Was inline in login.html. The mapping is on the <select> as data-
-     * attributes so this file knows nothing about roles.
-     * ===================================================================== */
-    var placeholderSource = document.querySelector("[data-placeholder-for]");
-
-    if (placeholderSource) {
-        var target = document.getElementById(
-            placeholderSource.getAttribute("data-placeholder-for")
-        );
-
-        if (target) {
-            placeholderSource.addEventListener("change", function () {
-                var chosen = placeholderSource.value;
-
-                target.placeholder =
-                    placeholderSource.getAttribute("data-placeholder-" + chosen) ||
-                    placeholderSource.getAttribute("data-placeholder-default") ||
-                    "";
-            });
-        }
-    }
 }());

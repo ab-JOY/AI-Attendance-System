@@ -13,6 +13,7 @@ failed demo.
 from __future__ import annotations
 
 import logging
+import re
 
 import mysql.connector
 from flask import Blueprint, flash, redirect, render_template, request, session, url_for
@@ -28,6 +29,9 @@ from web.placement import optional_id
 logger = logging.getLogger(__name__)
 
 instructors_bp = Blueprint("instructors", __name__)
+
+# What an instructor ID may contain. See add_instructor().
+INSTRUCTOR_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,100}")
 
 
 def _department_from_form(cursor):
@@ -133,6 +137,17 @@ def add_instructor():
 
     if not instructor_id or not fullname or not password:
         return error_page(400, "Instructor ID, full name and password are required.")
+
+    # Letters are allowed (the column is VARCHAR(100)); a slash or a space is
+    # not, because the ID becomes part of /edit_instructor/<id> and
+    # /delete_instructor/<id>, and an account that cannot be edited cannot
+    # have its password reset.
+    if not INSTRUCTOR_ID_PATTERN.fullmatch(instructor_id):
+        return error_page(
+            400,
+            "An instructor ID may use letters, numbers, hyphens, underscores "
+            "and periods only, up to 100 characters.",
+        )
 
     # SE-1. The password an admin types here is stored as a bcrypt hash, and
     # the account is flagged so the instructor must replace the

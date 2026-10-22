@@ -12,9 +12,18 @@
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
 
-            <input type="number"
+            {#
+                Text, not number: an instructor ID may contain letters
+                (e.g. INS-001). The pattern matches the server's check in
+                web/instructors.py - the ID goes into the Edit/Delete URLs.
+            #}
+            <input type="text"
                    name="instructor_id"
-                   placeholder="Instructor ID"
+                   placeholder="Instructor ID (e.g. INS-001)"
+                   maxlength="100"
+                   pattern="[A-Za-z0-9._\-]+"
+                   title="Letters, numbers, hyphen, underscore or period"
+                   autocomplete="off"
                    required>
 
             <input type="text"

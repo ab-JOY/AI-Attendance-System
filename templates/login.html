@@ -32,28 +32,17 @@
 
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
-            <!-- USER TYPE -->
-            <label for="roleSelect">User Type</label>
-            <select
-                id="roleSelect"
-                name="role"
-                data-placeholder-for="user_id"
-                data-placeholder-admin="Username"
-                data-placeholder-instructor="Instructor ID"
-                data-placeholder-default="Username"
-                required>
-                <option value="">Select User Type</option>
-                <option value="admin">Administrator</option>
-                <option value="instructor">Instructor</option>
-            </select>
-
             <!-- USERNAME / INSTRUCTOR ID -->
+            {#
+                No role dropdown: the server works out from the account
+                whether this is an administrator or an instructor.
+            #}
             <label for="user_id">Username / Instructor ID</label>
             <input
                 type="text"
                 id="user_id"
                 name="user_id"
-                placeholder="Username"
+                placeholder="Username or Instructor ID"
                 autocomplete="username"
                 required>
 

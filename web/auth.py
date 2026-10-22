@@ -63,7 +63,6 @@ def home():
 @public
 def login():
 
-    role = request.form.get('role', '')
     user_id = request.form.get('user_id', '')
     password = request.form.get('password', '')
 
@@ -84,34 +83,48 @@ def login():
             ),
         ), 429
 
-    account = None
-
+    # No "User Type" dropdown any more: the panel found choosing a role before
+    # every sign-in slow, so the role follows from whichever account the
+    # identifier and password open. Both rows are fetched in one `with`, and
+    # bcrypt runs outside it - see below.
     with db_cursor(dictionary=True) as cursor:
-        if role == "admin":
-            row = credentials_repo.admin_by_username(cursor, user_id)
+        admin_row = credentials_repo.admin_by_username(cursor, user_id)
+        instructor_row = credentials_repo.instructor_by_id(cursor, user_id)
 
-            # The collation makes the lookup above case-insensitive too, so
-            # the identifier is confirmed here rather than trusted.
-            if row is not None and row['username'] == user_id:
-                account = row
+    # The collation makes the lookups above case-insensitive too, so the
+    # identifier is confirmed here rather than trusted (SE-15).
+    candidates = []
 
-        elif role == "instructor":
-            row = credentials_repo.instructor_by_id(cursor, user_id)
+    if admin_row is not None and admin_row['username'] == user_id:
+        candidates.append(("admin", admin_row))
 
-            if row is not None and row['instructor_id'] == user_id:
-                account = row
+    if instructor_row is not None and instructor_row['instructor_id'] == user_id:
+        candidates.append(("instructor", instructor_row))
 
     # SE-1/SE-15: verified in Python, outside the `with`. Keeping bcrypt off a
     # pooled connection matters here more than anywhere - /login is the one
     # route an unauthenticated attacker can call repeatedly, and holding one of
     # five connections for the duration of each hash would turn the rate
     # limiter's job into a denial-of-service opportunity.
-    if account is None or not verify_password(password, account.get('password')):
+    #
+    # ⚠️ Nothing stops an instructor ID from equalling an admin username. The
+    # password decides which account opens, so the instructor still signs in
+    # as themselves; only someone who already holds the admin's password
+    # reaches the admin account. Admin is tried first only so that identical
+    # identifier *and* password resolve the same way every time.
+    role, account = None, None
+
+    for candidate_role, row in candidates:
+        if verify_password(password, row.get('password')):
+            role, account = candidate_role, row
+            break
+
+    if account is None:
         login_rate_limiter.record_failure(rate_limit_key)
 
         # Deliberately identical whether the account exists or not, so the
         # response cannot be used to enumerate usernames.
-        logger.info("Failed login for %r as %r", user_id, role)
+        logger.info("Failed login for %r", user_id)
 
         return render_template(
             'login.html',
