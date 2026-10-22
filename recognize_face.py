@@ -349,7 +349,12 @@ RECOGNITION_THRESHOLD = settings.recognition_threshold
 
 
 TRACK_CONFIG = TrackConfig(
-    timeout_seconds=1.5,
+    # 3.0 s and 12 weak frames (were 1.5 and 3), 2026-10-22, user: "a few
+    # movement cancels the verifying". At the ~5 fps the browser webcam sends,
+    # 3 weak frames was 0.6 s of blur or a slight turn, and it wiped the
+    # window back to 0/20. Who may be confirmed is unchanged: 58.0, 85%
+    # agreement, 8 in a row, frontal only, liveness.
+    timeout_seconds=3.0,
     max_distance=180.0,
     min_iou=0.08,
     min_size_similarity=0.40,
@@ -382,7 +387,7 @@ TRACK_CONFIG = TrackConfig(
     # threshold - but from a DET curve, with the gap justified, and with the
     # unreachable-band failure made impossible by the diagnostics below.
     confirmation_confidence=RECOGNITION_THRESHOLD,
-    max_weak_frames_before_clear=3,
+    max_weak_frames_before_clear=12,
     max_confirmed_mismatch_frames=5,
     liveness_reset_mismatch_frames=2,
 )

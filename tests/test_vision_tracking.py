@@ -344,6 +344,31 @@ def test_a_single_weak_frame_does_not_clear_the_history():
     assert len(track.history) == CONFIG.prediction_history_size
 
 
+def test_a_weak_frame_does_not_break_the_consecutive_run():
+    """
+    Blur or a slight turn is not evidence about identity.
+
+    Reported as "a few movement cancels the verifying": one weak frame used to
+    zero the run, so a student who moved had to start the 8 again.
+    """
+    track = state()
+    vote(track, ALICE, 5)
+    track.note_weak_prediction()
+    vote(track, ALICE, 3)
+
+    assert track.consecutive_count == 8
+
+
+def test_a_different_student_still_breaks_the_run_across_weak_frames():
+    track = state()
+    vote(track, ALICE, 5)
+    track.note_weak_prediction()
+    vote(track, BOB, 1)
+
+    assert track.consecutive_id == BOB
+    assert track.consecutive_count == 1
+
+
 def test_a_good_prediction_resets_the_weak_counter():
     track = state()
     track.note_weak_prediction()

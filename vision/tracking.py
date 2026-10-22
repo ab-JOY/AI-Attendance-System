@@ -282,14 +282,20 @@ class TrackState:
 
         A run of these clears the history, so a track that wandered off a
         face cannot resume an old identity from stale votes.
+
+        ⚠️ A single one no longer breaks the consecutive run. Motion blur, a
+        slight turn or a refused crop says nothing about *who* this is, and
+        zeroing the run on it meant any small movement sent a student back to
+        the start of verification. Only a *different* student breaks the run
+        (`add_prediction`), as on a confirmed track.
         """
         self.weak_frames += 1
-        self.consecutive_id = None
-        self.consecutive_count = 0
 
         if self.weak_frames >= self.config.max_weak_frames_before_clear:
             self.history.clear()
             self.weak_frames = 0
+            self.consecutive_id = None
+            self.consecutive_count = 0
 
     def add_prediction(
         self,
