@@ -178,7 +178,7 @@ EMPTY_CLASS_LIST_REMEDY_ADMIN = (
 )
 
 EMPTY_CLASS_LIST_REMEDY_INSTRUCTOR = (
-    " Add students under Face Capture → Class List, then start the session "
+    " Add students under My Classes → Class List, then start the session "
     "again."
 )
 

@@ -136,6 +136,7 @@ PROTECTED_GET_ROUTES = [
     "/video_feed",
     "/enrol/status",
     "/class_capture",
+    "/my_classes",
     # FS-10. A numeric id has no obviously-fake form the way SEC-TEST-NOBODY
     # does - the exact gap lessons.md L6 calls out after /delete_subject/1
     # turned out to name a real row - so this is a value no auto_increment

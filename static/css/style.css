@@ -1416,12 +1416,11 @@ table caption{
     background:#CBD5E1;
 }
 
-/* The instructor's way into a class list from Face Capture. An <a>, so it
-   needs the button styling `button{}` gives for free; gold rather than the
-   navy of the capture buttons beside it, so it is found first. */
+/* The way into a class list from My Classes. An <a>, so it needs the button
+   styling `button{}` gives for free; gold so it is the first thing found. */
 .class-list-btn{
     display:inline-block;
-    margin:4px 0 14px;
+    white-space:nowrap;
     padding:12px 22px;
     border-radius:10px;
     background:#0A1F8F;

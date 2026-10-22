@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+
+{% block title %}My Classes{% endblock %}
+
+{% block content %}
+    <h1>My Classes</h1>
+
+    {#
+        Read only. The administrator assigns subjects, sections and schedules;
+        what an instructor changes here is who is on each class list, through
+        the Class List button - the same page and the same rules as the
+        administrator's (web/subjects.py checks the subject is theirs).
+    #}
+    <p class="hint">
+        The subjects assigned to you. Use <strong>Class List</strong> to add
+        students who are already registered - the whole section at once, or
+        one at a time - and to remove them. Only students on a class list are
+        marked present or absent for that subject.
+    </p>
+
+    {% if classes %}
+        <table class="subject-table">
+            <tr>
+                <th>Subject</th>
+                <th>Section</th>
+                <th>Days</th>
+                <th>Time</th>
+                <th>Students</th>
+                <th>Action</th>
+            </tr>
+
+            {% for class in classes %}
+                <tr>
+                    <td>
+                        <strong>{{ class.subject_code }}</strong><br>
+                        {{ class.subject_name }}
+                    </td>
+                    <td>
+                        {% if class.section_id %}
+                            {{ class.course }} {{ class.year_level }}{{ class.section }}
+                        {% elif class.section %}
+                            {{ class.section }}
+                        {% else %}
+                            Not linked to a section
+                        {% endif %}
+                    </td>
+                    <td>{{ class.day or "—" }}</td>
+                    <td>
+                        {% if class.time_in %}
+                            {{ class.time_in|time_box }}{% if class.time_out %}–{{ class.time_out|time_box }}{% endif %}
+                        {% else %}
+                            —
+                        {% endif %}
+                    </td>
+                    <td>
+                        {{ class.enrolled }}
+                        {% if not class.enrolled %}<strong>· none yet</strong>{% endif %}
+                    </td>
+                    <td>
+                        <a
+                            class="class-list-btn"
+                            href="{{ url_for('subjects.subject_enrolments', subject_id=class.id) }}"
+                        >
+                            📋 Class List
+                        </a>
+                    </td>
+                </tr>
+            {% endfor %}
+        </table>
+    {% else %}
+        <p role="status">
+            You have no subjects assigned yet. Ask an administrator to assign
+            your subjects to you.
+        </p>
+    {% endif %}
+{% endblock %}

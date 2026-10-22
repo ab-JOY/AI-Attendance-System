@@ -549,11 +549,11 @@ def test_an_instructor_is_offered_the_class_list_of_their_subject(
 def test_an_instructor_is_given_their_own_directions(client, monkeypatch, started):
     """
     The remedy is a different sentence for each reader. Subjects is an admin
-    page; an instructor reaches the Class List from Face Capture.
+    page; an instructor reaches the Class List from My Classes.
     """
     body = start(client, monkeypatch, enrolled=0, role="instructor")
 
-    assert "Face Capture → Class List" in body["message"]
+    assert "My Classes → Class List" in body["message"]
     assert "Ask an administrator" not in body["message"]
 
 

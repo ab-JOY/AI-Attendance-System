@@ -610,6 +610,27 @@ def delete_subject(id):
     return redirect(url_for('subjects.subjects'))
 
 
+@subjects_bp.route('/my_classes')
+@role_required('instructor')
+def my_classes():
+    """
+    The instructor's subjects: when each meets, how many students are on it,
+    and the way into its class list. Read only - the administrator assigns
+    subjects and schedules.
+    """
+    try:
+        with db_cursor(dictionary=True) as cursor:
+            classes = subjects_repo.for_selection_with_class_list_size(
+                cursor, instructor_id=instructor_scope()
+            )
+
+    except mysql.connector.Error:
+        logger.exception("Could not load the My Classes page")
+        return error_page(500)
+
+    return render_template('my_classes.html', classes=classes)
+
+
 # ==========================================================
 # CLASS LISTS (FS-3)
 #

@@ -118,7 +118,7 @@ def test_an_instructor_opens_the_class_list_of_their_subject(client, school):
     assert response.status_code == 200
     assert b"Class List" in response.data
     # Subjects is an admin page; the way back is the page they came from.
-    assert b'href="/class_capture"' in response.data
+    assert b'href="/my_classes"' in response.data
     assert b'href="/subjects"' not in response.data
 
 
@@ -268,3 +268,68 @@ def test_an_administrator_changes_any_class_list(client, school, monkeypatch):
     assert b'href="/subjects"' in page.data
     assert response.status_code == 302
     assert ("enrol", STUDENT, OTHER_SUBJECT) in school
+
+
+# ==============================
+# My Classes
+# ==============================
+
+
+def test_my_classes_lists_only_the_instructors_subjects(client, monkeypatch):
+    """
+    Asked for this instructor's offerings, with the schedule and the class
+    list size, and each row leads to its Class List.
+    """
+    from datetime import timedelta
+
+    import web.subjects as subjects_module
+
+    asked_for = []
+
+    def classes(_cursor, instructor_id=None):
+        asked_for.append(instructor_id)
+        return [{
+            **offering(OWN_SUBJECT), "day": "Mon,Wed",
+            "time_in": timedelta(hours=7, minutes=30),
+            "time_out": timedelta(hours=9), "enrolled": 0,
+        }]
+
+    monkeypatch.setattr(subjects_module, "db_cursor", fake_cursor)
+    monkeypatch.setattr(
+        subjects_module.subjects_repo,
+        "for_selection_with_class_list_size", classes,
+    )
+    sign_in(client)
+
+    response = client.get("/my_classes")
+    page = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert asked_for == [INSTRUCTOR]
+    assert "SEC101" in page
+    assert "07:30–09:00" in page
+    assert "none yet" in page
+    assert f'href="/subject_enrolments/{OWN_SUBJECT}"' in page
+
+
+def test_my_classes_is_in_the_instructors_menu(client, monkeypatch):
+    import web.subjects as subjects_module
+
+    monkeypatch.setattr(subjects_module, "db_cursor", fake_cursor)
+    monkeypatch.setattr(
+        subjects_module.subjects_repo,
+        "for_selection_with_class_list_size", lambda *_args, **_kwargs: [],
+    )
+    sign_in(client)
+
+    page = client.get("/my_classes").get_data(as_text=True)
+
+    assert 'href="/my_classes"' in page
+    assert "no subjects assigned" in page
+
+
+def test_my_classes_is_for_instructors(client):
+    """An administrator has the full Subjects page instead."""
+    sign_in(client, role="admin")
+
+    assert client.get("/my_classes").status_code == 403

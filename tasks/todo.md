@@ -1381,5 +1381,10 @@ instructors can import too.
 - [x] `docs/data_privacy.md` role table: instructors see the registry of their subject's program
 - [ ] Try it in the real app as an instructor (needs `serve.py` restarted, L42)
 
+- [x] **My Classes** (`/my_classes`, instructor only, 2026-10-23): read-only list of the instructor's subjects with
+      section, days, time, class-list size and the gold *Class List* button. The button moved here from Face Capture;
+      the empty-roster dialog now says "My Classes → Class List". Reuses `for_selection_with_class_list_size` (now
+      also returns `day`, `time_out`; checked read-only on the live MariaDB 10.4). 3 more tests; fast suite 1,816 passed
+
 **Manuscript (the user's):** user-roles / use-case diagram and the panel compliance sheet.
 

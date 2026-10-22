@@ -73,6 +73,7 @@
         {% elif session['role'] == 'instructor' %}
 
             {{ link('dashboard.dashboard', 'Dashboard') }}
+            {{ link('subjects.my_classes', 'My Classes') }}
             {{ link('sessions.attendance', 'Attendance') }}
             {{ link('enrolment.class_capture', 'Face Capture') }}
             {{ link('reports.reports', 'Reports') }}

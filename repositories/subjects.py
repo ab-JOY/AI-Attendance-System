@@ -221,11 +221,15 @@ def for_selection_with_class_list_size(cursor, instructor_id=None):
     every empty class list as full. Same trap as the Classes column in
     `repositories/students.py` and the classless-student check in
     `scripts/preflight.py`, both of which say so in the same words.
+
+    Also carries the schedule (`day`, `time_out`) for the instructor's My
+    Classes page. Both depend on `s.id`, so the GROUP BY still accepts them.
     """
     owned, values = _owned_by(instructor_id)
 
     cursor.execute(f"""
-        SELECT {SELECTION_COLUMNS}, COUNT(e.subject_id) AS enrolled
+        SELECT {SELECTION_COLUMNS}, s.day, s.time_out,
+               COUNT(e.subject_id) AS enrolled
         FROM subjects s
         {OFFERING_JOIN}
         LEFT JOIN enrolments e ON e.subject_id = s.id

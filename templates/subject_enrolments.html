@@ -188,7 +188,7 @@
         {% if session['role'] == 'admin' %}
             <a href="{{ url_for('subjects.subjects') }}">Back to subjects</a>
         {% else %}
-            <a href="{{ url_for('enrolment.class_capture') }}">Back to Face Capture</a>
+            <a href="{{ url_for('subjects.my_classes') }}">Back to My Classes</a>
         {% endif %}
     </p>
 {% endblock %}
