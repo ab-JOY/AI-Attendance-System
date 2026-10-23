@@ -169,6 +169,10 @@ class LivenessChallenge:
     post_match_count: int = 0
     step_started_at: float = 0.0
     restarts: int = 0
+    # Timing only, for the verification-time log line. Nothing decides on
+    # these. started_at survives restart() so a redraw counts toward the total.
+    started_at: float = 0.0
+    passed_at: float | None = None
     clock: Any = None
     rng: Any = field(default=None, repr=False)
 
@@ -183,6 +187,9 @@ class LivenessChallenge:
 
         if not self.step_started_at:
             self.step_started_at = self.clock()
+
+        if not self.started_at:
+            self.started_at = self.step_started_at
 
     # -- state -------------------------------------------------------------
 
@@ -238,6 +245,7 @@ class LivenessChallenge:
 
         if self.index >= len(self.sequence):
             self.passed = True
+            self.passed_at = self.clock()
 
     def restart(self) -> None:
         """
@@ -250,6 +258,7 @@ class LivenessChallenge:
         self.sequence = draw_sequence(self.config, self.rng)
         self.index = 0
         self.passed = False
+        self.passed_at = None
         self.post_match_count = 0
         self.step_started_at = self.clock()
         self.restarts += 1
@@ -268,8 +277,13 @@ class LivenessChallenge:
     def message(self) -> str:
         if self.passed:
             if self.post_match_count < self.config.post_match_frames:
+                # The last step is often a turn, and a turned face cannot be
+                # matched, so the re-check waits until the student faces front.
+                # Say so, or they hold the turn and the count never moves.
+                # ⚠️ Keep the "Liveness" prefix: status_color() keys on it, and
+                # without it this instruction is drawn red, like a rejection.
                 return (
-                    "Liveness passed - Rechecking "
+                    "Liveness passed - Face the camera "
                     f"{self.post_match_count}/{self.config.post_match_frames}"
                 )
 

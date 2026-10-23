@@ -355,7 +355,7 @@ def test_the_message_reports_the_recheck_then_success():
     live = challenge([LEFT, CENTER])
     drive(live, [TURNED_LEFT, CENTERED])
 
-    assert "Rechecking 0/8" in live.message()
+    assert "Face the camera 0/8" in live.message()
 
     for _ in range(CONFIG.post_match_frames):
         live.note_identity_match()
@@ -377,6 +377,13 @@ def test_every_message_keeps_the_prefix_the_overlay_colours_on():
             live = challenge([first, second])
 
             assert live.message().startswith("Liveness")
+
+    # The re-check message too - it was the one reworded without the prefix.
+    live = challenge([LEFT, CENTER])
+    drive(live, [TURNED_LEFT, CENTERED])
+
+    assert live.passed
+    assert live.message().startswith("Liveness")
 
 
 # ---------------------------------------------------------------------------

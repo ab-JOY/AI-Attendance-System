@@ -1205,6 +1205,22 @@ def process_confirmed_track(
             state.attendance_saved = True
             state.attendance_status = recorded
 
+            # Measured from the challenge being issued, i.e. after the
+            # identity locked; the time to first recognition is not included.
+            liveness = state.liveness
+            now = liveness.clock()
+
+            if liveness.passed_at is not None:
+                logger.info(
+                    "Verification timing for %s: challenge %.1f s, recheck "
+                    "%.1f s, total %.1f s (restarts %d)",
+                    locked_id,
+                    liveness.passed_at - liveness.started_at,
+                    now - liveness.passed_at,
+                    now - liveness.started_at,
+                    liveness.restarts,
+                )
+
             return (
                 locked_id,
                 locked_name,

@@ -1769,3 +1769,26 @@ already been given the wrong table.
   share) over one whose balance is a property of number theory.
 - **When a rule given to the user turns out wrong, tell them in the same reply**
   that reports the fix, with the corrected numbers.
+
+---
+
+## L43 - Before rewording a status message, find every reader of the string
+
+**2026-10-23, recheck message.** To make the post-liveness re-check faster I
+changed `LivenessChallenge.message()` from `"Liveness passed - Rechecking n/8"`
+to `"Look straight at the camera - Confirming n/8"`. `status_color()` in
+`recognize_face.py` picks the box colour with `status.startswith("Liveness")`,
+so the instruction fell through to red - the rejection colour. The student saw
+a red box mid-recheck, read it as a cancelled verification, moved away, and the
+track was lost: the user reported "slower, and a slight move cancels it again",
+which looked like the SE-18 / small-movement regression returning. The only
+attempt after the restart (session 168, `tt5`) recorded nothing.
+
+`test_every_message_keeps_the_prefix_the_overlay_colours_on` existed for exactly
+this, but only checked the first-step message, so it passed. It now also checks
+the re-check message. Fixed wording: `"Liveness passed - Face the camera n/8"`.
+
+**How to apply:** a user-facing string can be an API. Before changing one,
+`grep` for its prefix (`startswith`, `==`, `in`) across Python and JS, and run
+`status_color()` on the new text. A test guarding a string contract must cover
+every state that produces the string, not just the first.
