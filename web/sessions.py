@@ -10,6 +10,7 @@ in and what the operator is told.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date
 
 import mysql.connector
@@ -25,6 +26,7 @@ from flask import (
 )
 
 from camera_utils import describe_available_cameras, save_camera_index
+from config.settings import settings as app_config
 from infra.camera import BrowserCamera
 from infra.db import db_cursor
 from infra.uploads import UploadRejected, decode_frame
@@ -49,7 +51,7 @@ from repositories import enrolments as enrolments_repo
 from repositories import subjects as subjects_repo
 from security.access import authenticated, instructor_scope, json_api
 from services import attendance as attendance_service
-from services import schedule
+from services import classroom_code, schedule
 from vision.pose import (
     MIN_NATIVE_FRAME_WIDTH,
     RECOGNITION_FRAME_HEIGHT,
@@ -1038,6 +1040,42 @@ def attendance_live():
             }
             for row in rows
         ],
+    })
+
+
+@sessions_bp.route('/attendance/class-code')
+@authenticated
+@json_api
+def attendance_class_code():
+    """
+    The classroom code for the running session: the QR the students' phones
+    scan to prove they are in the room (services/classroom_code.py).
+
+    Polled by the attendance page while a session runs. Only for the
+    instructor whose subject is running, or an administrator: another
+    instructor holding this code could check students in from anywhere.
+    """
+    active = recognition_session.subject
+
+    if not recognition_session.is_running or active is None:
+        return jsonify({"running": False})
+
+    if not _may_use_subject(active.subject_id):
+        return jsonify({"running": True, "allowed": False}), 403
+
+    code, seconds_left = classroom_code.current_code(
+        classroom_code.secret_from(app_config.secret_key),
+        classroom_code.session_key(active),
+        time.time(),
+    )
+
+    return jsonify({
+        "running": True,
+        "allowed": True,
+        "code": code,
+        "qr": classroom_code.qr_svg_data_uri(code),
+        "seconds_left": seconds_left,
+        "period": classroom_code.PERIOD_SECONDS,
     })
 
 

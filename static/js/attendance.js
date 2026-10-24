@@ -29,6 +29,7 @@
 
     var START_URL = page.getAttribute("data-start-url");
     var LIVE_URL = page.getAttribute("data-live-url");
+    var CLASS_CODE_URL = page.getAttribute("data-class-code-url");
     var FEED_URL = page.getAttribute("data-feed-url");
     var CAMERAS_URL = page.getAttribute("data-cameras-url");
     var SELECT_CAMERA_URL = page.getAttribute("data-select-camera-url");
@@ -198,8 +199,11 @@
                     stopPolling();
                     stopUploading();
                     streamWanted = false;
+                    hideClassCode();
                     return;
                 }
+
+                refreshClassCode();
 
                 // Reloaded mid-session on the device feeding it: pick the
                 // uploads back up, or recognition has nothing to look at.
@@ -233,6 +237,62 @@
     function schedule() {
         stopPolling();
         timer = window.setTimeout(poll, POLL_MS);
+    }
+
+    /* ---------------------------------------------------------------
+     * The classroom code (services/classroom_code.py)
+     *
+     * Refreshed on the live poll, every POLL_MS. The QR image is replaced
+     * only when the code changes, so it does not flicker between polls. A
+     * failure hides nothing that was shown - the last code stays valid for
+     * up to two periods - and is not reported: the live list's own poll
+     * already says when the server stops answering.
+     * ------------------------------------------------------------- */
+
+    var classCodePanel = document.getElementById("class-code-panel");
+    var classCodeQr = document.getElementById("class-code-qr");
+    var classCodeDigits = document.getElementById("class-code-digits");
+    var classCodeLeft = document.getElementById("class-code-left");
+    var classCodePeriod = document.getElementById("class-code-period");
+    var shownCode = null;
+
+    function hideClassCode() {
+        if (classCodePanel) {
+            classCodePanel.hidden = true;
+        }
+        shownCode = null;
+    }
+
+    function refreshClassCode() {
+        if (!classCodePanel || !CLASS_CODE_URL) {
+            return;
+        }
+
+        fetch(CLASS_CODE_URL, { credentials: "same-origin" })
+            .then(function (response) {
+                return response.ok ? response.json() : null;
+            })
+            .then(function (body) {
+                if (!body || !body.running || !body.allowed) {
+                    hideClassCode();
+                    return;
+                }
+
+                if (body.code !== shownCode) {
+                    shownCode = body.code;
+                    classCodeQr.src = body.qr;
+                    // Two groups of three, easier to read off a projector.
+                    classCodeDigits.textContent =
+                        body.code.slice(0, 3) + " " + body.code.slice(3);
+                }
+
+                classCodeLeft.textContent = body.seconds_left;
+                classCodePeriod.textContent = body.period;
+                classCodePanel.hidden = false;
+            })
+            .catch(function () {
+                // See above: keep showing the last code.
+            });
     }
 
     function stopPolling() {

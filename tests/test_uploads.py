@@ -269,3 +269,94 @@ def test_a_region_entirely_outside_the_kept_frame_is_nothing():
     from infra.uploads import canonical_region
 
     assert canonical_region((0, 0, 1440, 100), (1440, 1080)) is None
+
+
+# ---------------------------------------------------------------------------
+# letterbox() - phone attendance: fit and pad, never crop
+# ---------------------------------------------------------------------------
+
+
+def test_a_square_is_letterboxed_whole_into_the_recognition_frame():
+    """
+    The phone's square preview arrives whole: top and bottom survive, which
+    canonicalise() would have cut away to a 16:9 band (lessons.md L33).
+    """
+    from infra.uploads import LETTERBOX_GREY, letterbox
+
+    square = np.full((1080, 1080, 3), 200, np.uint8)
+    square[:20, :] = (0, 0, 255)    # a red top edge
+    square[-20:, :] = (255, 0, 0)   # a blue bottom edge
+
+    frame = letterbox(square, (1280, 720))
+
+    assert frame.shape == (720, 1280, 3)
+    # Scaled to 720 high, centred: 280 px of padding on each side.
+    assert (frame[:, :279] == LETTERBOX_GREY).all()
+    assert (frame[:, -279:] == LETTERBOX_GREY).all()
+    # Both edges are still there.
+    assert frame[2, 640, 2] > 200 and frame[2, 640, 0] < 50
+    assert frame[-3, 640, 0] > 200 and frame[-3, 640, 2] < 50
+
+    # The difference from canonicalise(), which is the point.
+    cropped = canonicalise(square, (1280, 720))
+    assert not (cropped[2, 640, 2] > 200 and cropped[2, 640, 0] < 50)
+
+
+def test_a_sixteen_by_nine_upload_is_unchanged_by_letterboxing():
+    """An older app's 16:9 frame fits exactly - same as canonicalise()."""
+    from infra.uploads import letterbox
+
+    source = np.random.default_rng(1).integers(0, 255, (1080, 1920, 3), np.uint8)
+
+    assert np.array_equal(letterbox(source, (1280, 720)), canonicalise(source, (1280, 720)))
+
+
+def test_letterboxing_never_squashes():
+    """The square's content stays square: aspect ratio is preserved."""
+    from infra.uploads import LETTERBOX_GREY, letterbox
+
+    square = np.zeros((1000, 1000, 3), np.uint8)
+    frame = letterbox(square, (1280, 720))
+    content = np.argwhere((frame != LETTERBOX_GREY).any(axis=2))
+
+    height = content[:, 0].max() - content[:, 0].min() + 1
+    width = content[:, 1].max() - content[:, 1].min() + 1
+    assert height == width == 720
+
+
+# ---------------------------------------------------------------------------
+# decode_letterboxed() - the phone route's size rule: never enlarged
+# ---------------------------------------------------------------------------
+
+
+def _jpeg(width, height):
+    ok, buffer = cv2.imencode(".jpg", np.full((height, width, 3), 128, np.uint8))
+    assert ok
+    return buffer.tobytes()
+
+
+def test_a_768_square_from_a_phone_is_accepted():
+    """
+    Measured on the user's phone (2026-10-24): a 768 square was refused by the
+    960-wide minimum, though fitting it into 1280x720 only shrinks it.
+    """
+    from infra.uploads import decode_letterboxed
+
+    frame = decode_letterboxed(_jpeg(768, 768), "image/jpeg", (1280, 720))
+
+    assert frame.shape == (720, 1280, 3)
+
+
+def test_a_square_that_would_have_to_be_enlarged_is_refused():
+    from infra.uploads import UploadRejected, decode_letterboxed
+
+    with pytest.raises(UploadRejected, match="at least 720 pixels high"):
+        decode_letterboxed(_jpeg(700, 700), "image/jpeg", (1280, 720))
+
+
+def test_a_wide_frame_too_narrow_to_fill_the_width_is_refused():
+    """16:9 is fitted by width: 1200x675 would be enlarged to 1280x720."""
+    from infra.uploads import UploadRejected, decode_letterboxed
+
+    with pytest.raises(UploadRejected):
+        decode_letterboxed(_jpeg(1200, 675), "image/jpeg", (1280, 720))

@@ -10,7 +10,10 @@ reopen it - and when the register cannot be read the route fails closed.
 An Absent row is not a mark: a student marked absent by an earlier session
 today can still be verified, as `save_attendance()` allows.
 
-None of these touch the database: the register lookup is replaced.
+None of these touch the database: the register lookup is replaced. The
+student holds a classroom-code pass throughout (that refusal is
+tests/test_api_checkin.py), and the face pipeline is a fake
+(services/phone_verification.py has its own tests).
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ import pytest
 
 import recognize_face
 import web.api as api
-from recognize_face import NotRecorded
+from services.phone_verification import PhoneResult
 from web.api import _make_token
 
 STUDENT_ID = "23-1-1-0001"
@@ -80,10 +83,17 @@ def flask_app():
 def session(monkeypatch):
     fake = FakeSession()
     monkeypatch.setattr(recognize_face, "session", fake)
-    monkeypatch.setattr(recognize_face, "align_face", lambda frame, landmarks: frame)
-    monkeypatch.setattr(recognize_face, "get_face_quality_issue", lambda face: None)
-    monkeypatch.setattr(recognize_face, "preprocess_for_lbph", lambda face: face)
     return fake
+
+
+class Passes:
+    def seconds_left(self, student_id, key):
+        return 180
+
+
+@pytest.fixture(autouse=True)
+def checked_in(monkeypatch):
+    monkeypatch.setattr(api, "_check_ins", Passes())
 
 
 @pytest.fixture
@@ -101,22 +111,31 @@ def register(monkeypatch):
     return state
 
 
-class Saves(list):
-    """Records each save_attendance() call; `result` is what it returns."""
+class Phones(list):
+    """
+    Stands in for the phone pipeline. Each verify() is one frame judged;
+    `result` is its outcome, and a done result marks the session as the real
+    one does (only after a row is written).
+    """
 
-    result = "Present"
+    result = PhoneResult(True, "Verified! Marked as Present.")
+
+    def verify(self, student_id, snapshot, frame, mark_recognized, **timing):
+        self.append(student_id)
+        if self.result.done:
+            mark_recognized(student_id, "Present")
+        return self.result
+
+    def discard_all(self):
+        pass
 
 
 @pytest.fixture
 def saves(monkeypatch):
-    calls = Saves()
-
-    def save(student_id, subject):
-        calls.append(student_id)
-        return calls.result
-
-    monkeypatch.setattr(recognize_face, "save_attendance", save)
-    return calls
+    """The frames that reached face judgement (named for what it guards)."""
+    phones = Phones()
+    monkeypatch.setattr(api, "_phones", phones)
+    return phones
 
 
 def headers():
@@ -207,20 +226,23 @@ def test_after_being_recorded_the_next_attempt_is_refused(
     assert saves == [STUDENT_ID]  # one write, not two
 
 
-def test_a_failed_save_does_not_lock_the_student_out(flask_app, session, register, saves):
+def test_a_frame_that_records_nothing_does_not_lock_the_student_out(
+    flask_app, session, register, saves
+):
     """
-    NotRecorded.ERROR wrote nothing. Marking it would make the once-a-day rule
-    refuse the student for the rest of the day with no attendance at all.
+    A failed save (NotRecorded.ERROR) wrote nothing, and the pipeline retries
+    it on a later frame rather than ending. Marking the student would make the
+    once-a-day rule refuse them for the rest of the day with no attendance at
+    all - so nothing is marked until a frame comes back done.
     """
-    saves.result = NotRecorded.ERROR
+    saves.result = PhoneResult(False, "Not recorded - system error")
 
-    response = upload(flask_app)
+    body = upload(flask_app).get_json()
 
-    assert response.status_code == 503
-    assert "Verified" not in response.get_json()["message"]
+    assert body["done"] is False
     assert session.marked == {}
 
-    saves.result = "Present"
+    saves.result = PhoneResult(True, "Verified! Marked as Present.")
     retry = upload(flask_app).get_json()
     assert retry["done"] is True and "already" not in retry
 

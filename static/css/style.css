@@ -559,6 +559,29 @@ button:hover{
     overflow-x:auto;
 }
 
+/* The classroom code (attendance.html). Large: it is read and scanned from
+   students' seats, off the classroom screen. */
+.class-code-body{
+    display:flex;
+    flex-wrap:wrap;
+    align-items:center;
+    gap:24px;
+}
+
+.class-code-qr{
+    width:min(280px,100%);
+    height:auto;
+    image-rendering:pixelated;
+}
+
+.class-code-digits{
+    margin:0;
+    font-size:3rem;
+    font-weight:700;
+    letter-spacing:.12em;
+    font-variant-numeric:tabular-nums;
+}
+
 /* ===================================
    REPORTS
 =================================== */

@@ -21,8 +21,14 @@ decisions):
   `/students`, `/subjects` and `/dashboard` served only the staff screens.
 - Phone attendance is **once per class per day**: a student already Present or
   Late for the running subject today is refused before any face is judged.
+- Phone attendance needs the **classroom code** (2026-10-24): the QR on the
+  instructor's attendance page, scanned in the app (`/attendance/checkin`).
+  Without a pass no face is judged, so the app cannot be used from home.
+- A phone's frames are judged by **the classroom camera's own pipeline**,
+  liveness included (services/phone_verification.py), not by one photo.
 
-`tests/test_api_students_only.py` and `tests/test_api_once_a_day.py` keep them.
+`tests/test_api_students_only.py`, `tests/test_api_once_a_day.py`,
+`tests/test_api_attendance_frame.py` and `tests/test_api_checkin.py` keep them.
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ from __future__ import annotations
 import datetime
 import functools
 import logging
+import threading
 
 import jwt
 import mysql.connector
@@ -37,12 +44,14 @@ from flask import Blueprint, jsonify, request
 
 from config.settings import settings as app_config
 from infra.db import db_cursor
-from infra.uploads import UploadRejected, decode_frame
+from infra.uploads import UploadRejected, decode_letterboxed
 from repositories import attendance as attendance_repo
 from repositories import students as students_repo
 from repositories import subjects as subjects_repo
 from security.access import public
 from security.passwords import verify_password
+from services import classroom_code
+from vision.pose import RECOGNITION_FRAME_HEIGHT, RECOGNITION_FRAME_WIDTH
 
 logger = logging.getLogger(__name__)
 
@@ -286,9 +295,19 @@ def api_attendance_live():
     active = recognition_session.subject
 
     if not recognition_session.is_running or active is None:
+        # Every app on this screen polls here, so it is where phones left
+        # from a session that has ended get their detectors released.
+        _discard_phones()
         return jsonify({"success": True, "running": False, "students": []})
 
+    student_id = request.jwt_user.get("user_id")
     student_ids = sorted(recognition_session.recognized_ids())
+
+    # Seconds left on this student's classroom-code pass; 0 means the app
+    # asks for the code before it offers the camera.
+    pass_seconds = _check_ins.seconds_left(
+        student_id, classroom_code.session_key(active)
+    )
 
     try:
         with db_cursor(dictionary=True) as cursor:
@@ -302,12 +321,11 @@ def api_attendance_live():
             "running": True,
             "students": [],
             "recognised": len(student_ids),
+            "pass_seconds": pass_seconds,
         })
 
     try:
-        your_status = _recorded_status_today(
-            request.jwt_user.get("user_id"), active.subject_id
-        )
+        your_status = _recorded_status_today(student_id, active.subject_id)
     except mysql.connector.Error:
         your_status = None  # the frame route checks again, and fails closed
 
@@ -319,6 +337,7 @@ def api_attendance_live():
         # Present/Late if the signed-in student already has a mark for this
         # class today - the app shows that instead of a Verify button.
         "your_status": your_status,
+        "pass_seconds": pass_seconds,
         "students": [
             {
                 "student_id": row["student_id"],
@@ -331,21 +350,94 @@ def api_attendance_live():
     })
 
 
+@api_bp.route("/attendance/checkin", methods=["POST"])
+@public
+@student_required
+def api_attendance_checkin():
+    """
+    The classroom code, scanned or typed: a pass to verify for this session.
+
+    See services/classroom_code.py for what the code proves and what it does
+    not. The pass is what `/attendance/frame` asks for before any face.
+    """
+    from recognize_face import session as recognition_session
+
+    active = recognition_session.subject
+
+    if not recognition_session.is_running or active is None:
+        return jsonify({"success": False, "message": "No active attendance session."}), 409
+
+    student_id = request.jwt_user.get("user_id")
+    data = request.get_json(silent=True) or {}
+    code = classroom_code.parse_code(str(data.get("code") or ""))
+
+    outcome, tries_left = _check_ins.check_in(
+        student_id, classroom_code.session_key(active), code, _classroom_secret()
+    )
+
+    if outcome is classroom_code.CheckIn.ACCEPTED:
+        return jsonify({
+            "success": True,
+            "pass_seconds": classroom_code.PASS_SECONDS,
+            "message": "You are checked in. Now verify your face.",
+        })
+
+    if outcome is classroom_code.CheckIn.LOCKED:
+        logger.warning("Classroom code locked for %s after wrong tries", student_id)
+        return jsonify({
+            "success": False,
+            "locked": True,
+            "message": (
+                "Too many wrong codes. Ask your instructor to record your "
+                "attendance."
+            ),
+        }), 429
+
+    return jsonify({
+        "success": False,
+        "tries_left": tries_left,
+        "message": (
+            "That code is wrong or has expired. Scan the code on the "
+            "classroom screen again."
+        ),
+    }), 400
+
+
 @api_bp.route("/attendance/frame", methods=["POST"])
 @public
 @student_required
 def api_attendance_frame():
-    """Verify a student's face for the active attendance session from the mobile app."""
+    """
+    One frame from a student's phone, judged by the classroom camera's rules.
+
+    The phone streams frames while the student verifies; each answer is the
+    status the classroom screen would draw under their face ("Verifying 12/20",
+    "Turn LEFT", ...) plus `stage`, `step` and `progress` for the app to draw,
+    until `done`. See services/phone_verification.py for what is shared with
+    the classroom loop and what each phone gets of its own.
+
+    ⚠️ This used to be one photo, one predict, at a 70.0 distance with no
+    frontality check and no liveness: one good photo of a student recorded
+    them, and 70.0 accepts the closest impostor measured (62.2) that 58.0
+    refuses.
+
+    Refused before any face is judged, in this order: no session; already
+    recorded today; no classroom-code pass.
+    """
     from recognize_face import session as recognition_session
-    from recognize_face import align_face, preprocess_for_lbph, get_face_quality_issue, NotRecorded, save_attendance
-    import cv2
+    from services.phone_verification import PhonesBusy
 
     snapshot = recognition_session.snapshot()
-    if not snapshot.running or snapshot.subject is None:
+
+    if (
+        not snapshot.running
+        or snapshot.subject is None
+        or snapshot.recognizer is None
+    ):
+        _discard_phones()
         return jsonify({"success": False, "message": "No active attendance session."}), 409
 
-    user = request.jwt_user
-    student_id = user.get("user_id")
+    student_id = request.jwt_user.get("user_id")
 
     # ⚠️ **Once a day, per class, checked before any face is judged.** A
     # student who already has Present or Late for this subject today is
@@ -379,66 +471,93 @@ def api_attendance_frame():
             ),
         })
 
+    # ⚠️ In the room, checked before any face is judged: no pass, no
+    # recognition (services/classroom_code.py).
+    if not _check_ins.seconds_left(
+        student_id, classroom_code.session_key(snapshot.subject)
+    ):
+        return jsonify({
+            "success": False,
+            "need_code": True,
+            "message": "Scan the classroom code first.",
+        }), 403
+
+    # The resolution the recognition gates were tuned at, as the browser
+    # camera route decodes (web/sessions.py) - not enrolment's 1920x1080.
+    #
+    # ⚠️ **Letterboxed, not centre-cropped.** The app sends a square, the shape
+    # of its preview; cropping it to 16:9 would cut off the top and bottom of
+    # what the student framed - L33's bug, the other way round. A 16:9 upload
+    # fits exactly and is unchanged. The size rule is "never enlarged", not
+    # the 960-wide minimum: see decode_letterboxed().
+    #
+    # ⚠️ **Several frames per request, judged in the order they were taken.**
+    # One round trip through the tunnel costs 0.7-1.3 s whatever the picture's
+    # size (measured 2026-10-24, 21-50 KB), so one frame per request held a
+    # phone to about one frame a second - 25-35 s to verify, against the
+    # classroom camera's 5-8 s. The app keeps photographing while a request is
+    # in flight and sends what it took since in the next one; one request at a
+    # time, so order is still kept.
     try:
         if 'frame' in request.files:
-            file = request.files['frame']
-            frame = decode_frame(file.read(), file.mimetype)
+            uploads = [
+                (file.read(), file.mimetype)
+                for file in request.files.getlist('frame')[:MAX_FRAMES_PER_REQUEST]
+            ]
         else:
-            frame = decode_frame(request.get_data(), request.content_type)
+            uploads = [(request.get_data(), request.content_type)]
+
+        frames = [
+            decode_letterboxed(
+                body, content_type, (RECOGNITION_FRAME_WIDTH, RECOGNITION_FRAME_HEIGHT)
+            )
+            for body, content_type in uploads
+        ]
     except UploadRejected as error:
         return jsonify({"success": False, "message": str(error)}), 400
 
-    # Detect face
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = snapshot.detector.process(rgb)
-
-    if not results.multi_face_landmarks:
-        return jsonify({"success": True, "done": False, "message": "No face detected."})
-
-    # For verification, we just take the first face found
-    landmarks = results.multi_face_landmarks[0]
-    
+    # A failed save (NotRecorded.ERROR) is not an outcome here: the pipeline
+    # retries it on a later frame (`defer_attendance_retry`), and nothing is
+    # marked until a row is written - so the once-a-day rule cannot lock out a
+    # student who has no row.
+    # The phone's own time per picture, for the timing log line only.
     try:
-        aligned_face = align_face(frame, landmarks)
-        issue = get_face_quality_issue(aligned_face)
-        if issue:
-            return jsonify({"success": True, "done": False, "message": issue})
+        capture_ms = min(max(float(request.headers.get("X-Capture-Ms", 0)), 0.0), 60_000.0)
+    except ValueError:
+        capture_ms = 0.0
 
-        processed_face = preprocess_for_lbph(aligned_face)
-        label, confidence = snapshot.recognizer.predict(processed_face)
-    except Exception:
-        logger.exception("Mobile attendance recognition failed")
-        return jsonify({"success": False, "message": "Face processing failed."}), 500
+    try:
+        for index, frame in enumerate(frames):
+            result = _phone_verifications().verify(
+                student_id,
+                snapshot,
+                frame,
+                recognition_session.mark_recognized,
+                first_of_request=index == 0,
+                capture_ms=capture_ms,
+            )
 
-    if label == -1 or confidence > 70.0:  # Use a standard threshold
-        return jsonify({"success": True, "done": False, "message": "Face not recognized clearly. Try again."})
-
-    matched_student = snapshot.label_map.get(label)
-    if matched_student is None or matched_student.get("student_id") != student_id:
-        return jsonify({"success": True, "done": False, "message": "Face doesn't match your profile."})
-
-    # Verified! Save attendance
-    status = save_attendance(student_id, snapshot.subject)
-    if status in (NotRecorded.NOT_IN_CLASS, NotRecorded.UNKNOWN_STUDENT):
-        return jsonify({"success": False, "message": "You are not enrolled in this class."}), 403
-
-    # NotRecorded.ERROR: the database could not be reached, so nothing was
-    # written. It must not fall through to mark_recognized() below - with the
-    # once-a-day rule above, that would lock the student out for the day with
-    # no attendance row at all.
-    if not status:
+            if result.done or result.refused:
+                break
+    except PhonesBusy:
         return jsonify({
             "success": False,
-            "message": "Your attendance could not be saved. Please try again.",
-        }), 503
+            "message": "Too many phones are verifying. Trying again in a moment...",
+        }), 429
+    except Exception:
+        logger.exception("Phone verification failed for %s", student_id)
+        return jsonify({"success": False, "message": "Face processing failed."}), 500
 
-    # Mark as recognized in the in-memory session so the dashboard updates
-    recognition_session.mark_recognized(student_id, status)
+    if result.refused:
+        return jsonify({"success": False, "message": result.message}), 403
 
     return jsonify({
         "success": True,
-        "done": True,
-        "message": f"Verified! Marked as {status}."
+        "done": result.done,
+        "message": result.message,
+        "stage": result.stage,
+        "step": result.step,
+        "progress": round(result.progress, 3),
     })
 
 
@@ -446,3 +565,52 @@ def _recorded_status_today(student_id, subject_id):
     """Present/Late if already recorded for this subject today, else None."""
     with db_cursor(dictionary=True) as cursor:
         return attendance_repo.recorded_status_today(cursor, student_id, subject_id)
+
+
+# Frames taken in one request; any more are ignored. Four at the measured
+# 239 ms each is about a second of server time, so a request still answers in
+# well under the phone track's 5 s timeout.
+MAX_FRAMES_PER_REQUEST = 4
+
+
+# The classroom-code passes of the running session (services/classroom_code.py).
+_check_ins = classroom_code.CheckIns()
+
+
+def _classroom_secret() -> bytes:
+    return classroom_code.secret_from(app_config.secret_key)
+
+
+# The phones verifying now. Built on first use, because building it imports
+# recognize_face, which this module deliberately avoids at import time.
+_phones = None
+_phones_lock = threading.Lock()
+
+
+def _phone_verifications():
+    global _phones
+
+    with _phones_lock:
+        if _phones is None:
+            import recognize_face
+            from services.phone_verification import (
+                PhoneVerifications,
+                phone_track_config,
+            )
+            from vision.tracking import FaceTracker
+
+            phone_config = phone_track_config(recognize_face.TRACK_CONFIG)
+
+            _phones = PhoneVerifications(
+                make_detector=recognize_face.make_detector,
+                make_tracker=lambda: FaceTracker(phone_config),
+                recognise=recognize_face.recognise_frame,
+            )
+
+        return _phones
+
+
+def _discard_phones():
+    """No session is running: release every phone's detector, if any exist."""
+    if _phones is not None:
+        _phones.discard_all()

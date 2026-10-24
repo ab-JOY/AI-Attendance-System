@@ -88,11 +88,7 @@ def decode_native(body: bytes | None, content_type: str | None):
     to know what the browser actually sent - enrolment records the upload
     widths of each capture, since the browser steps down on a slow link.
     """
-    _check_declared_type(content_type)
-    _check_magic(body)
-
-    frame = _decode(body)
-    _check_decoded_size(frame)
+    frame = _decode_checked(body, content_type)
 
     height, width = frame.shape[:2]
 
@@ -106,6 +102,48 @@ def decode_native(body: bytes | None, content_type: str | None):
             f"least {MIN_NATIVE_FRAME_WIDTH}; choose a higher-resolution "
             "camera or raise its quality setting."
         )
+
+    return frame
+
+
+def decode_letterboxed(
+    body: bytes | None,
+    content_type: str | None,
+    size: tuple[int, int],
+):
+    """
+    Validate, decode and `letterbox()` one phone frame into `size`.
+
+    ⚠️ **Not `decode_native()`'s 960-wide minimum.** That rule exists so a 16:9
+    frame is not enlarged too far on its way to the canonical size. A phone
+    sends a *square*, and a square is fitted by its **height**: into 1280x720 a
+    768 square is shrunk to 720, losing nothing, yet 768 < 960 refused it -
+    measured on the user's phone, 2026-10-24, with every verification stopped
+    before the first frame. The rule that matters here is the same one, stated
+    for this fit: the frame may not have to be **enlarged** to fill `size`.
+    """
+    frame = _decode_checked(body, content_type)
+
+    height, width = frame.shape[:2]
+    target_width, target_height = size
+
+    if min(target_width / width, target_height / height) > 1:
+        needed = min(target_height, target_width)
+        raise UploadRejected(
+            f"The camera picture is only {width}x{height}. It needs to be at "
+            f"least {needed} pixels high; raise the camera's quality setting."
+        )
+
+    return letterbox(frame, size)
+
+
+def _decode_checked(body: bytes | None, content_type: str | None):
+    """Type, magic bytes, decode and decoded-size checks - no size policy."""
+    _check_declared_type(content_type)
+    _check_magic(body)
+
+    frame = _decode(body)
+    _check_decoded_size(frame)
 
     return frame
 
@@ -152,6 +190,47 @@ def canonicalise(
     )
 
     return cv2.resize(frame, size, interpolation=interpolation)
+
+
+# The colour letterbox() pads with. Neutral, so it adds no edge or texture the
+# detector could take for anything.
+LETTERBOX_GREY = 127
+
+
+def letterbox(frame, size: tuple[int, int]):
+    """
+    Scale to fit inside `size`, then pad the rest - nothing is cropped away.
+
+    For phone attendance (`/api/attendance/frame`). A phone is held upright,
+    and `canonicalise()` keeps only a 16:9 band across the middle of an
+    upright picture, so the student had to hold the phone at arm's length to
+    fit a whole face into that band. The app sends a **square** instead - its
+    preview is that square, so what the student frames is still what is
+    judged (lessons.md L33) - and this puts the square, whole, into the
+    1280x720 frame the recognition gates were tuned at. A square in a 16:9
+    frame is 1.78x the band's height, so the face can be that much closer.
+
+    Aspect ratio is preserved, as in `canonicalise()`: nothing is squashed.
+    """
+    target_width, target_height = size
+    height, width = frame.shape[:2]
+
+    if (width, height) == size:
+        return frame
+
+    scale = min(target_width / width, target_height / height)
+    scaled_width = max(int(round(width * scale)), 1)
+    scaled_height = max(int(round(height * scale)), 1)
+
+    interpolation = cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
+    scaled = cv2.resize(frame, (scaled_width, scaled_height), interpolation=interpolation)
+
+    canvas = np.full((target_height, target_width, 3), LETTERBOX_GREY, dtype=frame.dtype)
+    x = (target_width - scaled_width) // 2
+    y = (target_height - scaled_height) // 2
+    canvas[y : y + scaled_height, x : x + scaled_width] = scaled
+
+    return canvas
 
 
 def _check_declared_type(content_type: str | None) -> None:

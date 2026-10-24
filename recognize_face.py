@@ -413,9 +413,12 @@ STREAM_FRAME_DELAY = 0.0
 # 797 ms -> 214 ms per frame, labels and distances identical.
 #
 # ⚠️ Only `recognizer.predict()` runs on the pool. Alignment and
-# `preprocess_for_lbph()` stay on the recognition thread: the latter applies
-# one module-level CLAHE object, and OpenCV's CLAHE keeps scratch buffers on
-# the object, so calling it from several threads at once is a data race.
+# `preprocess_for_lbph()` stay on the calling thread. The latter's CLAHE keeps
+# scratch buffers on the object; it is one object *per thread* now
+# (face_preprocessing.py), which is what lets phone verification run this path
+# on request threads beside the classroom loop. Moving preprocessing onto the
+# pool would still be safe, but it would no longer be the thread the caller
+# expects.
 _PREDICT_POOL = ThreadPoolExecutor(
     max_workers=min(8, os.cpu_count() or 1),
     thread_name_prefix="lbph-predict",
@@ -1718,9 +1721,15 @@ def resolve_confirmed_track(
     return student_id, student_name, status, state
 
 
-def describe_confirmation_block(blocker, verdict, first_time):
+def describe_confirmation_block(
+    blocker, verdict, first_time, window=PREDICTION_HISTORY_SIZE
+):
     """
     What to put under the box while a track is not confirming.
+
+    `window` is the track's own window size. A phone's track is shorter than
+    the classroom's (services/phone_verification.py), and "Verifying 12/20"
+    on a track that confirms at 12 would be a count that never arrives.
 
     "Verifying 20/20 100%" is only useful while the numbers are still moving.
     Once the window is full and agreeing, repeating it tells the operator
@@ -1736,11 +1745,11 @@ def describe_confirmation_block(blocker, verdict, first_time):
     itself.
     """
     if blocker == "window":
-        return f"Verifying {verdict.history_count}/{PREDICTION_HISTORY_SIZE}"
+        return f"Verifying {verdict.history_count}/{window}"
 
     if blocker == "agreement":
         return (
-            f"Verifying {verdict.history_count}/{PREDICTION_HISTORY_SIZE} "
+            f"Verifying {verdict.history_count}/{window} "
             f"{verdict.agreement_ratio * 100:.0f}%"
         )
 
@@ -1790,7 +1799,7 @@ def accumulate_towards_confirmation(
         return (
             "Unknown",
             "Verifying...",
-            f"Verifying 0/{PREDICTION_HISTORY_SIZE}",
+            f"Verifying 0/{state.config.prediction_history_size}",
             state
         )
 
@@ -1803,7 +1812,12 @@ def accumulate_towards_confirmation(
         return (
             "Unknown",
             "Verifying...",
-            describe_confirmation_block(blocker, verdict, first_time),
+            describe_confirmation_block(
+                blocker,
+                verdict,
+                first_time,
+                state.config.prediction_history_size,
+            ),
             state
         )
 

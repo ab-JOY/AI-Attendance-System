@@ -1586,6 +1586,17 @@ render a 16:9 box - so what the student frames is what the server judges.
 full-height box restores this bug silently**, with no test failing and the same
 honest-but-useless message.
 
+**Addendum 2026-10-22 - the preview *is* a square again, and that is not this
+bug.** The 16:9 strip was correct but made a phone held upright fit a whole face
+into a short band: arm's length, which the user found too hard. Now the app
+sends its square preview and `/api/attendance/frame` **letterboxes** it
+(`infra/uploads.py::letterbox`) instead of centre-cropping, so the preview is
+still exactly what is judged. The rule above holds in its general form: **the
+preview's shape, the app's crop and the server's fit-or-crop must change
+together.** A square preview with a cropping server is L33 again;
+`tests/test_phone_verification_real.py` now fails if the crop returns (the same
+close-up, cropped, records nobody).
+
 ---
 
 ## L34 - A test that only closes its connection on the last line hangs when it fails
@@ -1769,6 +1780,52 @@ already been given the wrong table.
   share) over one whose balance is a property of number theory.
 - **When a rule given to the user turns out wrong, tell them in the same reply**
   that reports the fix, with the corrected numbers.
+
+---
+
+## L41 - Check a second client against the first one's access rules
+
+**2026-10-21, mobile app review.** I reviewed the mobile app for bugs, fixed
+three of them, and told the user to answer the panel that "students register
+and capture their own face in the app" - as a feature. The user pointed out
+that only an administrator or an instructor should capture a face. They were
+right, and it was a security hole, not a preference: the website restricts
+`/enrol*` to admin and instructor (with an ownership check), while
+`/api/students/register` was **public** and `/api/enrol/*` allowed the
+`student` role. Anyone with the Cloudflare link could put a face into
+`dataset/` and trigger a retrain. `docs/data_privacy.md` §3 did not even list
+a student role.
+
+**Why it happened:** I reviewed the mobile code for whether it *worked*, not
+for whether it was *allowed*. Two clients on one server, each enforcing access
+on its own, drift apart; the newer rule (Phase 8 addendum, instructor capture)
+was added to one and never to the other.
+
+**How to apply:** when reviewing any second entry point (mobile API, script,
+export), list its routes next to the website's equivalent and compare the
+roles allowed on each. A route that is `@public` or broader than its web twin
+is a finding. Removed 2026-10-21; `tests/test_api_students_only.py` keeps it so.
+
+---
+
+## L42 - A server change is not live until the server restarts; say so every time
+
+**2026-10-22, phone verification.** I changed the server twice (letterboxing the
+square at 13:59, the phone's steadiness rules at 14:17) and each time told the
+user to "press `r` in Expo" to try it. That reloads only the app. `serve.py` had
+been started by `start-demo.ps1` at 13:43 and kept running the old code, so the
+user tested the new app against the old server - the square was cropped back to
+the 16:9 strip and the classroom's strict tracking still applied - and reported
+"sudden movement disrupts it, too slow" about code that was not running.
+
+Found by comparing the `serve.py` process start time with the files' mtimes,
+and the log's last "Serving on" line, before changing anything else.
+
+**How to apply:** after any change outside `mobile/`, the handoff says the
+server must restart, and how. To keep the quick-tunnel link, restart only
+`serve.py` (the process listening on 8000) and leave Caddy and cloudflared
+running; `start-demo.ps1` restarts everything and changes the link. Before
+diagnosing a "still broken" report, check the server started after the change.
 
 ---
 

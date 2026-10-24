@@ -1388,3 +1388,37 @@ instructors can import too.
 
 **Manuscript (the user's):** user-roles / use-case diagram and the panel compliance sheet.
 
+
+## 18. Phone attendance: the classroom's rules, a smooth liveness, and proof of being in the room (2026-10-24)
+
+User: "uses the captured dataset as a reference ... even if in a different position ... a liveness that is not
+buggy, a smooth check before it marks Present or Late, and ... the mobile app won't get used at home".
+
+Defaults chosen (memory: proceed on defaults; overrule any of them):
+
+- [x] **Recognition = the classroom pipeline, per phone** - restored from the reverted 2026-10-22 work
+      (`C:\projectss\backup-mobile-work-2026-10-22\`): `services/phone_verification.py`, the LBPH model trained on
+      `dataset/` is the reference, label map filtered to the signed-in student, 58.0, 85% agreement, frontal,
+      2-step liveness + 8-frame re-check. Phone steadiness overrides (5 s track timeout, any face continues the
+      track, 12-frame window, 5 in a row) - this is the "different position" part. Per-thread CLAHE; square
+      preview letterboxed (`infra/uploads.py::letterbox`).
+- [x] **Smooth liveness on the phone**: the server returns the liveness step (`LEFT`/`RIGHT`/`CENTER`) and
+      progress as fields, not only as text; the app draws an arrow and a progress bar. `mirror={false}` set
+      explicitly so "turn LEFT" means the student's own left, as on the classroom camera. Thresholds unchanged.
+- [x] **Classroom code (anti-home)**: a QR + 6-digit code on the instructor's attendance page, rotating every
+      20 s (HMAC of the session, current or previous step accepted). The student scans it in the app
+      (`/api/attendance/checkin`), which gives a 3-minute pass for that student and session.
+      `/api/attendance/frame` refuses without a pass, before any face is judged. 10 wrong codes per student per
+      session, then locked for that session. `segno` (pure Python) draws the QR.
+- [x] Tests: restored phone tests; route tests for the pass; `test_classroom_code.py`; once-a-day tests kept.
+- [x] Docs: `data_privacy.md`, handover.
+
+- [x] Verified: fast suite **1,895 passed, 98 skipped**; slow suite **47 passed** (incl. 8 real-face phone tests);
+      app bundles (esbuild). Mutation-checked: removing the pass check or the instructor check fails 3 tests
+- [ ] **On a real phone** (not done - no phone here): scan from a seat, time a full verification, confirm
+      "turn left" passes when the student turns to their own left. `serve.py` must be restarted first (L42)
+
+**Honest limit for the panel:** a classmate in the room can send the code to a friend at home within ~20-40 s.
+The friend still has to pass the face + liveness check as themselves, live, so it needs an accomplice in the room
+at that moment. Stronger options not built (open decisions): campus-network IP allowlist via `CF-Connecting-IP`;
+GPS geofence (spoofable, 10-50 m indoors).

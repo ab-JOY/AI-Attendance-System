@@ -74,6 +74,11 @@ dependencies = [
     # Deployment (PO-4). waitress serves the app in serve.py: pure Python, so
     # it installs identically on Windows and Linux. See docs/deployment.md.
     "waitress==3.0.2",
+
+    # The classroom code (services/classroom_code.py): the QR code on the
+    # instructor's attendance page that phones scan to prove they are in the
+    # room. Pure Python, no dependencies, draws SVG.
+    "segno==1.6.1",
 ]
 
 [project.optional-dependencies]

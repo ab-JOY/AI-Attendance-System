@@ -1,3 +1,5 @@
+import threading
+
 import cv2
 import numpy as np
 
@@ -23,10 +25,29 @@ RIGHT_EYE_INDICES = [
     374
 ]
 
-CLAHE = cv2.createCLAHE(
-    clipLimit=2.0,
-    tileGridSize=(8, 8)
-)
+CLAHE_CLIP_LIMIT = 2.0
+CLAHE_TILE_GRID = (8, 8)
+
+# ⚠️ One CLAHE object per thread, not one for the module. OpenCV's CLAHE keeps
+# scratch buffers on the object, so two threads applying the same one at once
+# is a data race. That used to be safe only because one recognition thread
+# ever called this; phone verification (services/phone_verification.py) runs
+# it on Flask request threads beside the classroom camera's. The settings are
+# unchanged, so every thread's output is identical to the old shared object's.
+_thread_clahe = threading.local()
+
+
+def _clahe():
+    clahe = getattr(_thread_clahe, "instance", None)
+
+    if clahe is None:
+        clahe = cv2.createCLAHE(
+            clipLimit=CLAHE_CLIP_LIMIT,
+            tileGridSize=CLAHE_TILE_GRID
+        )
+        _thread_clahe.instance = clahe
+
+    return clahe
 
 
 # =====================================================
@@ -338,7 +359,7 @@ def preprocess_for_lbph(
         interpolation=cv2.INTER_AREA
     )
 
-    face = CLAHE.apply(
+    face = _clahe().apply(
         face
     )
 

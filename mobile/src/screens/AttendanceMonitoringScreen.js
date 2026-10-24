@@ -1,32 +1,145 @@
 /**
  * Attendance Monitoring Screen.
- * Shows live session status and allows students to join the session.
+ * Shows the live session and lets a student verify their face for it.
+ *
+ * Two steps, in this order, and the server refuses them out of order:
+ *
+ * 1. **Check in with the classroom code.** The instructor's attendance page
+ *    shows a QR code that changes every 20 seconds. Scanning it (or typing
+ *    its six digits) proves the phone is in the room; it gives a pass for a
+ *    few minutes (services/classroom_code.py). Without it the app could be
+ *    used from home.
+ *
+ * 2. **Verify the face - a stream of frames, not one photo.** The server runs
+ *    each frame through the classroom camera's own rules (services/
+ *    phone_verification.py): a window of matches against the student's
+ *    captured face images, a frontal face, a two-step head-turn challenge and
+ *    a re-check. Each answer carries the instruction, plus `stage`, `step`
+ *    and `progress`, which this screen draws as an arrow and a bar, until the
+ *    server says `done`, refuses, or VERIFY_TIMEOUT_MS runs out.
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { View, StyleSheet, Text, ScrollView, RefreshControl, Alert } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import client from '../api/client';
 import Button from '../components/Button';
 import Header from '../components/Header';
 import Card from '../components/Card';
-import { captureLandscapeFrame, frameFormData, FRAME_ASPECT } from '../utils/frame';
+import Input from '../components/Input';
+import {
+  captureFrame,
+  frameFormData,
+  FRAME_ASPECT,
+  MAX_FRAMES_PER_REQUEST,
+  smallestUsablePictureSize,
+} from '../utils/frame';
 import { colors, spacing, typography, borderRadius } from '../theme/colors';
+
+// Long enough for the window, two head turns (8 s each at most) and the
+// re-check on a slow phone; short enough that a student in the dark is told
+// why rather than left waiting. Shorter than the check-in pass (180 s).
+const VERIFY_TIMEOUT_MS = 90000;
+
+// Consecutive frames that failed to reach the server before giving up.
+const MAX_CONSECUTIVE_FAILURES = 5;
+
+// Waiting while MAX_PHONES other students verify (the server's 429).
+const BUSY_RETRY_MS = 2000;
+
+// What the classroom QR code holds - services/classroom_code.py QR_PREFIX.
+const QR_PREFIX = 'FACEATTEND:';
+
+// After a wrong scan, how long before the scanner reads again - so one code
+// held in view is not sent ten times in a second, each one a wrong try.
+const RESCAN_DELAY_MS = 2000;
+
+const LIGHTING_TIPS = [
+  'Face a light or a window - not with a window behind you.',
+  'Hold the phone at eye level and fit your face inside the square.',
+  'Follow the arrow: look straight, then turn your head when asked.',
+];
+
+// The head turn the server is asking for (vision/liveness.py), as the
+// student sees it. The front preview is a mirror, so "your left" is the
+// screen's left: the arrow points the way the face on screen should move.
+//
+// "and hold": a phone sends a picture every half second or so, and a quick
+// turn and back can fall between two of them and never be seen - measured
+// 2026-10-24, the turns took 13 s. Holding until the arrow changes is what
+// makes the step register on the first try.
+const STEP_PROMPTS = {
+  LEFT: { icon: 'arrow-back', text: 'Turn your head to your left and hold' },
+  RIGHT: { icon: 'arrow-forward', text: 'Turn your head to your right and hold' },
+  CENTER: { icon: 'scan-outline', text: 'Look straight at the camera and hold' },
+};
+
+const STAGE_LABELS = {
+  finding: 'Looking for your face',
+  matching: 'Checking it is you',
+  liveness: 'Liveness check',
+  recheck: 'Face the camera - almost done',
+  done: 'Done',
+};
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export default function AttendanceMonitoringScreen() {
   const [liveData, setLiveData] = useState(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [isCameraOpen, setIsCameraOpen] = useState(false);
+  // 'idle' (buttons), 'scan' (back camera, reading the QR), 'face' (front camera)
+  const [mode, setMode] = useState('idle');
   const [isVerifying, setIsVerifying] = useState(false);
+  const [instruction, setInstruction] = useState('');
+  const [problem, setProblem] = useState('');
+  const [progress, setProgress] = useState({ stage: 'finding', step: null, value: 0 });
+  const [passUntil, setPassUntil] = useState(0);
+  const [now, setNow] = useState(Date.now());
+  const [typedCode, setTypedCode] = useState('');
+  const [isCheckingIn, setIsCheckingIn] = useState(false);
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef(null);
+  const [pictureSize, setPictureSize] = useState(undefined);
+
+  // A scanned code is being sent, or was just refused - ignore further reads.
+  const scanBusyRef = useRef(false);
+
+  // takePictureAsync() before the camera is ready throws; the loop waits.
+  const cameraReadyRef = useRef(false);
+
+  // The loop reads this rather than `isVerifying`: state is a snapshot from
+  // the render that started the loop and would never see the stop.
+  const verifyingRef = useRef(false);
+
+  const hasPass = passUntil > now;
+
+  const handleCameraReady = async () => {
+    cameraReadyRef.current = true;
+
+    // Small pictures, not the sensor's full 12+ MP - see
+    // smallestUsablePictureSize(). Asked once per opening of the camera.
+    if (mode === 'face' && pictureSize === undefined && cameraRef.current) {
+      try {
+        const sizes = await cameraRef.current.getAvailablePictureSizesAsync();
+        const chosen = smallestUsablePictureSize(sizes);
+        if (chosen) setPictureSize(chosen);
+      } catch {
+        // Keep the default size: slower, but it works.
+      }
+    }
+  };
 
   const fetchLiveData = async () => {
     try {
       const response = await client.get('/api/attendance/live');
       if (response.data.success) {
         setLiveData(response.data);
+        // The server is the authority on the pass; this keeps a reopened
+        // screen from asking for the code again while it is still valid.
+        const seconds = response.data.pass_seconds || 0;
+        setPassUntil(seconds > 0 ? Date.now() + seconds * 1000 : 0);
       }
     } catch (err) {
       console.log('Error fetching live data:', err);
@@ -39,53 +152,294 @@ export default function AttendanceMonitoringScreen() {
     return () => clearInterval(interval);
   }, []);
 
+  // The pass countdown.
+  useEffect(() => {
+    if (!passUntil) return undefined;
+    const interval = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, [passUntil]);
+
+  const stopVerifying = useCallback((message = '') => {
+    verifyingRef.current = false;
+    setIsVerifying(false);
+    setProblem(message);
+  }, []);
+
+  // Leaving the tab or the screen stops the stream; the bottom tabs keep this
+  // screen mounted, so unmounting alone would not.
+  useFocusEffect(
+    useCallback(() => () => {
+      stopVerifying();
+      setMode('idle');
+    }, [stopVerifying])
+  );
+
+  // The session ended under us - the camera view is about to go away.
+  useEffect(() => {
+    if (!liveData?.running && verifyingRef.current) {
+      stopVerifying('The attendance session has ended.');
+    }
+    if (!liveData?.running) setMode('idle');
+  }, [liveData, stopVerifying]);
+
   const handleRefresh = async () => {
     setIsRefreshing(true);
     await fetchLiveData();
     setIsRefreshing(false);
   };
 
-  const handleJoinSession = async () => {
-    if (!isCameraOpen) {
-      if (!permission?.granted) {
-        const result = await requestPermission();
-        if (!result.granted) return;
+  const ensureCameraPermission = async () => {
+    if (permission?.granted) return true;
+    const result = await requestPermission();
+    return result.granted;
+  };
+
+  // -- step 1: the classroom code -------------------------------------------
+
+  const openScanner = async () => {
+    if (!(await ensureCameraPermission())) return;
+    setProblem('');
+    scanBusyRef.current = false;
+    cameraReadyRef.current = false;
+    setMode('scan');
+  };
+
+  const checkIn = async (code) => {
+    setIsCheckingIn(true);
+    setProblem('');
+
+    try {
+      const response = await client.post('/api/attendance/checkin', { code });
+      setPassUntil(Date.now() + response.data.pass_seconds * 1000);
+      setNow(Date.now());
+      setTypedCode('');
+      // Straight on to the face: the pass is running.
+      cameraReadyRef.current = false;
+      setInstruction('');
+      setProgress({ stage: 'finding', step: null, value: 0 });
+      setMode('face');
+    } catch (err) {
+      const data = err.response?.data || {};
+      let message = data.message || 'Could not check in: ' + err.message;
+      if (data.tries_left !== undefined) {
+        message += ` (${data.tries_left} tries left)`;
       }
-      setIsCameraOpen(true);
+      setProblem(message);
+      if (data.locked) setMode('idle');
+      // Let the scanner read again once the student has seen the message.
+      setTimeout(() => {
+        scanBusyRef.current = false;
+      }, RESCAN_DELAY_MS);
+    } finally {
+      setIsCheckingIn(false);
+    }
+  };
+
+  const handleScanned = ({ data }) => {
+    if (scanBusyRef.current) return;
+
+    if (!data || !data.toUpperCase().startsWith(QR_PREFIX)) {
+      // Some other QR code in view (a poster, a link): not a wrong try.
       return;
     }
 
-    if (!cameraRef.current) return;
+    scanBusyRef.current = true;
+    checkIn(data);
+  };
 
-    try {
-      setIsVerifying(true);
+  // -- step 2: the face ---------------------------------------------------------
 
-      // Cropped to the 16:9 window the preview showed, because the server
-      // crops to 16:9 itself and a portrait shot loses the head - see
-      // ../utils/frame.js.
-      const photo = await captureLandscapeFrame(cameraRef.current);
-      const formData = frameFormData(photo);
+  const verify = async () => {
+    verifyingRef.current = true;
+    setIsVerifying(true);
+    setProblem('');
+    setInstruction('Starting...');
+    setProgress({ stage: 'finding', step: null, value: 0 });
 
-      const response = await client.post('/api/attendance/frame', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
+    const deadline = Date.now() + VERIFY_TIMEOUT_MS;
+    let failures = 0;
 
-      if (response.data.success) {
-        if (response.data.done) {
-          Alert.alert(response.data.already ? 'Already recorded' : 'Verified!', response.data.message);
-          setIsCameraOpen(false);
-          fetchLiveData();
-        } else {
-          Alert.alert('Try again', response.data.message);
+    // Pictures waiting for the next request, and how long each took - see
+    // the loop below.
+    const queue = [];
+    const captureTimes = [];
+
+    // The last thing the server asked for ("liveness LEFT", "recheck", ...),
+    // and when its answer arrived: pictures started before then are dropped.
+    let lastAsk = '';
+    let askChangedAt = 0;
+
+    // One frame's round trip. Resolves 'next' to keep going, or 'stop' once
+    // verification is over (done, refused, or given up) - never rejects.
+    const send = async (photos, captureMs) => {
+      try {
+        const response = await client.post('/api/attendance/frame', frameFormData(photos), {
+          headers: {
+            'Content-Type': 'multipart/form-data',
+            // How long this phone takes per picture - logged by the server
+            // beside its own timings, to tell a slow camera from a slow
+            // network (services/phone_verification.py _log_timing).
+            'X-Capture-Ms': String(captureMs),
+          },
+        });
+
+        if (!verifyingRef.current) return 'stop';
+
+        const data = response.data;
+        failures = 0;
+
+        // ⚠️ **A new instruction makes the waiting pictures useless.** They
+        // were taken while this request was out - before the student could
+        // see "Turn LEFT" - so the next request would carry no turn, and the
+        // turn would reach the server a whole request later: ~10 s on the
+        // user's 4G, past the liveness step's 8 s, and the challenge was
+        // redrawn four times in one attempt (2026-10-25). Dropping them sends
+        // only pictures taken after the arrow appeared. Nothing about what
+        // the server accepts changes.
+        const ask = `${data.stage || ''} ${data.step || ''}`;
+        if (ask !== lastAsk) {
+          lastAsk = ask;
+          askChangedAt = Date.now();
+          queue.length = 0;
+          captureTimes.length = 0;
         }
-      } else {
-        Alert.alert('Error', response.data.message);
+
+        setInstruction(data.message);
+        setProgress((previous) => ({
+          stage: data.stage || previous.stage,
+          step: data.step || null,
+          value: typeof data.progress === 'number' ? data.progress : previous.value,
+        }));
+
+        if (data.done) {
+          stopVerifying();
+          setMode('idle');
+          Alert.alert(data.already ? 'Already recorded' : 'Verified!', data.message);
+          fetchLiveData();
+          return 'stop';
+        }
+
+        return 'next';
+      } catch (err) {
+        if (!verifyingRef.current) return 'stop';
+
+        const status = err.response?.status;
+        const data = err.response?.data || {};
+        const message = data.message;
+
+        // The check-in pass ran out (or the server restarted): back to the
+        // code, which is quick, rather than a dead end.
+        if (data.need_code) {
+          stopVerifying('Your check-in expired. Scan the classroom code again.');
+          setPassUntil(0);
+          setMode('idle');
+          return 'stop';
+        }
+
+        if (status === 429) {
+          setInstruction(message);
+          await sleep(BUSY_RETRY_MS);
+          return 'next';
+        }
+
+        // Answers no further frame can change: no session, not in this
+        // class, signed out.
+        if (status === 401 || status === 403 || status === 409) {
+          stopVerifying(message || 'Verification is not available right now.');
+          return 'stop';
+        }
+
+        failures += 1;
+
+        if (failures >= MAX_CONSECUTIVE_FAILURES) {
+          stopVerifying(
+            'Verification stopped: ' + (message || err.message || 'the server could not be reached.')
+          );
+          return 'stop';
+        }
+
+        await sleep(500);
+        return 'next';
       }
-    } catch (err) {
-      Alert.alert('Error', 'Verification failed: ' + (err.response?.data?.message || err.message));
-    } finally {
-      setIsVerifying(false);
+    };
+
+    // ⚠️ **The camera never waits for the network.** One round trip through
+    // the tunnel costs 0.7-1.3 s whatever the picture's size (measured
+    // 2026-10-24), so sending one picture per trip held the phone to about
+    // one frame a second. Pictures are taken back to back into `queue`; while
+    // a request is out, they wait, and the next request carries all of them
+    // (up to MAX_FRAMES_PER_REQUEST, the newest). Still one request at a time
+    // and oldest first, so the server sees the frames in order and the
+    // instruction on screen is never out of date.
+    let inFlight = false;
+    let finished = false;
+
+    const sendQueued = () => {
+      if (inFlight || finished || queue.length === 0) return;
+
+      inFlight = true;
+      const batch = queue.splice(0, queue.length);
+      const times = captureTimes.splice(0, captureTimes.length).sort((a, b) => a - b);
+      const captureMs = times.length ? times[Math.floor(times.length / 2)] : 0;
+
+      send(batch, captureMs).then((outcome) => {
+        inFlight = false;
+        if (outcome === 'stop') finished = true;
+      });
+    };
+
+    while (verifyingRef.current && !finished) {
+      if (Date.now() > deadline) {
+        stopVerifying(
+          'Could not verify you in time. Check the tips below and try again.'
+        );
+        return;
+      }
+
+      if (!cameraRef.current || !cameraReadyRef.current) {
+        await sleep(300);
+        continue;
+      }
+
+      try {
+        // Cropped to the square the preview shows - see ../utils/frame.js.
+        const started = Date.now();
+        const photo = await captureFrame(cameraRef.current);
+
+        // Begun before the latest instruction arrived: the same stale
+        // picture as the ones dropped in send().
+        if (started >= askChangedAt) {
+          queue.push(photo);
+          captureTimes.push(Date.now() - started);
+        }
+      } catch (err) {
+        failures += 1;
+
+        if (failures >= MAX_CONSECUTIVE_FAILURES) {
+          stopVerifying('Verification stopped: the camera could not take a picture.');
+          return;
+        }
+
+        await sleep(300);
+        continue;
+      }
+
+      // A slow network: keep the newest pictures, which are what the student
+      // is doing now.
+      if (queue.length > MAX_FRAMES_PER_REQUEST) {
+        queue.splice(0, queue.length - MAX_FRAMES_PER_REQUEST);
+      }
+
+      sendQueued();
     }
+  };
+
+  const openFaceCamera = async () => {
+    if (!(await ensureCameraPermission())) return;
+    setProblem('');
+    setInstruction('');
+    cameraReadyRef.current = false;
+    setMode('face');
   };
 
   if (!liveData?.running) {
@@ -106,61 +460,213 @@ export default function AttendanceMonitoringScreen() {
     );
   }
 
+  const stepPrompt = progress.stage === 'liveness' ? STEP_PROMPTS[progress.step] : null;
+  const passSecondsLeft = Math.max(Math.ceil((passUntil - now) / 1000), 0);
+
+  const renderCameraArea = () => {
+    if (mode === 'scan') {
+      return (
+        <View style={styles.avatarContainer}>
+          <View style={styles.avatarBox}>
+            <CameraView
+              style={StyleSheet.absoluteFill}
+              facing="back"
+              barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
+              onBarcodeScanned={handleScanned}
+            />
+            <View pointerEvents="none" style={styles.faceGuide} />
+          </View>
+          <Text style={styles.framingHint}>
+            Point the camera at the QR code on the classroom screen.
+          </Text>
+        </View>
+      );
+    }
+
+    if (mode === 'face') {
+      return (
+        <View style={styles.avatarContainer}>
+          <View style={styles.avatarBox}>
+            <CameraView
+              style={StyleSheet.absoluteFill}
+              facing="front"
+              ref={cameraRef}
+              onCameraReady={handleCameraReady}
+              pictureSize={pictureSize}
+              // ⚠️ The saved picture is not mirrored, like the classroom
+              // camera's, so "turn LEFT" is the student's own left on both
+              // (vision/liveness.py). Set explicitly so a default cannot
+              // swap the two directions on some phones.
+              mirror={false}
+              // No shutter flash on every frame: it is a stream of
+              // pictures, and the animation is time each one waits.
+              animateShutter={false}
+            />
+            {/* Where the face goes. Drawn over the preview only - the
+                whole square around it is still what is sent. */}
+            <View pointerEvents="none" style={styles.faceGuide} />
+            {isVerifying && stepPrompt ? (
+              <View pointerEvents="none" style={styles.stepOverlay}>
+                <Ionicons name={stepPrompt.icon} size={72} color="#FFFFFF" />
+              </View>
+            ) : null}
+          </View>
+          <Text style={styles.framingHint}>
+            Fit your face inside the square - only what you can see here is sent.
+          </Text>
+        </View>
+      );
+    }
+
+    return (
+      <View style={styles.avatarContainer}>
+        <View style={styles.avatarBox}>
+          <Ionicons
+            name={hasPass ? 'person-outline' : 'qr-code-outline'}
+            size={96}
+            color={colors.secondary}
+          />
+        </View>
+      </View>
+    );
+  };
+
+  const renderActions = () => {
+    // Once a day per class: a student the register already holds is told so
+    // instead of being offered another attempt. The server refuses a second
+    // attempt anyway (/api/attendance/frame); this is the screen agreeing.
+    if (liveData.your_status) {
+      return (
+        <Card style={styles.recordedCard}>
+          <Ionicons name="checkmark-circle" size={28} color={colors.statusPresent} />
+          <Text style={styles.recordedText}>
+            You are already recorded as {liveData.your_status} for this class today.
+            Attendance can only be taken once.
+          </Text>
+        </Card>
+      );
+    }
+
+    if (mode === 'scan') {
+      return (
+        <>
+          <Text style={styles.orText}>or type the 6 digits under the QR code</Text>
+          <Input
+            placeholder="Classroom code"
+            value={typedCode}
+            onChangeText={(text) => setTypedCode(text.replace(/\D/g, '').slice(0, 6))}
+            keyboardType="number-pad"
+            icon="keypad-outline"
+          />
+          <Button
+            title="Check In"
+            onPress={() => checkIn(typedCode)}
+            loading={isCheckingIn}
+            disabled={typedCode.length !== 6}
+            style={styles.joinButton}
+          />
+          <Button
+            title="Cancel"
+            variant="outline"
+            onPress={() => setMode('idle')}
+            style={styles.joinButton}
+          />
+        </>
+      );
+    }
+
+    if (mode === 'face') {
+      return (
+        <>
+          {isVerifying ? (
+            <View style={styles.progressBlock}>
+              <Text style={styles.stageLabel}>
+                {STAGE_LABELS[progress.stage] || STAGE_LABELS.finding}
+              </Text>
+              <View style={styles.progressTrack}>
+                <View
+                  style={[styles.progressFill, { width: `${Math.round(progress.value * 100)}%` }]}
+                />
+              </View>
+              {stepPrompt ? (
+                <Text style={styles.instruction}>{stepPrompt.text}</Text>
+              ) : instruction ? (
+                <Text style={styles.instruction}>{instruction}</Text>
+              ) : null}
+            </View>
+          ) : null}
+
+          {hasPass ? (
+            <Text style={styles.passText}>
+              Checked in - {passSecondsLeft} s left to verify
+            </Text>
+          ) : null}
+
+          {isVerifying ? (
+            <Button
+              title="Stop"
+              variant="outline"
+              onPress={() => stopVerifying()}
+              style={styles.joinButton}
+            />
+          ) : (
+            <Button
+              title="Verify My Face"
+              onPress={verify}
+              disabled={!hasPass}
+              style={styles.joinButton}
+            />
+          )}
+        </>
+      );
+    }
+
+    return hasPass ? (
+      <>
+        <Text style={styles.passText}>Checked in - {passSecondsLeft} s left to verify</Text>
+        <Button title="Verify My Face" onPress={openFaceCamera} style={styles.joinButton} />
+      </>
+    ) : (
+      <>
+        <Text style={styles.stepHint}>
+          Step 1 of 2: scan the classroom code shown on your instructor's screen.
+        </Text>
+        <Button title="Scan Classroom Code" onPress={openScanner} style={styles.joinButton} />
+      </>
+    );
+  };
+
   return (
     <View style={styles.container}>
       <Header title="Attendance Monitoring" />
       <ScrollView
         contentContainerStyle={styles.content}
         refreshControl={<RefreshControl refreshing={isRefreshing} onRefresh={handleRefresh} />}
+        keyboardShouldPersistTaps="handled"
       >
         <Text style={styles.sectionTitle}>Live Attendance Session</Text>
         <Text style={styles.subjectCode}>{liveData.subject_code}</Text>
 
-        <View style={styles.avatarContainer}>
-          <View style={styles.avatarBox}>
-            {isCameraOpen ? (
-              <CameraView 
-                style={StyleSheet.absoluteFill} 
-                facing="front" 
-                ref={cameraRef}
-              />
-            ) : (
-              <Ionicons name="person-outline" size={96} color={colors.secondary} />
-            )}
-          </View>
-          {isCameraOpen && (
-            <Text style={styles.framingHint}>
-              Keep your whole face inside the box - only what you can see here is sent.
-            </Text>
-          )}
-        </View>
+        {liveData.your_status ? null : renderCameraArea()}
+
+        {problem ? <Text style={styles.problem}>{problem}</Text> : null}
+
+        {renderActions()}
+
+        {mode === 'face' && (
+          <Card style={styles.tipsCard}>
+            <Text style={styles.tipsTitle}>For a quick match</Text>
+            {LIGHTING_TIPS.map((tip) => (
+              <Text key={tip} style={styles.tipText}>{'•'} {tip}</Text>
+            ))}
+          </Card>
+        )}
 
         <View style={styles.statsRow}>
           <Text style={styles.statsText}>
             Recognized so far: <Text style={styles.statsHighlight}>{liveData.recognised}</Text>
           </Text>
         </View>
-
-        {/* Once a day per class: a student the register already holds is told
-            so instead of being offered another attempt. The server refuses a
-            second attempt anyway (/api/attendance/frame); this is the screen
-            agreeing with it. */}
-        {liveData.your_status ? (
-          <Card style={styles.recordedCard}>
-            <Ionicons name="checkmark-circle" size={28} color={colors.statusPresent} />
-            <Text style={styles.recordedText}>
-              You are already recorded as {liveData.your_status} for this class today.
-              Attendance can only be taken once.
-            </Text>
-          </Card>
-        ) : (
-          <Button
-            title={isCameraOpen ? "Verify My Face" : "Join Attendance Session"}
-            onPress={handleJoinSession}
-            loading={isVerifying}
-            style={styles.joinButton}
-          />
-        )}
 
         <Text style={styles.listTitle}>Recently Recognized</Text>
         {liveData.students.length === 0 ? (
@@ -174,7 +680,12 @@ export default function AttendanceMonitoringScreen() {
               </View>
               <View style={styles.studentStatus}>
                 <Text style={styles.timeText}>{student.time_in}</Text>
-                <Text style={[styles.statusText, { color: colors.statusPresent }]}>
+                <Text
+                  style={[
+                    styles.statusText,
+                    { color: student.status === 'Late' ? colors.statusLate : colors.statusPresent },
+                  ]}
+                >
                   {student.status}
                 </Text>
               </View>
@@ -225,18 +736,101 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: spacing.xl,
   },
-  // ⚠️ 16:9, matching the crop in ../utils/frame.js. A CameraView covers its
-  // box, so this shape *is* the window that gets uploaded. The square this
-  // used to be showed more of the frame than the server ever received, so a
-  // correctly framed face could still be cropped away server-side and come
-  // back as "No face detected."
+  // ⚠️ FRAME_ASPECT (square), matching the crop in ../utils/frame.js. A
+  // CameraView covers its box, so this shape *is* the window that gets
+  // uploaded - and the server letterboxes it rather than cropping it. Change
+  // the shape here without changing both and a framed face is cut away
+  // server-side again (lessons.md L33).
   avatarBox: {
-    width: '100%',
+    width: '85%',
     aspectRatio: FRAME_ASPECT,
     backgroundColor: colors.primary,
     justifyContent: 'center',
     alignItems: 'center',
     overflow: 'hidden',
+  },
+  // The head-turn arrow, over the preview where the student is looking.
+  stepOverlay: {
+    position: 'absolute',
+    bottom: spacing.md,
+    backgroundColor: 'rgba(0, 0, 0, 0.45)',
+    borderRadius: borderRadius.md,
+    padding: spacing.sm,
+  },
+  progressBlock: {
+    marginBottom: spacing.md,
+  },
+  stageLabel: {
+    ...typography.bodySmall,
+    fontWeight: '700',
+    color: colors.secondary,
+    textAlign: 'center',
+    marginBottom: spacing.xs,
+  },
+  progressTrack: {
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: colors.border,
+    overflow: 'hidden',
+    marginBottom: spacing.sm,
+  },
+  progressFill: {
+    height: '100%',
+    backgroundColor: colors.success,
+  },
+  instruction: {
+    ...typography.h3,
+    color: colors.secondary,
+    textAlign: 'center',
+    marginBottom: spacing.md,
+  },
+  problem: {
+    ...typography.bodySmall,
+    color: colors.error,
+    textAlign: 'center',
+    marginBottom: spacing.md,
+  },
+  passText: {
+    ...typography.caption,
+    color: colors.success,
+    textAlign: 'center',
+    marginBottom: spacing.sm,
+  },
+  stepHint: {
+    ...typography.bodySmall,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    marginBottom: spacing.md,
+  },
+  orText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    marginBottom: spacing.sm,
+  },
+  tipsCard: {
+    padding: spacing.md,
+    marginBottom: spacing.xl,
+  },
+  tipsTitle: {
+    ...typography.bodySmall,
+    fontWeight: '700',
+    marginBottom: spacing.xs,
+  },
+  tipText: {
+    ...typography.caption,
+    marginBottom: 2,
+  },
+  // The face guide: a square inset from the preview's edges, so a face inside
+  // it is whole, clear of the edge of what is sent, and not so close that it
+  // covers more of the frame than the geometry gate allows.
+  faceGuide: {
+    position: 'absolute',
+    width: '72%',
+    aspectRatio: 1,
+    borderWidth: 3,
+    borderColor: colors.primary,
+    borderRadius: borderRadius.md,
   },
   framingHint: {
     ...typography.caption,
@@ -268,7 +862,7 @@ const styles = StyleSheet.create({
     marginLeft: spacing.sm,
   },
   joinButton: {
-    marginBottom: spacing.xl,
+    marginBottom: spacing.md,
   },
   listTitle: {
     ...typography.h3,
