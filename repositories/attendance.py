@@ -609,6 +609,37 @@ def recorded_today(cursor, subject_id):
     return {row["student_id"]: row["status"] for row in cursor.fetchall()}
 
 
+def recorded_status_today(cursor, student_id, subject_id):
+    """
+    `'Present'` or `'Late'` if this student is already recorded for this
+    subject today, else None.
+
+    The once-a-day rule for phone attendance (`/api/attendance/frame`): a
+    student who has a mark is refused before any face is judged, so repeated
+    attempts - a friend trying again and again on a recorded student's
+    account, or the student themselves - get nothing to work with.
+
+    Same definition as `recorded_today()`, one student at a time: keyed on
+    `subject_id` and `CURDATE()` like the UNIQUE index, and **Absent is not a
+    mark** - an Absent from an earlier session today must still be upgradeable
+    by a real verification, as `save_attendance()` allows.
+    """
+    cursor.execute(
+        """
+        SELECT status
+        FROM attendance
+        WHERE student_id = %s
+        AND subject_id = %s
+        AND attendance_date = CURDATE()
+        AND status IN ('Present', 'Late')
+        """,
+        (student_id, subject_id),
+    )
+    row = cursor.fetchone()
+
+    return row["status"] if row else None
+
+
 # ---------------------------------------------------------------------------
 # Corrections (FS-10)
 # ---------------------------------------------------------------------------

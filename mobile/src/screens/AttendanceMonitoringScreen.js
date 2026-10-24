@@ -7,7 +7,6 @@ import React, { useState, useEffect, useRef } from 'react';
 import { View, StyleSheet, Text, ScrollView, RefreshControl, Alert } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Ionicons } from '@expo/vector-icons';
-import { useAuth } from '../context/AuthContext';
 import client from '../api/client';
 import Button from '../components/Button';
 import Header from '../components/Header';
@@ -16,7 +15,6 @@ import { captureLandscapeFrame, frameFormData, FRAME_ASPECT } from '../utils/fra
 import { colors, spacing, typography, borderRadius } from '../theme/colors';
 
 export default function AttendanceMonitoringScreen() {
-  const { user } = useAuth();
   const [liveData, setLiveData] = useState(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isCameraOpen, setIsCameraOpen] = useState(false);
@@ -74,7 +72,7 @@ export default function AttendanceMonitoringScreen() {
 
       if (response.data.success) {
         if (response.data.done) {
-          Alert.alert('Verified!', response.data.message);
+          Alert.alert(response.data.already ? 'Already recorded' : 'Verified!', response.data.message);
           setIsCameraOpen(false);
           fetchLiveData();
         } else {
@@ -143,7 +141,19 @@ export default function AttendanceMonitoringScreen() {
           </Text>
         </View>
 
-        {user?.role === 'student' && (
+        {/* Once a day per class: a student the register already holds is told
+            so instead of being offered another attempt. The server refuses a
+            second attempt anyway (/api/attendance/frame); this is the screen
+            agreeing with it. */}
+        {liveData.your_status ? (
+          <Card style={styles.recordedCard}>
+            <Ionicons name="checkmark-circle" size={28} color={colors.statusPresent} />
+            <Text style={styles.recordedText}>
+              You are already recorded as {liveData.your_status} for this class today.
+              Attendance can only be taken once.
+            </Text>
+          </Card>
+        ) : (
           <Button
             title={isCameraOpen ? "Verify My Face" : "Join Attendance Session"}
             onPress={handleJoinSession}
@@ -245,6 +255,17 @@ const styles = StyleSheet.create({
   statsHighlight: {
     ...typography.h3,
     color: colors.secondary,
+  },
+  recordedCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: spacing.md,
+    marginBottom: spacing.xl,
+  },
+  recordedText: {
+    ...typography.body,
+    flex: 1,
+    marginLeft: spacing.sm,
   },
   joinButton: {
     marginBottom: spacing.xl,

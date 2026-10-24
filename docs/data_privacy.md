@@ -105,6 +105,7 @@ classification is asserted by `tests/test_route_security.py`.
 | Anonymous | The login page only |
 | Instructor | Dashboard, attendance sessions, the live camera feed during a session, reports, their own password, and **face capture for their own classes**: recapturing a student on one of their class lists, or registering a new student into one of their classes (2026-10-19). **The class lists of their own subjects** (2026-10-23): adding students who are already registered and removing them, which shows them the name, ID, year and section of every student in that subject's program. Not retraining by hand, deletion, or anyone else's subjects |
 | Administrator | Everything, including enrolment, deletion, instructor management and export |
+| Student (mobile app only) | Their own profile and attendance history, the live session's recognised list, and verifying their own face for a running session - **once per class per day**: a student already Present or Late for that class today is refused before any face is judged. **Not registration or face capture**: a student cannot create an account or add or replace face images (2026-10-22). Students have no website login, and the app has no administrator or instructor login: `/api/login` issues tokens to students only |
 
 Notes on the boundaries:
 

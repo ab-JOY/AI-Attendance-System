@@ -516,24 +516,6 @@ def test_an_administrator_is_not_asked_who_teaches_the_subject(
     assert calls["opened"] == 1
 
 
-# ---------------------------------------------------------------------------
-# The mobile API
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("token", "expected"),
-    [
-        ({"role": "admin"}, None),
-        ({"role": "instructor", "instructor_pk": 7}, 7),
-        # A token issued before the claim existed: nothing, until it expires.
-        ({"role": "instructor"}, NO_INSTRUCTOR),
-        ({"role": "instructor", "instructor_pk": "7"}, NO_INSTRUCTOR),
-        # Students are confined by the routes themselves, not by this.
-        ({"role": "student"}, None),
-    ],
-)
-def test_a_token_carries_the_same_scope_as_a_session(token, expected):
-    from web.api import _instructor_scope
-
-    assert _instructor_scope(token) == expected
+# The mobile API used to scope an instructor's token here (`_instructor_scope`).
+# Since 2026-10-21 it serves students only and refuses any staff token outright,
+# which tests/test_api_students_only.py checks on every route.

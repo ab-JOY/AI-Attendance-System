@@ -15,7 +15,7 @@
  * So the crop happens **here**, where the preview is, instead of on the server
  * where nobody can see it. `landscapeWindow()` is exactly the window a
  * `CameraView` fills in a 16:9 box, so what the student frames is what the
- * server judges. Both camera screens must keep that box shape; a square or
+ * server judges. The attendance camera must keep that box shape; a square or
  * full-height preview reintroduces the bug silently.
  */
 
@@ -80,7 +80,7 @@ export async function captureLandscapeFrame(camera) {
   return image.saveAsync({ format: SaveFormat.JPEG, compress: 0.8 });
 }
 
-/** The multipart body both frame routes expect. */
+/** The multipart body /api/attendance/frame expects. */
 export function frameFormData(photo) {
   const formData = new FormData();
 

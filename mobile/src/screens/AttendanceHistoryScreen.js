@@ -1,18 +1,16 @@
 /**
  * Attendance History Screen.
- * Lists historical attendance records. Filtered automatically by role on backend.
+ * The signed-in student's own attendance records.
  */
 
 import React, { useState, useEffect } from 'react';
 import { View, StyleSheet, Text, FlatList, RefreshControl } from 'react-native';
-import { useAuth } from '../context/AuthContext';
 import client from '../api/client';
 import Header from '../components/Header';
 import Card from '../components/Card';
 import { colors, spacing, typography } from '../theme/colors';
 
 export default function AttendanceHistoryScreen() {
-  const { user } = useAuth();
   const [records, setRecords] = useState([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -59,10 +57,6 @@ export default function AttendanceHistoryScreen() {
         </View>
         
         <Text style={styles.subject}>{item.subject_code} - {item.subject_name}</Text>
-        
-        {user?.role !== 'student' && (
-          <Text style={styles.studentName}>{item.student_name} ({item.student_id})</Text>
-        )}
         
         {isPresent && item.time_in && (
           <Text style={styles.timeIn}>Time In: {item.time_in}</Text>
@@ -141,11 +135,6 @@ const styles = StyleSheet.create({
   subject: {
     ...typography.body,
     color: colors.secondary,
-    marginBottom: spacing.xs,
-  },
-  studentName: {
-    ...typography.bodySmall,
-    color: colors.textSecondary,
     marginBottom: spacing.xs,
   },
   timeIn: {

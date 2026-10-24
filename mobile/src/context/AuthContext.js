@@ -12,9 +12,6 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [token, setToken] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
-  // Pending registration token — stored but NOT activated until face capture completes
-  const [pendingToken, setPendingToken] = useState(null);
-  const [pendingUser, setPendingUser] = useState(null);
 
   // Restore token on app start
   useEffect(() => {
@@ -24,9 +21,17 @@ export function AuthProvider({ children }) {
         const storedToken = await SecureStore.getItemAsync('auth_token');
         const storedUser = await SecureStore.getItemAsync('auth_user');
 
-        if (storedToken && storedUser) {
+        const restored = storedUser ? JSON.parse(storedUser) : null;
+
+        // An administrator or instructor signed in on this phone before the
+        // app became student-only. The server now refuses that token on every
+        // route, so start from the login screen instead.
+        if (storedToken && restored?.role === 'student') {
           setToken(storedToken);
-          setUser(JSON.parse(storedUser));
+          setUser(restored);
+        } else if (storedToken) {
+          await SecureStore.deleteItemAsync('auth_token');
+          await SecureStore.deleteItemAsync('auth_user');
         }
       } catch {
         // Token expired or corrupt — stay logged out
@@ -36,12 +41,24 @@ export function AuthProvider({ children }) {
     })();
   }, []);
 
-  const login = async (role, userId, password) => {
-    const response = await client.post('/api/login', {
-      role,
-      user_id: userId,
-      password,
-    });
+  // Students only: administrators and instructors use the website.
+  const login = async (userId, password) => {
+    let response;
+
+    try {
+      response = await client.post('/api/login', {
+        role: 'student',
+        user_id: userId,
+        password,
+      });
+    } catch (err) {
+      // A wrong password is a 401, which axios throws. Uncaught, the login
+      // button span for ever and the message never appeared.
+      return {
+        success: false,
+        message: err.response?.data?.message || 'Could not reach the server. Check the server URL in Settings.',
+      };
+    }
 
     if (response.data.success) {
       const { token: newToken, role: userRole, display_name } = response.data;
@@ -59,38 +76,6 @@ export function AuthProvider({ children }) {
     return { success: false, message: response.data.message };
   };
 
-  const register = async (data) => {
-    const response = await client.post('/api/students/register', data);
-
-    if (response.data.success) {
-      const { token: newToken, role, display_name } = response.data;
-      const userData = { role, user_id: data.student_id, display_name };
-
-      // Store token on disk but do NOT activate it yet.
-      // The Auth Stack stays active so FaceCapture can run.
-      await SecureStore.setItemAsync('auth_token', newToken);
-      await SecureStore.setItemAsync('auth_user', JSON.stringify(userData));
-      setPendingToken(newToken);
-      setPendingUser(userData);
-
-      return { success: true, token: newToken };
-    }
-
-    return { success: false, message: response.data.message };
-  };
-
-  const completeRegistration = () => {
-    // Called after face capture — activates the stored token and flips isAuthenticated.
-    if (pendingToken && pendingUser) {
-      setToken(pendingToken);
-      setUser(pendingUser);
-      setPendingToken(null);
-      setPendingUser(null);
-    }
-  };
-
-  const getPendingToken = () => pendingToken;
-
   const logout = async () => {
     await SecureStore.deleteItemAsync('auth_token');
     await SecureStore.deleteItemAsync('auth_user');
@@ -106,9 +91,6 @@ export function AuthProvider({ children }) {
         isLoading,
         isAuthenticated: !!token,
         login,
-        register,
-        completeRegistration,
-        getPendingToken,
         logout,
       }}
     >

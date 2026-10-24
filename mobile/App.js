@@ -16,8 +16,6 @@ import { AuthProvider, useAuth } from './src/context/AuthContext';
 
 // Screens
 import LoginScreen from './src/screens/LoginScreen';
-import StudentRegistrationScreen from './src/screens/StudentRegistrationScreen';
-import FaceCaptureScreen from './src/screens/FaceCaptureScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 import DashboardScreen from './src/screens/DashboardScreen';
 import AttendanceMonitoringScreen from './src/screens/AttendanceMonitoringScreen';
@@ -89,8 +87,6 @@ function NavigationWrapper() {
           // Auth Stack
           <>
             <Stack.Screen name="Login" component={LoginScreen} />
-            <Stack.Screen name="StudentRegistration" component={StudentRegistrationScreen} />
-            <Stack.Screen name="FaceCapture" component={FaceCaptureScreen} />
             <Stack.Screen name="Settings" component={SettingsScreen} />
           </>
         ) : (

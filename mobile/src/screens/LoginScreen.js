@@ -1,6 +1,7 @@
 /**
  * Login Screen.
- * Role selection, ID, password, and link to student registration.
+ * Student number and password. The app is for students only: administrators
+ * and instructors use the website, and /api/login issues no token to them.
  */
 
 import React, { useState, useEffect } from 'react';
@@ -18,12 +19,11 @@ import { useAuth } from '../context/AuthContext';
 import Input from '../components/Input';
 import Button from '../components/Button';
 import Card from '../components/Card';
-import { colors, spacing, typography, borderRadius } from '../theme/colors';
+import { colors, spacing, typography } from '../theme/colors';
 import * as SecureStore from 'expo-secure-store';
 
 export default function LoginScreen({ navigation }) {
   const { login, isAuthenticated } = useAuth();
-  const [role, setRole] = useState('student');
   const [userId, setUserId] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -44,7 +44,7 @@ export default function LoginScreen({ navigation }) {
     setIsLoading(true);
     setError('');
 
-    const result = await login(role, userId, password);
+    const result = await login(userId, password);
     
     if (result.success) {
       navigation.replace('Main');
@@ -69,31 +69,9 @@ export default function LoginScreen({ navigation }) {
           <Text style={styles.subtitle}>AI-Based Facial Recognition with Liveness Detection</Text>
         </View>
 
-        <View style={styles.roleSelector}>
-          {['student', 'instructor', 'admin'].map((r) => (
-            <TouchableOpacity
-              key={r}
-              style={[
-                styles.roleButton,
-                role === r && styles.roleButtonActive,
-              ]}
-              onPress={() => setRole(r)}
-            >
-              <Text
-                style={[
-                  styles.roleText,
-                  role === r && styles.roleTextActive,
-                ]}
-              >
-                {r.charAt(0).toUpperCase() + r.slice(1)}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-
         <Card style={styles.card}>
           <Input
-            placeholder={role === 'admin' ? "Username" : role === 'student' ? "Student Number" : "Instructor ID"}
+            placeholder="Student Number"
             value={userId}
             onChangeText={setUserId}
             icon="person-outline"
@@ -117,16 +95,14 @@ export default function LoginScreen({ navigation }) {
           />
         </Card>
 
-        {role === 'student' && (
-          <View style={styles.registerContainer}>
-            <Text style={styles.registerText}>
-              Students who do not have an account can register below
-            </Text>
-            <TouchableOpacity onPress={() => navigation.navigate('StudentRegistration')}>
-              <Text style={styles.registerLink}>Register as a student</Text>
-            </TouchableOpacity>
-          </View>
-        )}
+        {/* Students cannot register here: only an administrator or an
+            instructor registers a student and captures their face, on the
+            website. */}
+        <View style={styles.registerContainer}>
+          <Text style={styles.registerText}>
+            No account yet? Ask your instructor or the administrator to register you and capture your face.
+          </Text>
+        </View>
 
         <TouchableOpacity 
           style={styles.settingsLink}
@@ -178,30 +154,6 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     paddingHorizontal: spacing.xl,
   },
-  roleSelector: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    marginBottom: spacing.lg,
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.pill,
-    padding: 4,
-  },
-  roleButton: {
-    paddingVertical: spacing.sm,
-    paddingHorizontal: spacing.md,
-    borderRadius: borderRadius.pill,
-  },
-  roleButtonActive: {
-    backgroundColor: colors.primary,
-  },
-  roleText: {
-    ...typography.bodySmall,
-    color: colors.textSecondary,
-    fontWeight: '600',
-  },
-  roleTextActive: {
-    color: colors.textOnPrimary,
-  },
   card: {
     marginBottom: spacing.xl,
   },
@@ -221,10 +173,6 @@ const styles = StyleSheet.create({
     ...typography.bodySmall,
     textAlign: 'center',
     marginBottom: spacing.md,
-  },
-  registerLink: {
-    ...typography.button,
-    color: colors.secondary,
   },
   settingsLink: {
     alignItems: 'center',

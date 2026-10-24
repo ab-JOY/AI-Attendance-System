@@ -8,6 +8,21 @@ apply and the blueprint is exempt from CSRFProtect.
 **No existing route, template, or web behaviour is changed by this file.**
 It is a new blueprint registered alongside the existing eight, under the
 ``/api`` prefix.
+
+⚠️ **Students only, no registration, once a day** (2026-10-22, the user's
+decisions):
+
+- No `/students/register`, `/colleges_programs` or `/enrol/*`. The first was
+  public, so anyone with the link could create a student and put a face into
+  `dataset/` and the model; the capture routes let a student replace their own
+  images. Only an administrator, or an instructor for their own classes,
+  registers a student and captures a face - on the website.
+- `/login` issues tokens to students only and every route requires one.
+  `/students`, `/subjects` and `/dashboard` served only the staff screens.
+- Phone attendance is **once per class per day**: a student already Present or
+  Late for the running subject today is refused before any face is judged.
+
+`tests/test_api_students_only.py` and `tests/test_api_once_a_day.py` keep them.
 """
 
 from __future__ import annotations
@@ -22,15 +37,12 @@ from flask import Blueprint, jsonify, request
 
 from config.settings import settings as app_config
 from infra.db import db_cursor
-from repositories import academics as academics_repo
+from infra.uploads import UploadRejected, decode_frame
 from repositories import attendance as attendance_repo
-from repositories import credentials as credentials_repo
-from repositories import enrolments as enrolments_repo
 from repositories import students as students_repo
 from repositories import subjects as subjects_repo
-from security.access import NO_INSTRUCTOR, public
-from security.passwords import hash_password, verify_password
-from web.placement import parse_placement, section_id_for
+from security.access import public
+from security.passwords import verify_password
 
 logger = logging.getLogger(__name__)
 
@@ -71,57 +83,27 @@ def _get_current_user() -> dict | None:
     return _decode_token(auth_header[7:])
 
 
-def jwt_required(fn):
-    """Decorator: require a valid JWT Bearer token."""
+def student_required(fn):
+    """
+    Decorator: require a valid JWT Bearer token issued to a student.
+
+    The app is for students only (2026-10-21). /login no longer issues a token
+    to an administrator or instructor, and this refuses one issued before that
+    changed - those tokens live for JWT_EXPIRY_HOURS, so without the role check
+    an old admin token would still reach every route below.
+    """
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         user = _get_current_user()
         if user is None:
             return jsonify({"success": False, "message": "Authentication required"}), 401
+        if user.get("role") != "student":
+            return jsonify({"success": False, "message": "Forbidden"}), 403
         request.jwt_user = user
         return fn(*args, **kwargs)
 
     return wrapper
-
-
-def role_required_api(*roles):
-    """Decorator: require JWT + one of the given roles."""
-
-    def decorator(fn):
-        @functools.wraps(fn)
-        def wrapper(*args, **kwargs):
-            user = _get_current_user()
-            if user is None:
-                return jsonify({"success": False, "message": "Authentication required"}), 401
-            if user.get("role") not in roles:
-                return jsonify({"success": False, "message": "Forbidden"}), 403
-            request.jwt_user = user
-            return fn(*args, **kwargs)
-
-        return wrapper
-
-    return decorator
-
-
-def _instructor_scope(user: dict) -> int | None:
-    """
-    Whose classes this token may see (DM-5) - the JWT counterpart of
-    `security.access.instructor_scope()`.
-
-    None for an administrator. For an instructor, the `instructors.id` the
-    token was issued with; a token issued before that claim existed carries
-    none and is scoped to nothing until it expires, rather than to everything.
-
-    Students are not scoped here - the routes below already confine a student
-    to their own rows.
-    """
-    if user.get("role") != "instructor":
-        return None
-
-    scope = user.get("instructor_pk")
-
-    return scope if isinstance(scope, int) else NO_INSTRUCTOR
 
 
 # ---------------------------------------------------------------------------
@@ -133,82 +115,56 @@ def _instructor_scope(user: dict) -> int | None:
 @public
 def api_login():
     """
-    Authenticate and return a JWT token.
+    Authenticate a student and return a JWT token.
 
-    Accepts JSON: {"role": "admin"|"instructor"|"student", "user_id": "...", "password": "..."}
+    Accepts JSON: {"role": "student", "user_id": "...", "password": "..."}
+
+    Students only. Administrators and instructors sign in on the website,
+    which is where everything they do lives; the app used to offer them a
+    login too. `role` is still read so that an installed copy of the old app,
+    which sends it, is told why rather than given a token.
     """
     data = request.get_json(silent=True) or {}
-    role = data.get("role", "")
+    role = data.get("role", "student")
     user_id = data.get("user_id", "")
     password = data.get("password", "")
 
-    if not role or not user_id or not password:
+    if role != "student":
+        return jsonify({
+            "success": False,
+            "message": (
+                "The app is for students. "
+                "Administrators and instructors sign in on the website."
+            ),
+        }), 403
+
+    if not user_id or not password:
         return jsonify({"success": False, "message": "Missing credentials"}), 400
 
-    account = None
+    with db_cursor(dictionary=True) as cursor:
+        cursor.execute(
+            "SELECT student_id, name, password FROM students WHERE student_id = %s",
+            (user_id,),
+        )
+        row = cursor.fetchone()
 
-    if role == "admin":
-        with db_cursor(dictionary=True) as cursor:
-            row = credentials_repo.admin_by_username(cursor, user_id)
-            if row is not None and row["username"] == user_id:
-                account = row
+    if row is None or not row.get("password"):
+        return jsonify({"success": False, "message": "Invalid credentials"}), 401
 
-        if account is None or not verify_password(password, account.get("password")):
-            return jsonify({"success": False, "message": "Invalid credentials"}), 401
+    if not verify_password(password, row["password"]):
+        return jsonify({"success": False, "message": "Invalid credentials"}), 401
 
-        token = _make_token({
-            "role": "admin",
-            "user_id": account["username"],
-            "admin_id": account["id"],
-            "display_name": account["username"],
-        })
-
-    elif role == "instructor":
-        with db_cursor(dictionary=True) as cursor:
-            row = credentials_repo.instructor_by_id(cursor, user_id)
-            if row is not None and row["instructor_id"] == user_id:
-                account = row
-
-        if account is None or not verify_password(password, account.get("password")):
-            return jsonify({"success": False, "message": "Invalid credentials"}), 401
-
-        token = _make_token({
-            "role": "instructor",
-            "user_id": account["instructor_id"],
-            "instructor_pk": account["id"],
-            "display_name": account["fullname"],
-        })
-
-    elif role == "student":
-        with db_cursor(dictionary=True) as cursor:
-            cursor.execute(
-                "SELECT student_id, name, password FROM students WHERE student_id = %s",
-                (user_id,),
-            )
-            row = cursor.fetchone()
-
-        if row is None or not row.get("password"):
-            return jsonify({"success": False, "message": "Invalid credentials"}), 401
-
-        if not verify_password(password, row["password"]):
-            return jsonify({"success": False, "message": "Invalid credentials"}), 401
-
-        account = row
-        token = _make_token({
-            "role": "student",
-            "user_id": account["student_id"],
-            "display_name": account["name"],
-        })
-
-    else:
-        return jsonify({"success": False, "message": "Invalid role"}), 400
+    token = _make_token({
+        "role": "student",
+        "user_id": row["student_id"],
+        "display_name": row["name"],
+    })
 
     return jsonify({
         "success": True,
         "token": token,
-        "role": role,
-        "display_name": account.get("display_name") or account.get("name")
-            or account.get("fullname") or account.get("username", ""),
+        "role": "student",
+        "display_name": row["name"],
     })
 
 
@@ -219,251 +175,29 @@ def api_login():
 
 @api_bp.route("/me", methods=["GET"])
 @public
-@jwt_required
+@student_required
 def api_me():
-    """Return the current user's profile."""
+    """Return the signed-in student's profile."""
     user = request.jwt_user
-    role = user.get("role")
     user_id = user.get("user_id")
 
     profile = {
-        "role": role,
+        "role": "student",
         "user_id": user_id,
         "display_name": user.get("display_name", ""),
     }
 
-    if role == "student":
-        with db_cursor(dictionary=True) as cursor:
-            student = students_repo.details(cursor, user_id)
-            if student:
-                profile.update({
-                    "college_department": student.get("college_department", ""),
-                    "program": student.get("program", ""),
-                    "year_level": student.get("year_level"),
-                    "section": student.get("section", ""),
-                })
+    with db_cursor(dictionary=True) as cursor:
+        student = students_repo.details(cursor, user_id)
+        if student:
+            profile.update({
+                "college_department": student.get("college_department", ""),
+                "program": student.get("program", ""),
+                "year_level": student.get("year_level"),
+                "section": student.get("section", ""),
+            })
 
     return jsonify({"success": True, "profile": profile})
-
-
-# ---------------------------------------------------------------------------
-# SUBJECTS
-# ---------------------------------------------------------------------------
-
-
-@api_bp.route("/subjects", methods=["GET"])
-@public
-@jwt_required
-def api_subjects():
-    """List subjects. Students see only their enrolled subjects."""
-    user = request.jwt_user
-
-    with db_cursor(dictionary=True) as cursor:
-        if user.get("role") == "student":
-            cursor.execute(
-                f"""
-                SELECT s.id, s.subject_code, s.subject_name,
-                       COALESCE(i.fullname, s.instructor) AS instructor,
-                       s.day,
-                       {subjects_repo.offering_course()} AS course,
-                       {subjects_repo.offering_section()} AS section,
-                       s.time_in, s.time_out
-                FROM subjects s
-                {subjects_repo.OFFERING_JOIN}
-                JOIN enrolments e ON e.subject_id = s.id
-                LEFT JOIN instructors i ON i.id = s.instructor_id
-                WHERE e.student_id = %s
-                ORDER BY s.subject_code
-                """,
-                (user["user_id"],),
-            )
-            subjects = cursor.fetchall()
-        else:
-            subjects = subjects_repo.for_selection(
-                cursor, instructor_id=_instructor_scope(user)
-            )
-
-    return jsonify({"success": True, "subjects": subjects})
-
-
-@api_bp.route("/colleges_programs", methods=["GET"])
-@public
-def api_colleges_programs():
-    """
-    The departments and programs a student can register under.
-
-    Read from `departments` and `programs` (migration 009). It used to be
-    `SELECT DISTINCT` over what earlier students had typed, so the lists
-    offered whatever had been entered before - including values that were
-    never a department - and were empty on a new installation.
-
-    `colleges` and `programs` keep their shape for the app that is already
-    installed: department names and program codes. `structure` pairs each
-    program with its department, which the two flat lists cannot say.
-    """
-    try:
-        with db_cursor(dictionary=True) as cursor:
-            departments = academics_repo.departments(cursor)
-            programs = academics_repo.programs(cursor)
-
-            return jsonify({
-                "success": True,
-                "colleges": [row["department_name"] for row in departments],
-                "programs": [row["program_code"] for row in programs],
-                "structure": [
-                    {
-                        "program_id": row["id"],
-                        "program": row["program_code"],
-                        "program_name": row["program_name"],
-                        "college_department": row["department_name"],
-                    }
-                    for row in programs
-                ],
-            })
-    except mysql.connector.Error:
-        logger.exception("Could not fetch colleges and programs")
-        return jsonify({"success": False, "colleges": [], "programs": []}), 500
-
-
-# ---------------------------------------------------------------------------
-# STUDENTS
-# ---------------------------------------------------------------------------
-
-
-@api_bp.route("/students", methods=["GET"])
-@public
-@role_required_api("admin")
-def api_students():
-    """List all students (admin only)."""
-    with db_cursor(dictionary=True) as cursor:
-        records = students_repo.all_students(cursor)
-
-    # Convert to plain dicts for JSON serialization
-    students = []
-    for row in records:
-        students.append({
-            "student_id": row["student_id"],
-            "name": row["name"],
-            "college_department": row.get("college_department", ""),
-            "program": row.get("program", ""),
-            "year_level": row.get("year_level"),
-            "section": row.get("section", ""),
-            "classes": row.get("classes", 0),
-        })
-
-    return jsonify({"success": True, "students": students})
-
-
-@api_bp.route("/students/register", methods=["POST"])
-@public
-def api_register_student():
-    """
-    Register a new student from the mobile app.
-
-    This is a public endpoint — new students register themselves.
-    The student row and password are created here; face capture follows
-    separately through the enrolment endpoints.
-    """
-    data = request.get_json(silent=True) or {}
-
-    student_id = data.get("student_id", "").strip()
-    first_name = data.get("first_name", "").strip()
-    middle_name = data.get("middle_name", "").strip()
-    last_name = data.get("last_name", "").strip()
-    email = data.get("email", "").strip()
-    password = data.get("password", "").strip()
-    program = str(data.get("program") or "").strip()
-    year_level = str(data.get("year_level") or "").strip()
-    section = str(data.get("section") or "").strip()
-
-    if not student_id or not first_name or not last_name or not password:
-        return jsonify({
-            "success": False,
-            "message": "Student number, first name, last name, and password are required.",
-        }), 400
-
-    if len(password) < 8:
-        return jsonify({
-            "success": False,
-            "message": "Password must be at least 8 characters.",
-        }), 400
-
-    # Build display name
-    name_parts = [first_name]
-    if middle_name:
-        name_parts.append(middle_name)
-    name_parts.append(last_name)
-    name = " ".join(name_parts)
-
-    # A program must come with a year level and a section: a student belongs
-    # to a section, and a program on its own has nowhere to be stored
-    # (migration 009). Checked before bcrypt and before a connection is taken.
-    if program and not (year_level.isdigit() and section):
-        return jsonify({
-            "success": False,
-            "message": "Year level and section are required.",
-        }), 400
-
-    try:
-        password_hash = hash_password(password)
-    except Exception:
-        return jsonify({
-            "success": False,
-            "message": "Password could not be processed.",
-        }), 400
-
-    try:
-        with db_cursor(dictionary=True, commit=True) as cursor:
-            if students_repo.exists(cursor, student_id):
-                return jsonify({
-                    "success": False,
-                    "message": "A student with that ID is already registered.",
-                }), 409
-
-            section_id = None
-
-            if program:
-                # The app sends the program's code, which is unique. The
-                # department it also sends is not consulted: it is a property
-                # of the program, and the two were free to disagree.
-                placement, problem = parse_placement({
-                    "program_id": academics_repo.program_id_for_code(
-                        cursor, program
-                    ),
-                    "year_level": year_level,
-                    "section": section,
-                })
-
-                if problem is not None:
-                    return jsonify({"success": False, "message": problem}), 400
-
-                section_id = section_id_for(cursor, placement)
-
-            students_repo.insert(cursor, student_id, name, {
-                "section_id": section_id,
-                "password_hash": password_hash,
-            })
-
-        token = _make_token({
-            "role": "student",
-            "user_id": student_id,
-            "display_name": name,
-        })
-
-        return jsonify({
-            "success": True,
-            "message": "Registration successful.",
-            "token": token,
-            "role": "student",
-            "display_name": name,
-        }), 201
-
-    except mysql.connector.Error:
-        logger.exception("Student registration failed")
-        return jsonify({
-            "success": False,
-            "message": "Registration failed. Please try again.",
-        }), 500
 
 
 # ---------------------------------------------------------------------------
@@ -473,12 +207,11 @@ def api_register_student():
 
 @api_bp.route("/attendance/history", methods=["GET"])
 @public
-@jwt_required
+@student_required
 def api_attendance_history():
     """
-    Attendance history, filtered by the current user's role.
+    The signed-in student's own attendance records.
 
-    Students see only their own records. Instructors/admins can filter.
     Query params: ?date=YYYY-MM-DD&subject_id=N
     """
     user = request.jwt_user
@@ -490,59 +223,33 @@ def api_attendance_history():
     except (TypeError, ValueError):
         subject_id = None
 
+    query = f"""
+        SELECT a.id, a.attendance_date, a.student_id,
+               s.name AS student_name, sub.subject_code,
+               sub.subject_name,
+               {subjects_repo.offering_section('sub')} AS section,
+               a.time_in, a.status
+        FROM attendance a
+        JOIN students s ON s.student_id = a.student_id
+        JOIN subjects sub ON sub.id = a.subject_id
+        {subjects_repo.offering_join('sub')}
+        WHERE a.student_id = %s
+    """
+    values = [user["user_id"]]
+
+    if selected_date:
+        query += " AND a.attendance_date = %s"
+        values.append(selected_date)
+
+    if subject_id is not None:
+        query += " AND a.subject_id = %s"
+        values.append(subject_id)
+
+    query += " ORDER BY a.attendance_date DESC, a.time_in DESC"
+
     try:
         with db_cursor(dictionary=True) as cursor:
-            if user.get("role") == "student":
-                # Students see only their own attendance
-                query = f"""
-                    SELECT a.id, a.attendance_date, a.student_id,
-                           s.name AS student_name, sub.subject_code,
-                           sub.subject_name,
-                           {subjects_repo.offering_section('sub')} AS section,
-                           a.time_in, a.status
-                    FROM attendance a
-                    JOIN students s ON s.student_id = a.student_id
-                    JOIN subjects sub ON sub.id = a.subject_id
-                    {subjects_repo.offering_join('sub')}
-                    WHERE a.student_id = %s
-                """
-                values = [user["user_id"]]
-
-                if selected_date:
-                    query += " AND a.attendance_date = %s"
-                    values.append(selected_date)
-
-                if subject_id is not None:
-                    query += " AND a.subject_id = %s"
-                    values.append(subject_id)
-
-                query += " ORDER BY a.attendance_date DESC, a.time_in DESC"
-                cursor.execute(query, values)
-            else:
-                records = attendance_repo.filtered(
-                    cursor,
-                    selected_date=selected_date,
-                    subject_id=subject_id,
-                    instructor_id=_instructor_scope(user),
-                )
-                return jsonify({
-                    "success": True,
-                    "records": [
-                        {
-                            "id": r["id"],
-                            "attendance_date": str(r["attendance_date"]),
-                            "student_id": r["student_id"],
-                            "student_name": r["student_name"],
-                            "subject_code": r["subject_code"],
-                            "subject_name": r["subject_name"],
-                            "section": r.get("section", ""),
-                            "time_in": str(r["time_in"]) if r["time_in"] else None,
-                            "status": r["status"],
-                        }
-                        for r in records
-                    ],
-                })
-
+            cursor.execute(query, values)
             rows = cursor.fetchall()
 
         return jsonify({
@@ -570,7 +277,7 @@ def api_attendance_history():
 
 @api_bp.route("/attendance/live", methods=["GET"])
 @public
-@jwt_required
+@student_required
 def api_attendance_live():
     """Live session status — who has been recognized so far."""
     # Import here to avoid the heavy recognize_face import at module scope
@@ -597,11 +304,21 @@ def api_attendance_live():
             "recognised": len(student_ids),
         })
 
+    try:
+        your_status = _recorded_status_today(
+            request.jwt_user.get("user_id"), active.subject_id
+        )
+    except mysql.connector.Error:
+        your_status = None  # the frame route checks again, and fails closed
+
     return jsonify({
         "success": True,
         "running": True,
         "subject_code": active.subject_code,
         "recognised": len(student_ids),
+        # Present/Late if the signed-in student already has a mark for this
+        # class today - the app shows that instead of a Verify button.
+        "your_status": your_status,
         "students": [
             {
                 "student_id": row["student_id"],
@@ -616,7 +333,7 @@ def api_attendance_live():
 
 @api_bp.route("/attendance/frame", methods=["POST"])
 @public
-@role_required_api("student")
+@student_required
 def api_attendance_frame():
     """Verify a student's face for the active attendance session from the mobile app."""
     from recognize_face import session as recognition_session
@@ -630,12 +347,36 @@ def api_attendance_frame():
     user = request.jwt_user
     student_id = user.get("user_id")
 
-    # Has this student already been recorded?
-    if student_id in snapshot.recognized:
+    # ⚠️ **Once a day, per class, checked before any face is judged.** A
+    # student who already has Present or Late for this subject today is
+    # refused here, so repeated attempts on a recorded account - the shape a
+    # spoofing attempt takes - get no recognition at all to probe. The
+    # session's in-memory list is only a cache of the register; the register
+    # is asked as well, so a restarted server or a failed seed cannot reopen it.
+    recorded = snapshot.recognized.get(student_id)
+
+    if student_id not in snapshot.recognized:
+        try:
+            recorded = _recorded_status_today(student_id, snapshot.subject.subject_id)
+        except mysql.connector.Error:
+            # Fail closed: if the register cannot be read, it cannot be written
+            # either, and "try again" is the honest answer.
+            logger.exception("Could not check today's register for %s", student_id)
+            return jsonify({
+                "success": False,
+                "message": "Attendance could not be checked. Please try again.",
+            }), 503
+
+    if student_id in snapshot.recognized or recorded is not None:
+        marked = f" as {recorded}" if recorded else ""
         return jsonify({
             "success": True,
             "done": True,
-            "message": "You are already recorded for this session."
+            "already": True,
+            "message": (
+                f"You are already recorded{marked} for this class today. "
+                "Attendance can only be taken once."
+            ),
         })
 
     try:
@@ -681,6 +422,16 @@ def api_attendance_frame():
     if status in (NotRecorded.NOT_IN_CLASS, NotRecorded.UNKNOWN_STUDENT):
         return jsonify({"success": False, "message": "You are not enrolled in this class."}), 403
 
+    # NotRecorded.ERROR: the database could not be reached, so nothing was
+    # written. It must not fall through to mark_recognized() below - with the
+    # once-a-day rule above, that would lock the student out for the day with
+    # no attendance row at all.
+    if not status:
+        return jsonify({
+            "success": False,
+            "message": "Your attendance could not be saved. Please try again.",
+        }), 503
+
     # Mark as recognized in the in-memory session so the dashboard updates
     recognition_session.mark_recognized(student_id, status)
 
@@ -691,173 +442,7 @@ def api_attendance_frame():
     })
 
 
-@api_bp.route("/dashboard", methods=["GET"])
-@public
-@jwt_required
-def api_dashboard():
-    """Dashboard statistics."""
-    try:
-        with db_cursor(dictionary=True) as cursor:
-            counters = attendance_repo.counters(
-                cursor, instructor_id=_instructor_scope(request.jwt_user)
-            )
-
-        return jsonify({
-            "success": True,
-            "counters": {
-                "students": counters["students"],
-                "subjects": counters["subjects"],
-                "attendance_today": counters["attendance_today"],
-                "active_sessions": counters["active_sessions"],
-            },
-        })
-    except mysql.connector.Error:
-        logger.exception("Dashboard query failed")
-        return jsonify({"success": False, "message": "Could not load dashboard data."}), 500
-from web.enrolment import enrolment_slot
-from services.enrolment import DetectorClosed
-from infra import dataset_store
-from infra.uploads import UploadRejected, decode_frame
-from security.paths import UnsafeStudentPathError, validate_student_id, validate_student_name
-from services.training import training_job
-from vision.enrolment import MAX_IMAGES, EnrolmentComplete
-
-def enrolment_json(message, status=400, **extra):
-    body = {"success": False, "message": message}
-    body.update(extra)
-    return jsonify(body), status
-
-@api_bp.route('/enrol/start', methods=['POST'])
-@public
-@role_required_api('student', 'admin')
-def api_enrol_start():
-    payload = request.get_json(silent=True) or {}
-    user = request.jwt_user
-
-    if enrolment_slot.current() is not None:
-        return enrolment_json("Another enrolment is already in progress.", status=409)
-
-    try:
-        student_id = validate_student_id(payload.get('student_id'))
-        student_name = validate_student_name(payload.get('student_name'))
-    except UnsafeStudentPathError as error:
-        return enrolment_json(str(error))
-
-    # Security check: Students can only enrol themselves
-    if user.get('role') == 'student' and user.get('user_id') != student_id:
-        return enrolment_json("You can only enrol yourself.", status=403)
-
-    try:
-        capture_session = enrolment_slot.start(
-            student_id=student_id,
-            student_name=student_name,
-            started_by=user.get('user_id'),
-            record={},
-        )
-    except (UnsafeStudentPathError, OSError):
-        logger.exception("Could not open an enrolment staging folder")
-        return enrolment_json("Could not start the capture.", status=500)
-
-    if capture_session is None:
-        return enrolment_json("Another enrolment is already in progress.", status=409)
-
-    return jsonify({
-        "success": True,
-        "progress": capture_session.progress().as_dict(),
-    }), 201
-
-
-@api_bp.route('/enrol/frame', methods=['POST'])
-@public
-@role_required_api('student', 'admin')
-def api_enrol_frame():
-    capture_session = enrolment_slot.current()
-    if capture_session is None:
-        return enrolment_json("No capture is in progress.", status=409)
-
-    user = request.jwt_user
-    if user.get('role') == 'student' and capture_session.student_id != user.get('user_id'):
-        return enrolment_json("You can only submit frames for your own enrolment.", status=403)
-
-    try:
-        if 'frame' in request.files:
-            file = request.files['frame']
-            frame = decode_frame(file.read(), file.mimetype)
-        else:
-            frame = decode_frame(request.get_data(), request.content_type)
-    except UploadRejected as error:
-        return enrolment_json(str(error))
-
-    try:
-        verdict = capture_session.offer_frame(frame)
-    except EnrolmentComplete:
-        return jsonify({"success": True, "progress": capture_session.progress().as_dict()})
-    except DetectorClosed:
-        # Cancelled while this frame was in flight - the same answer as
-        # arriving one moment later, not a server fault. See services/enrolment.
-        return enrolment_json("No capture is in progress.", status=409)
-    except Exception:
-        logger.exception("Enrolment frame error")
-        return enrolment_json("That frame could not be processed.", status=500)
-
-    return jsonify({"success": True, "progress": verdict.as_dict()})
-
-
-@api_bp.route('/enrol/finish', methods=['POST'])
-@public
-@role_required_api('student', 'admin')
-def api_enrol_finish():
-    capture_session = enrolment_slot.current()
-    if capture_session is None:
-        return enrolment_json("No capture is in progress.", status=409)
-
-    user = request.jwt_user
-    if user.get('role') == 'student' and capture_session.student_id != user.get('user_id'):
-        return enrolment_json("Forbidden.", status=403)
-
-    if not capture_session.done:
-        return enrolment_json(f"Only {capture_session.captured} of {MAX_IMAGES} captured.", status=409)
-
-    student_id = capture_session.student_id
-    student_name = capture_session.student_name
-
-    try:
-        dataset_store.promote(student_id, expected=MAX_IMAGES)
-    except (dataset_store.DatasetStoreError, UnsafeStudentPathError, OSError):
-        enrolment_slot.abandon()
-        return enrolment_json("Images could not be saved.", status=500)
-
-    # Note: For mobile registration, the student row is ALREADY created at /students/register.
-    # We do not need to insert it here like the web app does.
-    # However, if this is a recapture, we should update the name just in case.
-    try:
-        with db_cursor(dictionary=True, commit=True) as cursor:
-            students_repo.rename(cursor, student_id, student_name)
-    except mysql.connector.Error:
-        enrolment_slot.release()
-        return enrolment_json("Failed to update database.", status=500)
-
-    enrolment_slot.release()
-    training_job.start(started_by=user.get('user_id'))
-
-    return jsonify({
-        "success": True,
-        "message": "Enrolment complete. Model retraining started."
-    })
-
-
-@api_bp.route('/enrol/cancel', methods=['POST'])
-@public
-@role_required_api('student', 'admin')
-def api_enrol_cancel():
-    capture_session = enrolment_slot.current()
-    if capture_session is None:
-        return jsonify({"success": True, "message": "Nothing to cancel."})
-
-    user = request.jwt_user
-    if user.get('role') == 'student' and capture_session.student_id != user.get('user_id'):
-        return enrolment_json("Forbidden.", status=403)
-
-    enrolment_slot.abandon()
-    return jsonify({"success": True, "message": "Capture cancelled."})
-
+def _recorded_status_today(student_id, subject_id):
+    """Present/Late if already recorded for this subject today, else None."""
+    with db_cursor(dictionary=True) as cursor:
+        return attendance_repo.recorded_status_today(cursor, student_id, subject_id)
