@@ -1849,3 +1849,17 @@ the re-check message. Fixed wording: `"Liveness passed - Face the camera n/8"`.
 `grep` for its prefix (`startswith`, `==`, `in`) across Python and JS, and run
 `status_color()` on the new text. A test guarding a string contract must cover
 every state that produces the string, not just the first.
+
+---
+
+## L44 - A barcode the server draws must be decoded by a test, in the symbology the reader reads
+
+**2026-10-25, classroom code.** The app's QR scanner "did nothing"; students typed the digits instead.
+`segno.make("FACEATTEND:123456")` silently picks a **Micro QR** (M4, 17x17) when the text fits one - a different
+symbology, which phone scanners (expo-camera `barcodeTypes: ['qr']`, ML Kit) do not read. Every test passed
+because they only checked the response *started with* `data:image/svg+xml`. A Micro QR looks like a QR to a
+person, so nobody reviewing the page would notice either.
+
+**How to apply:** for any generated QR/barcode, a test decodes the actual symbol with a real decoder (OpenCV's
+`QRCodeDetector` is in the venv) and compares the payload. With segno, use `make_qr()` (never `make()`), an
+explicit light colour and a 4-module border.

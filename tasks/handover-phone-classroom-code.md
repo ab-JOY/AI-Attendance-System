@@ -118,3 +118,35 @@ Not an identity check. Re-check NOT changed (user asked to remove it; explained 
 identity check, so without it a photo + someone else's head turns would record the student; offered 8 -> 3,
 not chosen yet). Matching window 12 unchanged. Test subjects sundaytest/2/3 (ids 52-54, Sunday only) created
 in the DB for testing; the user will delete them.
+
+## 9. 2026-10-25 - scanner fixed; code period 20 s -> 6 s
+
+User: scanning "did nothing", had to type the digits; 20 s "too long, it can be passed to a student outside".
+
+- **Root cause of the scanner:** `segno.make()` drew a Micro QR (M4) - phone scanners do not read Micro QR.
+  Now `classroom_code.qr_symbol()` uses `segno.make_qr()`; SVG has a white background and a 4-module border.
+  New test decodes the symbol with OpenCV (fails on the old code). L44. **No app change was needed** - the app's
+  scanner was correct; it never got a readable code.
+- `PERIOD_SECONDS` 20 -> 6 (user's request). A code works 6-12 s (current + previous step). `attendance.js` now
+  also refreshes the code the moment it changes (`seconds_left` timer), so the shown code is not up to 2 s stale.
+- Fast suite **1,952 passed, 99 skipped**.
+- **Watch:** typing the 6 digits on a phone takes ~5 s plus the request; a student who types slowly can get a
+  "wrong code" (counts toward the 10-try lock). If that happens in class, `PERIOD_SECONDS = 10` is the next step
+  (10-20 s). Scanning is ~1-2 s and has no such risk. Not yet tried on a phone; restart `serve.py` (L42).
+
+## 10. 2026-10-27 - QR scanner removed from the app
+
+User: "remove the qr code scan in the mobile app, it is not needed anymore". The app now shows the code field and
+**Check In** straight away (no 'scan' mode, no back camera, no `onBarcodeScanned`); camera permission is asked
+after a successful check-in, for the face step. The check-in step itself is **kept** - server still refuses frames
+without a pass. Server messages "Scan the ..." -> "Enter the ..." (`web/api.py`). Not changed: the QR image on
+`/attendance` (nothing reads it now) and `PERIOD_SECONDS = 6` - with typing as the only path, §9's warning applies
+to every student; 10 s is the suggested next step. Both are the user's call. Bundle OK; check-in + frame tests 45
+passed. Not tried on a phone.
+
+**Same day - QR removed from the web page too** (user: "remove it also in the instructor and admin page"). The
+`/attendance` panel (instructor and admin share it) now shows only the six digits and the countdown.
+`/attendance/class-code` no longer returns `qr`; `qr_symbol`, `qr_svg_data_uri`, `QR_PREFIX` and its stripping in
+`parse_code` are gone; `segno` dropped from `pyproject.toml` (still installed in `.venv`, harmless). L44 is now
+history. Tests: QR-decode test removed, `FACEATTEND:` input now refused, endpoint asserts no `qr`. Fast suite
+**1,950 passed, 99 skipped**. Restart `serve.py` (L42).

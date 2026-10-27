@@ -378,21 +378,20 @@
     #}
 
     {#
-        The classroom code (services/classroom_code.py). Students scan it in
+        The classroom code (services/classroom_code.py). Students type it in
         the mobile app before verifying their face, which is what keeps the
         app from being used outside the room. Shown only while a session runs,
-        to the instructor whose class it is; changes every 20 seconds.
+        to the instructor whose class it is; changes every 6 seconds.
     #}
     <section class="attendance-log" id="class-code-panel" hidden>
         <h2>Classroom code for the mobile app</h2>
         <p class="hint">
-            Show this on the classroom screen. Students scan it in the app
+            Show this on the classroom screen. Students type it in the app
             before verifying their face. It changes every
-            <span id="class-code-period">20</span> seconds, so a photo of it
+            <span id="class-code-period">6</span> seconds, so a photo of it
             sent outside the room soon stops working.
         </p>
         <div class="class-code-body">
-            <img id="class-code-qr" class="class-code-qr" alt="Classroom code QR">
             <div>
                 <p class="class-code-digits" id="class-code-digits" aria-live="off"></p>
                 <p class="hint">Changes in <span id="class-code-left"></span> s</p>

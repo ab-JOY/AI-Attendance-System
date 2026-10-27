@@ -4,8 +4,8 @@ The classroom code: proof that a phone verifying attendance is in the room.
 Face verification on a phone proves *who* is holding it, not *where*. Before
 this, a student could open the app at home during class time and be marked
 Present. The code is what only the room has: the instructor's attendance page
-shows a QR code and the same six digits, changing every PERIOD_SECONDS. The
-student scans it (or types it) in the app, and only then may their phone send
+shows six digits, changing every PERIOD_SECONDS. The
+student types them in the app, and only then may their phone send
 frames - `/api/attendance/frame` refuses without a pass, before any face is
 judged.
 
@@ -13,7 +13,7 @@ How the code is made: an HMAC of the running session and the current
 PERIOD_SECONDS step, under a secret derived from the server's SECRET_KEY. So
 it needs no storage, cannot be predicted from earlier codes, and is different
 for every session even of the same subject. The current and the previous step
-are accepted, so a code scanned a second before it changed still works - a
+are accepted, so a code typed a second before it changed still works - a
 code is good for PERIOD_SECONDS to twice that.
 
 A correct code gives that student a pass for PASS_SECONDS, for that session
@@ -21,7 +21,7 @@ only: long enough to verify their face, not long enough to walk out and lend
 the phone.
 
 ⚠️ **What this does not stop, said plainly:** a student in the room can photograph
-the code and send it to a friend at home, who has up to ~40 s to use it. The
+the code and send it to a friend at home, who has up to ~12 s to use it. The
 friend still has to pass the face check and the liveness challenge *as
 themselves, live*, on their own account - so it takes an accomplice in the
 room at that moment, not just a shared password. Stronger proofs (the campus
@@ -43,14 +43,14 @@ import time
 from collections.abc import Callable
 from enum import Enum
 
-PERIOD_SECONDS = 20
+# Short, so a photo of the code relayed outside the room is stale by the time
+# it is typed. 6 s (was 20, 2026-10-25, the user's choice): with the previous
+# step also accepted a code works for 6-12 s - typing the digits takes
+# ~5 s. If students typing it are refused, 10 s is the next step up.
+PERIOD_SECONDS = 6
 CODE_DIGITS = 6
 PASS_SECONDS = 180
 MAX_WRONG_CODES = 10
-
-# What the QR code holds: the digits, prefixed, so the app ignores any other
-# QR code that happens to be in view (a poster, a URL).
-QR_PREFIX = "FACEATTEND:"
 
 
 def secret_from(secret_key: str) -> bytes:
@@ -60,13 +60,6 @@ def secret_from(secret_key: str) -> bytes:
     code changes whenever that key does.
     """
     return hmac.new(secret_key.encode(), b"classroom-code", hashlib.sha256).digest()
-
-
-def qr_svg_data_uri(code: str) -> str:
-    """The QR code for `code`, as a data: URI an <img> can show."""
-    import segno  # here, so the API and the tests need it only when drawing
-
-    return segno.make(f"{QR_PREFIX}{code}", error="m").svg_data_uri(scale=8, border=2)
 
 
 def session_key(subject) -> str:
@@ -101,14 +94,11 @@ def accepts(secret: bytes, key: str, code: str, now: float) -> bool:
 
 
 def parse_code(text: str | None) -> str | None:
-    """The six digits from a scanned QR or a typed code, or None."""
+    """The six digits of a typed code, or None."""
     if not text:
         return None
 
     text = text.strip()
-
-    if text.upper().startswith(QR_PREFIX):
-        text = text[len(QR_PREFIX):]
 
     text = text.replace(" ", "")
 
@@ -129,7 +119,7 @@ class CheckIns:
     The passes granted in the running session, and the wrong tries.
 
     In memory, on purpose: a pass lasts minutes and belongs to one session. A
-    restarted server forgets them, and the student scans again.
+    restarted server forgets them, and the student types the code again.
     """
 
     def __init__(self, clock: Callable[[], float] = time.time) -> None:

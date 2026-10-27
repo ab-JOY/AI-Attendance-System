@@ -21,8 +21,8 @@ decisions):
   `/students`, `/subjects` and `/dashboard` served only the staff screens.
 - Phone attendance is **once per class per day**: a student already Present or
   Late for the running subject today is refused before any face is judged.
-- Phone attendance needs the **classroom code** (2026-10-24): the QR on the
-  instructor's attendance page, scanned in the app (`/attendance/checkin`).
+- Phone attendance needs the **classroom code** (2026-10-24): the digits on the
+  instructor's attendance page, typed in the app (`/attendance/checkin`).
   Without a pass no face is judged, so the app cannot be used from home.
 - A phone's frames are judged by **the classroom camera's own pipeline**,
   liveness included (services/phone_verification.py), not by one photo.
@@ -355,7 +355,7 @@ def api_attendance_live():
 @student_required
 def api_attendance_checkin():
     """
-    The classroom code, scanned or typed: a pass to verify for this session.
+    The classroom code, typed in the app: a pass to verify for this session.
 
     See services/classroom_code.py for what the code proves and what it does
     not. The pass is what `/attendance/frame` asks for before any face.
@@ -397,7 +397,7 @@ def api_attendance_checkin():
         "success": False,
         "tries_left": tries_left,
         "message": (
-            "That code is wrong or has expired. Scan the code on the "
+            "That code is wrong or has expired. Enter the code on the "
             "classroom screen again."
         ),
     }), 400
@@ -479,7 +479,7 @@ def api_attendance_frame():
         return jsonify({
             "success": False,
             "need_code": True,
-            "message": "Scan the classroom code first.",
+            "message": "Enter the classroom code first.",
         }), 403
 
     # The resolution the recognition gates were tuned at, as the browser

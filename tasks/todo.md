@@ -1418,7 +1418,16 @@ Defaults chosen (memory: proceed on defaults; overrule any of them):
 - [ ] **On a real phone** (not done - no phone here): scan from a seat, time a full verification, confirm
       "turn left" passes when the student turns to their own left. `serve.py` must be restarted first (L42)
 
-**Honest limit for the panel:** a classmate in the room can send the code to a friend at home within ~20-40 s.
+- [x] **2026-10-25: the app's scanner did nothing** (user had to type the digits). Cause: `segno.make()` drew a
+      **Micro QR** (M4) for text this short - phone scanners (expo-camera `barcodeTypes: ['qr']`) do not read Micro
+      QR. Now `segno.make_qr()`, white background, 4-module quiet zone. `test_the_qr_is_one_a_phone_scanner_can_read`
+      decodes the drawn symbol with OpenCV; fails with `make()` (mutation-checked). Lesson L44.
+- [x] **2026-10-25: code period 20 s -> 6 s** (user: "20s is too long, it can be passed to a student outside").
+      A code now works 6-12 s. The page also refreshes at the moment the code changes, not only on the 2 s poll.
+      Fast suite **1,952 passed, 99 skipped**. Not yet tried on a phone; `serve.py` restart needed (L42).
+
+**Honest limit for the panel:** a classmate in the room can send the code to a friend at home within ~6-12 s
+(was ~20-40 s before 2026-10-25).
 The friend still has to pass the face + liveness check as themselves, live, so it needs an accomplice in the room
 at that moment. Stronger options not built (open decisions): campus-network IP allowlist via `CF-Connecting-IP`;
 GPS geofence (spoofable, 10-50 m indoors).

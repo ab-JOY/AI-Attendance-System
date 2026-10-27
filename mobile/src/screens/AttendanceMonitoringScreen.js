@@ -5,8 +5,8 @@
  * Two steps, in this order, and the server refuses them out of order:
  *
  * 1. **Check in with the classroom code.** The instructor's attendance page
- *    shows a QR code that changes every 20 seconds. Scanning it (or typing
- *    its six digits) proves the phone is in the room; it gives a pass for a
+ *    shows a six-digit code that changes every 6 seconds. Typing it proves
+ *    the phone is in the room; it gives a pass for a
  *    few minutes (services/classroom_code.py). Without it the app could be
  *    used from home.
  *
@@ -49,13 +49,6 @@ const MAX_CONSECUTIVE_FAILURES = 5;
 // Waiting while MAX_PHONES other students verify (the server's 429).
 const BUSY_RETRY_MS = 2000;
 
-// What the classroom QR code holds - services/classroom_code.py QR_PREFIX.
-const QR_PREFIX = 'FACEATTEND:';
-
-// After a wrong scan, how long before the scanner reads again - so one code
-// held in view is not sent ten times in a second, each one a wrong try.
-const RESCAN_DELAY_MS = 2000;
-
 const LIGHTING_TIPS = [
   'Face a light or a window - not with a window behind you.',
   'Hold the phone at eye level and fit your face inside the square.',
@@ -89,7 +82,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export default function AttendanceMonitoringScreen() {
   const [liveData, setLiveData] = useState(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  // 'idle' (buttons), 'scan' (back camera, reading the QR), 'face' (front camera)
+  // 'idle' (code entry or button), 'face' (front camera)
   const [mode, setMode] = useState('idle');
   const [isVerifying, setIsVerifying] = useState(false);
   const [instruction, setInstruction] = useState('');
@@ -102,9 +95,6 @@ export default function AttendanceMonitoringScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef(null);
   const [pictureSize, setPictureSize] = useState(undefined);
-
-  // A scanned code is being sent, or was just refused - ignore further reads.
-  const scanBusyRef = useRef(false);
 
   // takePictureAsync() before the camera is ready throws; the loop waits.
   const cameraReadyRef = useRef(false);
@@ -196,14 +186,6 @@ export default function AttendanceMonitoringScreen() {
 
   // -- step 1: the classroom code -------------------------------------------
 
-  const openScanner = async () => {
-    if (!(await ensureCameraPermission())) return;
-    setProblem('');
-    scanBusyRef.current = false;
-    cameraReadyRef.current = false;
-    setMode('scan');
-  };
-
   const checkIn = async (code) => {
     setIsCheckingIn(true);
     setProblem('');
@@ -214,6 +196,7 @@ export default function AttendanceMonitoringScreen() {
       setNow(Date.now());
       setTypedCode('');
       // Straight on to the face: the pass is running.
+      if (!(await ensureCameraPermission())) return;
       cameraReadyRef.current = false;
       setInstruction('');
       setProgress({ stage: 'finding', step: null, value: 0 });
@@ -225,26 +208,9 @@ export default function AttendanceMonitoringScreen() {
         message += ` (${data.tries_left} tries left)`;
       }
       setProblem(message);
-      if (data.locked) setMode('idle');
-      // Let the scanner read again once the student has seen the message.
-      setTimeout(() => {
-        scanBusyRef.current = false;
-      }, RESCAN_DELAY_MS);
     } finally {
       setIsCheckingIn(false);
     }
-  };
-
-  const handleScanned = ({ data }) => {
-    if (scanBusyRef.current) return;
-
-    if (!data || !data.toUpperCase().startsWith(QR_PREFIX)) {
-      // Some other QR code in view (a poster, a link): not a wrong try.
-      return;
-    }
-
-    scanBusyRef.current = true;
-    checkIn(data);
   };
 
   // -- step 2: the face ---------------------------------------------------------
@@ -330,7 +296,7 @@ export default function AttendanceMonitoringScreen() {
         // The check-in pass ran out (or the server restarted): back to the
         // code, which is quick, rather than a dead end.
         if (data.need_code) {
-          stopVerifying('Your check-in expired. Scan the classroom code again.');
+          stopVerifying('Your check-in expired. Enter the classroom code again.');
           setPassUntil(0);
           setMode('idle');
           return 'stop';
@@ -464,25 +430,6 @@ export default function AttendanceMonitoringScreen() {
   const passSecondsLeft = Math.max(Math.ceil((passUntil - now) / 1000), 0);
 
   const renderCameraArea = () => {
-    if (mode === 'scan') {
-      return (
-        <View style={styles.avatarContainer}>
-          <View style={styles.avatarBox}>
-            <CameraView
-              style={StyleSheet.absoluteFill}
-              facing="back"
-              barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
-              onBarcodeScanned={handleScanned}
-            />
-            <View pointerEvents="none" style={styles.faceGuide} />
-          </View>
-          <Text style={styles.framingHint}>
-            Point the camera at the QR code on the classroom screen.
-          </Text>
-        </View>
-      );
-    }
-
     if (mode === 'face') {
       return (
         <View style={styles.avatarContainer}>
@@ -522,7 +469,7 @@ export default function AttendanceMonitoringScreen() {
       <View style={styles.avatarContainer}>
         <View style={styles.avatarBox}>
           <Ionicons
-            name={hasPass ? 'person-outline' : 'qr-code-outline'}
+            name={hasPass ? 'person-outline' : 'keypad-outline'}
             size={96}
             color={colors.secondary}
           />
@@ -544,34 +491,6 @@ export default function AttendanceMonitoringScreen() {
             Attendance can only be taken once.
           </Text>
         </Card>
-      );
-    }
-
-    if (mode === 'scan') {
-      return (
-        <>
-          <Text style={styles.orText}>or type the 6 digits under the QR code</Text>
-          <Input
-            placeholder="Classroom code"
-            value={typedCode}
-            onChangeText={(text) => setTypedCode(text.replace(/\D/g, '').slice(0, 6))}
-            keyboardType="number-pad"
-            icon="keypad-outline"
-          />
-          <Button
-            title="Check In"
-            onPress={() => checkIn(typedCode)}
-            loading={isCheckingIn}
-            disabled={typedCode.length !== 6}
-            style={styles.joinButton}
-          />
-          <Button
-            title="Cancel"
-            variant="outline"
-            onPress={() => setMode('idle')}
-            style={styles.joinButton}
-          />
-        </>
       );
     }
 
@@ -629,9 +548,22 @@ export default function AttendanceMonitoringScreen() {
     ) : (
       <>
         <Text style={styles.stepHint}>
-          Step 1 of 2: scan the classroom code shown on your instructor's screen.
+          Step 1 of 2: type the 6-digit classroom code shown on your instructor's screen.
         </Text>
-        <Button title="Scan Classroom Code" onPress={openScanner} style={styles.joinButton} />
+        <Input
+          placeholder="Classroom code"
+          value={typedCode}
+          onChangeText={(text) => setTypedCode(text.replace(/\D/g, '').slice(0, 6))}
+          keyboardType="number-pad"
+          icon="keypad-outline"
+        />
+        <Button
+          title="Check In"
+          onPress={() => checkIn(typedCode)}
+          loading={isCheckingIn}
+          disabled={typedCode.length !== 6}
+          style={styles.joinButton}
+        />
       </>
     );
   };
@@ -801,12 +733,6 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     textAlign: 'center',
     marginBottom: spacing.md,
-  },
-  orText: {
-    ...typography.caption,
-    color: colors.textSecondary,
-    textAlign: 'center',
-    marginBottom: spacing.sm,
   },
   tipsCard: {
     padding: spacing.md,

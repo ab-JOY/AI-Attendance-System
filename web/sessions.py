@@ -1048,8 +1048,8 @@ def attendance_live():
 @json_api
 def attendance_class_code():
     """
-    The classroom code for the running session: the QR the students' phones
-    scan to prove they are in the room (services/classroom_code.py).
+    The classroom code for the running session: the digits the students type
+    in the app to prove they are in the room (services/classroom_code.py).
 
     Polled by the attendance page while a session runs. Only for the
     instructor whose subject is running, or an administrator: another
@@ -1073,7 +1073,6 @@ def attendance_class_code():
         "running": True,
         "allowed": True,
         "code": code,
-        "qr": classroom_code.qr_svg_data_uri(code),
         "seconds_left": seconds_left,
         "period": classroom_code.PERIOD_SECONDS,
     })

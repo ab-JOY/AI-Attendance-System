@@ -2,7 +2,7 @@
 The classroom code - proof that a phone verifying attendance is in the room.
 
 services/classroom_code.py makes a code from the running session and the
-current 20-second step; the instructor's attendance page shows it; the app
+current PERIOD_SECONDS step; the instructor's attendance page shows it; the app
 sends it to `/api/attendance/checkin` for a pass; `/api/attendance/frame`
 refuses without a pass **before any face is judged**.
 
@@ -95,8 +95,7 @@ def test_another_servers_secret_makes_other_codes():
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("FACEATTEND:012345", "012345"),
-        ("faceattend:012345", "012345"),
+        ("FACEATTEND:012345", None),
         ("012 345", "012345"),
         ("  012345 ", "012345"),
         ("12345", None),
@@ -109,11 +108,6 @@ def test_another_servers_secret_makes_other_codes():
 )
 def test_parse_code(text, expected):
     assert parse_code(text) == expected
-
-
-# ---------------------------------------------------------------------------
-# Passes
-# ---------------------------------------------------------------------------
 
 
 def right_code(clock):
@@ -284,7 +278,7 @@ def test_no_pass_means_no_face_is_judged(flask_app, running, phones):
 
 
 def test_the_rooms_code_lets_the_phone_verify(flask_app, running, phones, clock):
-    response = check_in(flask_app, "FACEATTEND:" + the_rooms_code(clock))
+    response = check_in(flask_app, the_rooms_code(clock))
 
     assert response.status_code == 200
     assert response.get_json()["pass_seconds"] == PASS_SECONDS
@@ -381,7 +375,7 @@ def test_the_page_shows_the_code_the_phone_must_send(flask_app, running, clock, 
 
     assert body["running"] is True and body["allowed"] is True
     assert body["code"] == the_rooms_code(clock)
-    assert body["qr"].startswith("data:image/svg+xml")
+    assert "qr" not in body
     assert 0 < body["seconds_left"] <= PERIOD_SECONDS
     assert check_in(flask_app, body["code"]).status_code == 200
 
