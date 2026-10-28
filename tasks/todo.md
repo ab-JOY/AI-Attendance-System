@@ -1432,7 +1432,7 @@ The friend still has to pass the face + liveness check as themselves, live, so i
 at that moment. Stronger options not built (open decisions): campus-network IP allowlist via `CF-Connecting-IP`;
 GPS geofence (spoofable, 10-50 m indoors).
 
-## 19. PE-2 — per-student LBPH models + one central server (2026-10-28) — **steps 1-3, 5 BUILT 2026-10-28; 4, 6-9 open**
+## 19. PE-2 — per-student LBPH models + one central server (2026-10-28) — **steps 1-3, 5 + incremental training BUILT 2026-10-28; 4, 6-9 open**
 
 User: "a change in the system which can accommodate a large number of students and also centralized".
 Keeps LBPH (§7 Q1 stands). Recommendation accepted by the user; build deferred.
@@ -1450,8 +1450,12 @@ class-list changes need no retrain, no duplication across subjects. Phone path a
 estimated, not measured). Mitigation: fewer, more varied images per student (step 7), with re-evaluation.
 
 - [x] 1. Training writes one model per student (`trainer/students/{id}.yml`, promoted with labels.txt as an
-      all-or-nothing pair, .bak kept). ⚠️ **Not yet incremental:** every retrain still trains every student
-      (28 s at 17). "Enrolment trains only that student" is still open.
+      all-or-nothing pair, .bak kept). **Incremental since 2026-10-28:** a student's model is reused
+      (hard link) when it is newer than their folder and every image in it, and the training fingerprint
+      (OpenCV version, LBPH_PARAMS, face_preprocessing.py hash) is unchanged; `--full` retrains all. Measured on
+      17: nothing changed 0.0 s, one student 1.3 s, everyone 22.2 s (the web job took 56 s for everyone).
+      Models are stamped 2 s *before* the run started: an image written 2 ms before the start was measured with
+      an mtime equal to the start, so near the boundary it retrains rather than risk skipping an image.
 - [x] 2. **Option B, chosen by the user 2026-10-28** after the trade-off was measured: at or under
       `recognition_load_all_limit` (50) trained students a session loads **everyone** (outsiders still refused as
       "Not in this class"); over it, only the class list (`recognize_face.students_to_load`). ⚠️ **Measured price of

@@ -43,14 +43,13 @@ grew 18.7 MB/student and `cv::FileStorage` cannot read past 0.57-1.84 GB, so ~31
   or two faces; with a full frame the faces are already spread over CPUs and total work is ~40% above the single
   model. Don't "fix" it by reimplementing chi-square in numpy: summation order changes the last bits, and the
   bit-exact claim (and L2) is what keeps 58.0 valid.
-- **Not incremental.** Every retrain still trains all students (28 s at 17). Making enrolment train one student
-  means copying unchanged files into the staging dir (hardlinks) - keep the pair atomic.
+- ~~Not incremental~~ - done, see §6.
 - **Still one session for the whole server** (§19 step 9). Nothing here changed that.
 
 ## 4. Next (todo.md §19)
 
 ~~2: load only the running class list's models~~ done, as option B - see §5.
-Incremental training (enrol one student, train one). 9: one `RecognitionSession` per running class. 6: measure at a realistic class size. 8: central server setup.
+9: one `RecognitionSession` per running class. 6: measure at a realistic class size. 8: central server setup.
 
 ## 5. Same evening: step 2, option B (class list only over the limit)
 
@@ -67,3 +66,18 @@ Incremental training (enrol one student, train one). 9: one `RecognitionSession`
   each fail a test.
 - **The class-list mode has never run in a live room** - only with the limit lowered in a script (7-student class,
   0.66 s). Before relying on it: set `RECOGNITION_LOAD_ALL_LIMIT=5` in `.env`, restart, run a class.
+
+## 6. Same evening: incremental training
+
+- `train_model(full=False)`: unchanged students are hard-linked from the live `students/` into the staging dir,
+  so the all-or-nothing pair and `.bak` are untouched. Reuse needs: model mtime > the folder's mtime and every
+  file's (the folder's own mtime is what catches a *deleted* image), and `_training.txt` in `students/` equal to
+  `training_fingerprint()` (OpenCV version, LBPH_PARAMS, sha256 of face_preprocessing.py). CLI `--full`.
+- ⚠️ **The margin is not decoration.** New models are stamped `start - 2 s`. Measured: the last image written
+  2 ms before training began had an mtime *equal* to `time.time()` at the start, and the test that caught it
+  failed only when run with other tests. Removing the margin brings back a skipped-image bug.
+- Measured on 17 real students: nothing changed 0.0 s, one changed 1.3 s, `--full` 22.2 s. After the
+  rebuild, fresh single model vs per-student: 1,700/1,700 bit-exact. Tests 1,953 passed / 99 skipped.
+  Mutations (drop the mtime check; ignore the fingerprint) fail 3 and 1 tests.
+- The live `students/` was rebuilt twice by the CLI this session (first run trained everyone to write the
+  fingerprint). `serve.py` picks it up on the next Start or restart.

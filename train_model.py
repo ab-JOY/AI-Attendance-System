@@ -1,12 +1,15 @@
+import hashlib
 import logging
 import os
 import shutil
 import sys
 import threading
+import time
 
 import cv2
 import numpy as np
 
+import face_preprocessing
 from config.settings import settings
 from face_preprocessing import preprocess_for_lbph
 from security.paths import UnsafeStudentPathError, validate_student_id
@@ -242,10 +245,99 @@ def write_model_atomically(write_models):
 
 
 # =====================================================
+# UNCHANGED STUDENTS ARE NOT RETRAINED (todo.md §19)
+#
+# Every enrolment used to retrain every student: 56 s at 17 students, which
+# grows with the school. A student's model is now reused when nothing it was
+# built from has changed - their images, and the training configuration.
+# =====================================================
+
+# See `started_at` in train_model().
+REUSE_MARGIN_SECONDS = 2.0
+
+# Written beside the models. Its leading underscore keeps it from ever being
+# read as a student's model: validate_student_id refuses one.
+TRAINING_FINGERPRINT_FILE = "_training.txt"
+
+
+def training_fingerprint():
+    """
+    Everything a model depends on besides its images.
+
+    The OpenCV version, LBPH_PARAMS and the preprocessing source. Any change
+    retrains everyone, so a model is never reused under settings it was not
+    built with - which is how L2 broke recognition, silently.
+    """
+    with open(face_preprocessing.__file__, "rb") as source:
+        preprocessing = hashlib.sha256(source.read()).hexdigest()
+
+    return (
+        f"opencv {cv2.__version__}\n"
+        f"lbph {sorted(LBPH_PARAMS.items())}\n"
+        f"preprocessing {preprocessing}\n"
+    )
+
+
+def live_training_fingerprint():
+    try:
+        with open(
+            os.path.join(MODELS_DIR, TRAINING_FINGERPRINT_FILE),
+            encoding="utf-8",
+        ) as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
+def newest_change(folder_path):
+    """
+    The latest mtime of the folder and anything in it.
+
+    The folder's own mtime is what catches a *deleted* image, which leaves no
+    newer file behind.
+    """
+    newest = os.path.getmtime(folder_path)
+
+    with os.scandir(folder_path) as entries:
+        for entry in entries:
+            newest = max(newest, entry.stat().st_mtime)
+
+    return newest
+
+
+def reuse_unchanged_model(student_id, folder_path, directory):
+    """
+    Put the live model of an unchanged student into `directory`. True if done.
+
+    A hard link, so nothing is copied and the live file is untouched; a copy
+    where links are not available. The model keeps its mtime either way, and
+    that mtime is the training start time of the run that built it.
+    """
+    live_model = os.path.join(MODELS_DIR, f"{student_id}.yml")
+
+    try:
+        model_time = os.path.getmtime(live_model)
+    except OSError:
+        return False
+
+    if newest_change(folder_path) >= model_time:
+        return False
+
+    target = os.path.join(directory, f"{student_id}.yml")
+
+    try:
+        os.link(live_model, target)
+    except OSError:
+        shutil.copy2(live_model, target)
+
+    return True
+
+
+# =====================================================
 # TRAIN MODEL FUNCTION
 # =====================================================
 
-def train_model(report=None):
+def train_model(report=None, full=False):
     """
     Retrain the LBPH model from `dataset/`. Returns `(ok, message)`.
 
@@ -254,6 +346,9 @@ def train_model(report=None):
     polling UI needs something true to display; stages are that, where a
     percentage would have to be invented. It defaults to None so every existing
     caller and every test is unaffected.
+
+    Only students whose images changed are trained; the rest keep their model
+    (`reuse_unchanged_model`). `full` trains everyone regardless.
     """
     def stage(name):
         if report is not None:
@@ -375,6 +470,26 @@ def train_model(report=None):
 
     skipped_folders = []
     image_count = 0
+    reused = []
+
+    # The models built here are stamped with this time, not with when they
+    # were written: an image that lands while training runs is then newer
+    # than its student's model, and the next run trains them again.
+    #
+    # ⚠️ Minus a margin. Measured 2026-10-28: an image written 2 ms before
+    # training started carried an mtime *equal* to time.time() at the start,
+    # so "before" and "at" cannot be told apart near the boundary. Anything
+    # inside the margin is treated as changed and retrained once more - extra
+    # seconds, never a skipped image.
+    started_at = time.time() - REUSE_MARGIN_SECONDS
+
+    fingerprint = training_fingerprint()
+    reuse_allowed = not full and live_training_fingerprint() == fingerprint
+
+    if not full and not reuse_allowed:
+        logger.info(
+            "Training configuration changed (or first run): training every student"
+        )
 
     logger.info(
         "Training start: shared preprocessing (resize 200x200 + CLAHE), "
@@ -399,6 +514,15 @@ def train_model(report=None):
             folder_path = record["folder_path"]
 
             stage(f"Training student {number} of {len(folder_records)}")
+
+            if reuse_allowed and reuse_unchanged_model(
+                record["student_id"], folder_path, directory
+            ):
+                logger.info("Unchanged, model reused: %s", folder_name)
+                label_dict[len(label_dict)] = record["student_id"]
+                reused.append(folder_name)
+                continue
+
             logger.info("Processing: %s", folder_name)
 
             student_faces = []
@@ -496,11 +620,20 @@ def train_model(report=None):
                 np.full(len(student_faces), label, dtype=np.int32)
             )
 
-            recognizer.write(
-                os.path.join(directory, f"{record['student_id']}.yml")
+            model_path = os.path.join(
+                directory, f"{record['student_id']}.yml"
             )
+            recognizer.write(model_path)
+            os.utime(model_path, (started_at, started_at))
 
             image_count += len(student_faces)
+
+        with open(
+            os.path.join(directory, TRAINING_FINGERPRINT_FILE),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            handle.write(fingerprint)
 
         return label_dict
 
@@ -526,9 +659,11 @@ def train_model(report=None):
         return False, "No training images were loaded."
 
     logger.info(
-        "Dataset summary: %d person(s), %d image(s)",
+        "Dataset summary: %d person(s): %d trained from %d image(s), %d unchanged",
         len(label_dict),
-        image_count
+        len(label_dict) - len(reused),
+        image_count,
+        len(reused)
     )
 
     models_size = sum(
@@ -591,7 +726,7 @@ if __name__ == "__main__":
     # automated reads prose, and the one machine-readable signal said "fine".
     #
     # This is FS-12 at a second entry point; see config/exit_codes.py.
-    success, message = train_model()
+    success, message = train_model(full="--full" in sys.argv)
 
     if not success:
         logger.error("%s", message)
