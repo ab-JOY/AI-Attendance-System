@@ -150,3 +150,13 @@ passed. Not tried on a phone.
 `parse_code` are gone; `segno` dropped from `pyproject.toml` (still installed in `.venv`, harmless). L44 is now
 history. Tests: QR-decode test removed, `FACEATTEND:` input now refused, endpoint asserts no `qr`. Fast suite
 **1,950 passed, 99 skipped**. Restart `serve.py` (L42).
+
+**Same day - the whole classroom code removed** (user, with a screenshot of the digits panel: "remove it too also in
+the instructor"). Gone: the panel on `/attendance`, `/attendance/class-code`, `POST /api/attendance/checkin`, the
+pass check in `/api/attendance/frame` (no more 403 `need_code`), `pass_seconds` in `/api/attendance/live`,
+`services/classroom_code.py`, `tests/test_api_checkin.py`. The app goes straight to **Verify My Face**. Fast suite
+**1,914 passed, 99 skipped** (the 36 check-in tests went with the feature). App bundles; not tried on a phone.
+
+**Consequence the user owns:** nothing now proves the phone is in the room - a student can verify from home while
+a session runs. Face match + liveness + once-a-day still apply. §4's relay decision is moot; the manuscript must
+not describe a classroom-code step. To restore: `git revert` this commit (the feature is whole in `b760c4a`).

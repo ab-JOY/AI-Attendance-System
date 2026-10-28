@@ -11,8 +11,7 @@ An Absent row is not a mark: a student marked absent by an earlier session
 today can still be verified, as `save_attendance()` allows.
 
 None of these touch the database: the register lookup is replaced. The
-student holds a classroom-code pass throughout (that refusal is
-tests/test_api_checkin.py), and the face pipeline is a fake
+face pipeline is a fake
 (services/phone_verification.py has its own tests).
 """
 
@@ -84,16 +83,6 @@ def session(monkeypatch):
     fake = FakeSession()
     monkeypatch.setattr(recognize_face, "session", fake)
     return fake
-
-
-class Passes:
-    def seconds_left(self, student_id, key):
-        return 180
-
-
-@pytest.fixture(autouse=True)
-def checked_in(monkeypatch):
-    monkeypatch.setattr(api, "_check_ins", Passes())
 
 
 @pytest.fixture

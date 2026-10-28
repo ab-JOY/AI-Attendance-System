@@ -5,9 +5,8 @@ The decision itself is services/phone_verification.py's and the classroom
 pipeline's; these tests are about the route around it: what it refuses before
 any recognition, the size it decodes at, and how each outcome is answered.
 
-Every test here has a classroom-code pass and nothing in today's register,
-unless it says otherwise: those two refusals have their own files
-(tests/test_api_checkin.py, tests/test_api_once_a_day.py).
+Every test here has nothing in today's register, unless it says otherwise:
+that refusal has its own file (tests/test_api_once_a_day.py).
 """
 
 from __future__ import annotations
@@ -80,19 +79,8 @@ def session(monkeypatch):
     return fake
 
 
-class Passes:
-    """Stands in for the classroom-code passes: everyone has one."""
-
-    def __init__(self, seconds=180):
-        self.seconds = seconds
-
-    def seconds_left(self, student_id, key):
-        return self.seconds
-
-
 @pytest.fixture(autouse=True)
-def checked_in_and_not_yet_recorded(monkeypatch):
-    monkeypatch.setattr(api, "_check_ins", Passes())
+def not_yet_recorded(monkeypatch):
     monkeypatch.setattr(api, "_recorded_status_today", lambda *args: None)
 
 

@@ -21,14 +21,11 @@ decisions):
   `/students`, `/subjects` and `/dashboard` served only the staff screens.
 - Phone attendance is **once per class per day**: a student already Present or
   Late for the running subject today is refused before any face is judged.
-- Phone attendance needs the **classroom code** (2026-10-24): the digits on the
-  instructor's attendance page, typed in the app (`/attendance/checkin`).
-  Without a pass no face is judged, so the app cannot be used from home.
 - A phone's frames are judged by **the classroom camera's own pipeline**,
   liveness included (services/phone_verification.py), not by one photo.
 
 `tests/test_api_students_only.py`, `tests/test_api_once_a_day.py`,
-`tests/test_api_attendance_frame.py` and `tests/test_api_checkin.py` keep them.
+and `tests/test_api_attendance_frame.py` keep them.
 """
 
 from __future__ import annotations
@@ -50,7 +47,6 @@ from repositories import students as students_repo
 from repositories import subjects as subjects_repo
 from security.access import public
 from security.passwords import verify_password
-from services import classroom_code
 from vision.pose import RECOGNITION_FRAME_HEIGHT, RECOGNITION_FRAME_WIDTH
 
 logger = logging.getLogger(__name__)
@@ -303,12 +299,6 @@ def api_attendance_live():
     student_id = request.jwt_user.get("user_id")
     student_ids = sorted(recognition_session.recognized_ids())
 
-    # Seconds left on this student's classroom-code pass; 0 means the app
-    # asks for the code before it offers the camera.
-    pass_seconds = _check_ins.seconds_left(
-        student_id, classroom_code.session_key(active)
-    )
-
     try:
         with db_cursor(dictionary=True) as cursor:
             rows = attendance_repo.recognised_today(
@@ -321,7 +311,6 @@ def api_attendance_live():
             "running": True,
             "students": [],
             "recognised": len(student_ids),
-            "pass_seconds": pass_seconds,
         })
 
     try:
@@ -337,7 +326,6 @@ def api_attendance_live():
         # Present/Late if the signed-in student already has a mark for this
         # class today - the app shows that instead of a Verify button.
         "your_status": your_status,
-        "pass_seconds": pass_seconds,
         "students": [
             {
                 "student_id": row["student_id"],
@@ -348,59 +336,6 @@ def api_attendance_live():
             for row in rows
         ],
     })
-
-
-@api_bp.route("/attendance/checkin", methods=["POST"])
-@public
-@student_required
-def api_attendance_checkin():
-    """
-    The classroom code, typed in the app: a pass to verify for this session.
-
-    See services/classroom_code.py for what the code proves and what it does
-    not. The pass is what `/attendance/frame` asks for before any face.
-    """
-    from recognize_face import session as recognition_session
-
-    active = recognition_session.subject
-
-    if not recognition_session.is_running or active is None:
-        return jsonify({"success": False, "message": "No active attendance session."}), 409
-
-    student_id = request.jwt_user.get("user_id")
-    data = request.get_json(silent=True) or {}
-    code = classroom_code.parse_code(str(data.get("code") or ""))
-
-    outcome, tries_left = _check_ins.check_in(
-        student_id, classroom_code.session_key(active), code, _classroom_secret()
-    )
-
-    if outcome is classroom_code.CheckIn.ACCEPTED:
-        return jsonify({
-            "success": True,
-            "pass_seconds": classroom_code.PASS_SECONDS,
-            "message": "You are checked in. Now verify your face.",
-        })
-
-    if outcome is classroom_code.CheckIn.LOCKED:
-        logger.warning("Classroom code locked for %s after wrong tries", student_id)
-        return jsonify({
-            "success": False,
-            "locked": True,
-            "message": (
-                "Too many wrong codes. Ask your instructor to record your "
-                "attendance."
-            ),
-        }), 429
-
-    return jsonify({
-        "success": False,
-        "tries_left": tries_left,
-        "message": (
-            "That code is wrong or has expired. Enter the code on the "
-            "classroom screen again."
-        ),
-    }), 400
 
 
 @api_bp.route("/attendance/frame", methods=["POST"])
@@ -470,17 +405,6 @@ def api_attendance_frame():
                 "Attendance can only be taken once."
             ),
         })
-
-    # ⚠️ In the room, checked before any face is judged: no pass, no
-    # recognition (services/classroom_code.py).
-    if not _check_ins.seconds_left(
-        student_id, classroom_code.session_key(snapshot.subject)
-    ):
-        return jsonify({
-            "success": False,
-            "need_code": True,
-            "message": "Enter the classroom code first.",
-        }), 403
 
     # The resolution the recognition gates were tuned at, as the browser
     # camera route decodes (web/sessions.py) - not enrolment's 1920x1080.
@@ -571,14 +495,6 @@ def _recorded_status_today(student_id, subject_id):
 # 239 ms each is about a second of server time, so a request still answers in
 # well under the phone track's 5 s timeout.
 MAX_FRAMES_PER_REQUEST = 4
-
-
-# The classroom-code passes of the running session (services/classroom_code.py).
-_check_ins = classroom_code.CheckIns()
-
-
-def _classroom_secret() -> bytes:
-    return classroom_code.secret_from(app_config.secret_key)
 
 
 # The phones verifying now. Built on first use, because building it imports

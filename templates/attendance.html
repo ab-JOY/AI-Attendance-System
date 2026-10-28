@@ -16,7 +16,6 @@
         data-attendance-page
         data-start-url="{{ url_for('sessions.start_attendance') }}"
         data-live-url="{{ url_for('sessions.attendance_live') }}"
-        data-class-code-url="{{ url_for('sessions.attendance_class_code') }}"
         data-feed-url="{{ url_for('sessions.video_feed') }}"
         data-cameras-url="{{ url_for('sessions.list_cameras') }}"
         data-select-camera-url="{{ url_for('sessions.select_camera') }}"
@@ -376,28 +375,6 @@
         Filled by polling /attendance/live now. The server-rendered register
         stays below, where it is the record rather than the live view.
     #}
-
-    {#
-        The classroom code (services/classroom_code.py). Students type it in
-        the mobile app before verifying their face, which is what keeps the
-        app from being used outside the room. Shown only while a session runs,
-        to the instructor whose class it is; changes every 6 seconds.
-    #}
-    <section class="attendance-log" id="class-code-panel" hidden>
-        <h2>Classroom code for the mobile app</h2>
-        <p class="hint">
-            Show this on the classroom screen. Students type it in the app
-            before verifying their face. It changes every
-            <span id="class-code-period">6</span> seconds, so a photo of it
-            sent outside the room soon stops working.
-        </p>
-        <div class="class-code-body">
-            <div>
-                <p class="class-code-digits" id="class-code-digits" aria-live="off"></p>
-                <p class="hint">Changes in <span id="class-code-left"></span> s</p>
-            </div>
-        </div>
-    </section>
 
     <section class="attendance-log">
 

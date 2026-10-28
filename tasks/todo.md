@@ -1431,3 +1431,45 @@ Defaults chosen (memory: proceed on defaults; overrule any of them):
 The friend still has to pass the face + liveness check as themselves, live, so it needs an accomplice in the room
 at that moment. Stronger options not built (open decisions): campus-network IP allowlist via `CF-Connecting-IP`;
 GPS geofence (spoofable, 10-50 m indoors).
+
+## 19. PE-2 — per-student LBPH models + one central server (2026-10-28) — **PLANNED, NOT BUILT: user chose to build it later**
+
+User: "a change in the system which can accommodate a large number of students and also centralized".
+Keeps LBPH (§7 Q1 stands). Recommendation accepted by the user; build deferred.
+
+**Why:** one school-wide `trainer.yml` grows ~18.7 MB/student (measured 2026-10-28: **318 MB for 17 students**)
+and `cv::FileStorage` cannot read it back past 0.57-1.84 GB (PE-0) -> ceiling ≈ 31 students.
+
+**Design:** one LBPH model per student (`trainer/<student_id>.yml`). A session loads the models of its class list
+and takes the minimum distance across them. LBPH `predict()` is a nearest neighbour over stored histograms, so
+min-over-per-student-models is **mathematically identical** to one combined model: same distances, 58.0 threshold
+unchanged, manuscript accuracy unchanged. No ceiling (each file ~18.7 MB), enrolment trains one student only,
+class-list changes need no retrain, no duplication across subjects. Phone path already matches one student.
+
+**Cost:** per-face compare work grows with class size (40 × 100 images ≈ 3× today's 1,200-histogram 64 ms,
+estimated, not measured). Mitigation: fewer, more varied images per student (step 7), with re-evaluation.
+
+- [ ] 1. Training writes one model per student; enrolment/recapture trains only that student
+- [ ] 2. Session start loads + caches the class list's models
+- [ ] 3. Recognition = min distance across those models; **differential test vs the current single model on the
+      17 real students must show identical label + distance** (L2: never change the distance scale silently)
+- [ ] 4. Phone verification reads the student's own model file
+- [ ] 5. One-shot migration script from `trainer.yml` -> per-student files (dry-run by default)
+- [ ] 6. Measure load time, ms/face, disk at a realistic class size; update `docs/walkthrough.md` §4.5
+- [ ] 7. (Optional) Trim to ~30-40 diverse images/student; re-run held-out + impostor evaluation
+- [ ] 8. Centralization: always-on campus server, `serve.py` as an auto-start service, classroom-code passes moved
+      from memory to MySQL, `dataset/`+`trainer/` encrypted at rest with backups (RA 10173)
+- [ ] 9. **Several classrooms at once** (user asked 2026-10-28: "5 simultaneous"). Today the server runs **one**
+      session in total: `recognize_face.py:531` is a module-level singleton and a second subject is refused
+      (`vision/session.py:378-387`, "An attendance session is already running"). Steps 1-8 do **not** fix this.
+      Needs: one `RecognitionSession` per running subject (registry keyed by subject/section), routes and
+      `/attendance/live` addressed to that session, phone check-in routed to the student's own class session,
+      `MAX_PHONES` (4, `services/phone_verification.py:67`) per session or sized to the server. **Measure** CPU
+      at 1/3/5 concurrent sessions before promising a number - only one session has ever been measured.
+      Already true today: one camera tracks up to 10 faces at once (`infra/facemesh.py:29`).
+
+**Correction 2026-10-28:** an earlier reply told the user steps 1-8 make the system "centralized as one server".
+They remove the enrolment ceiling only; running many classes at once is step 9.
+
+**Manuscript impact (user's call):** architecture/training chapters gain a per-student-model paragraph; accuracy
+figures do not change.

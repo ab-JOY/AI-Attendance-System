@@ -2,21 +2,13 @@
  * Attendance Monitoring Screen.
  * Shows the live session and lets a student verify their face for it.
  *
- * Two steps, in this order, and the server refuses them out of order:
- *
- * 1. **Check in with the classroom code.** The instructor's attendance page
- *    shows a six-digit code that changes every 6 seconds. Typing it proves
- *    the phone is in the room; it gives a pass for a
- *    few minutes (services/classroom_code.py). Without it the app could be
- *    used from home.
- *
- * 2. **Verify the face - a stream of frames, not one photo.** The server runs
- *    each frame through the classroom camera's own rules (services/
- *    phone_verification.py): a window of matches against the student's
- *    captured face images, a frontal face, a two-step head-turn challenge and
- *    a re-check. Each answer carries the instruction, plus `stage`, `step`
- *    and `progress`, which this screen draws as an arrow and a bar, until the
- *    server says `done`, refuses, or VERIFY_TIMEOUT_MS runs out.
+ * **Verifying the face is a stream of frames, not one photo.** The server runs
+ * each frame through the classroom camera's own rules (services/
+ * phone_verification.py): a window of matches against the student's captured
+ * face images, a frontal face, a two-step head-turn challenge and a re-check.
+ * Each answer carries the instruction, plus `stage`, `step` and `progress`,
+ * which this screen draws as an arrow and a bar, until the server says
+ * `done`, refuses, or VERIFY_TIMEOUT_MS runs out.
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
@@ -28,7 +20,6 @@ import client from '../api/client';
 import Button from '../components/Button';
 import Header from '../components/Header';
 import Card from '../components/Card';
-import Input from '../components/Input';
 import {
   captureFrame,
   frameFormData,
@@ -40,7 +31,7 @@ import { colors, spacing, typography, borderRadius } from '../theme/colors';
 
 // Long enough for the window, two head turns (8 s each at most) and the
 // re-check on a slow phone; short enough that a student in the dark is told
-// why rather than left waiting. Shorter than the check-in pass (180 s).
+// why rather than left waiting.
 const VERIFY_TIMEOUT_MS = 90000;
 
 // Consecutive frames that failed to reach the server before giving up.
@@ -82,16 +73,12 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export default function AttendanceMonitoringScreen() {
   const [liveData, setLiveData] = useState(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  // 'idle' (code entry or button), 'face' (front camera)
+  // 'idle' (button), 'face' (front camera)
   const [mode, setMode] = useState('idle');
   const [isVerifying, setIsVerifying] = useState(false);
   const [instruction, setInstruction] = useState('');
   const [problem, setProblem] = useState('');
   const [progress, setProgress] = useState({ stage: 'finding', step: null, value: 0 });
-  const [passUntil, setPassUntil] = useState(0);
-  const [now, setNow] = useState(Date.now());
-  const [typedCode, setTypedCode] = useState('');
-  const [isCheckingIn, setIsCheckingIn] = useState(false);
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef(null);
   const [pictureSize, setPictureSize] = useState(undefined);
@@ -102,8 +89,6 @@ export default function AttendanceMonitoringScreen() {
   // The loop reads this rather than `isVerifying`: state is a snapshot from
   // the render that started the loop and would never see the stop.
   const verifyingRef = useRef(false);
-
-  const hasPass = passUntil > now;
 
   const handleCameraReady = async () => {
     cameraReadyRef.current = true;
@@ -126,10 +111,6 @@ export default function AttendanceMonitoringScreen() {
       const response = await client.get('/api/attendance/live');
       if (response.data.success) {
         setLiveData(response.data);
-        // The server is the authority on the pass; this keeps a reopened
-        // screen from asking for the code again while it is still valid.
-        const seconds = response.data.pass_seconds || 0;
-        setPassUntil(seconds > 0 ? Date.now() + seconds * 1000 : 0);
       }
     } catch (err) {
       console.log('Error fetching live data:', err);
@@ -141,13 +122,6 @@ export default function AttendanceMonitoringScreen() {
     const interval = setInterval(fetchLiveData, 5000); // poll every 5s
     return () => clearInterval(interval);
   }, []);
-
-  // The pass countdown.
-  useEffect(() => {
-    if (!passUntil) return undefined;
-    const interval = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(interval);
-  }, [passUntil]);
 
   const stopVerifying = useCallback((message = '') => {
     verifyingRef.current = false;
@@ -183,37 +157,6 @@ export default function AttendanceMonitoringScreen() {
     const result = await requestPermission();
     return result.granted;
   };
-
-  // -- step 1: the classroom code -------------------------------------------
-
-  const checkIn = async (code) => {
-    setIsCheckingIn(true);
-    setProblem('');
-
-    try {
-      const response = await client.post('/api/attendance/checkin', { code });
-      setPassUntil(Date.now() + response.data.pass_seconds * 1000);
-      setNow(Date.now());
-      setTypedCode('');
-      // Straight on to the face: the pass is running.
-      if (!(await ensureCameraPermission())) return;
-      cameraReadyRef.current = false;
-      setInstruction('');
-      setProgress({ stage: 'finding', step: null, value: 0 });
-      setMode('face');
-    } catch (err) {
-      const data = err.response?.data || {};
-      let message = data.message || 'Could not check in: ' + err.message;
-      if (data.tries_left !== undefined) {
-        message += ` (${data.tries_left} tries left)`;
-      }
-      setProblem(message);
-    } finally {
-      setIsCheckingIn(false);
-    }
-  };
-
-  // -- step 2: the face ---------------------------------------------------------
 
   const verify = async () => {
     verifyingRef.current = true;
@@ -292,15 +235,6 @@ export default function AttendanceMonitoringScreen() {
         const status = err.response?.status;
         const data = err.response?.data || {};
         const message = data.message;
-
-        // The check-in pass ran out (or the server restarted): back to the
-        // code, which is quick, rather than a dead end.
-        if (data.need_code) {
-          stopVerifying('Your check-in expired. Enter the classroom code again.');
-          setPassUntil(0);
-          setMode('idle');
-          return 'stop';
-        }
 
         if (status === 429) {
           setInstruction(message);
@@ -404,6 +338,7 @@ export default function AttendanceMonitoringScreen() {
     if (!(await ensureCameraPermission())) return;
     setProblem('');
     setInstruction('');
+    setProgress({ stage: 'finding', step: null, value: 0 });
     cameraReadyRef.current = false;
     setMode('face');
   };
@@ -427,7 +362,6 @@ export default function AttendanceMonitoringScreen() {
   }
 
   const stepPrompt = progress.stage === 'liveness' ? STEP_PROMPTS[progress.step] : null;
-  const passSecondsLeft = Math.max(Math.ceil((passUntil - now) / 1000), 0);
 
   const renderCameraArea = () => {
     if (mode === 'face') {
@@ -468,11 +402,7 @@ export default function AttendanceMonitoringScreen() {
     return (
       <View style={styles.avatarContainer}>
         <View style={styles.avatarBox}>
-          <Ionicons
-            name={hasPass ? 'person-outline' : 'keypad-outline'}
-            size={96}
-            color={colors.secondary}
-          />
+          <Ionicons name="person-outline" size={96} color={colors.secondary} />
         </View>
       </View>
     );
@@ -515,12 +445,6 @@ export default function AttendanceMonitoringScreen() {
             </View>
           ) : null}
 
-          {hasPass ? (
-            <Text style={styles.passText}>
-              Checked in - {passSecondsLeft} s left to verify
-            </Text>
-          ) : null}
-
           {isVerifying ? (
             <Button
               title="Stop"
@@ -532,7 +456,6 @@ export default function AttendanceMonitoringScreen() {
             <Button
               title="Verify My Face"
               onPress={verify}
-              disabled={!hasPass}
               style={styles.joinButton}
             />
           )}
@@ -540,32 +463,7 @@ export default function AttendanceMonitoringScreen() {
       );
     }
 
-    return hasPass ? (
-      <>
-        <Text style={styles.passText}>Checked in - {passSecondsLeft} s left to verify</Text>
-        <Button title="Verify My Face" onPress={openFaceCamera} style={styles.joinButton} />
-      </>
-    ) : (
-      <>
-        <Text style={styles.stepHint}>
-          Step 1 of 2: type the 6-digit classroom code shown on your instructor's screen.
-        </Text>
-        <Input
-          placeholder="Classroom code"
-          value={typedCode}
-          onChangeText={(text) => setTypedCode(text.replace(/\D/g, '').slice(0, 6))}
-          keyboardType="number-pad"
-          icon="keypad-outline"
-        />
-        <Button
-          title="Check In"
-          onPress={() => checkIn(typedCode)}
-          loading={isCheckingIn}
-          disabled={typedCode.length !== 6}
-          style={styles.joinButton}
-        />
-      </>
-    );
+    return <Button title="Verify My Face" onPress={openFaceCamera} style={styles.joinButton} />;
   };
 
   return (
@@ -719,18 +617,6 @@ const styles = StyleSheet.create({
   problem: {
     ...typography.bodySmall,
     color: colors.error,
-    textAlign: 'center',
-    marginBottom: spacing.md,
-  },
-  passText: {
-    ...typography.caption,
-    color: colors.success,
-    textAlign: 'center',
-    marginBottom: spacing.sm,
-  },
-  stepHint: {
-    ...typography.bodySmall,
-    color: colors.textSecondary,
     textAlign: 'center',
     marginBottom: spacing.md,
   },
