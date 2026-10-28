@@ -47,6 +47,7 @@ from repositories import students as students_repo
 from repositories import subjects as subjects_repo
 from security.access import public
 from security.passwords import verify_password
+from services import login_history
 from vision.pose import RECOGNITION_FRAME_HEIGHT, RECOGNITION_FRAME_WIDTH
 
 logger = logging.getLogger(__name__)
@@ -153,11 +154,15 @@ def api_login():
         )
         row = cursor.fetchone()
 
-    if row is None or not row.get("password"):
+    if (
+        row is None
+        or not row.get("password")
+        or not verify_password(password, row["password"])
+    ):
+        login_history.record(user_id, None, login_history.FAILED, "app")
         return jsonify({"success": False, "message": "Invalid credentials"}), 401
 
-    if not verify_password(password, row["password"]):
-        return jsonify({"success": False, "message": "Invalid credentials"}), 401
+    login_history.record(row["student_id"], "student", login_history.SUCCESS, "app")
 
     token = _make_token({
         "role": "student",

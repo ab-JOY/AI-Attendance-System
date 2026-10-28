@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+
+{% block title %}Activity{% endblock %}
+
+{#
+    The administrator's view of what the system is doing (web/activity.py).
+    Read-only. Status is always a word as well as a colour (US-6).
+
+    ⚠️ `login.username` on a failed attempt is whatever the visitor typed.
+    Jinja's autoescaping is what keeps it text; never mark it |safe.
+#}
+
+{% block content %}
+    <h1>Activity</h1>
+
+    <h2>Attendance sessions
+        <span class="count-badge">{{ sessions|length }}</span></h2>
+
+    <div class="subject-table-wrapper">
+    <table class="subject-table">
+        <caption>The latest {{ sessions|length }} sessions, newest first.</caption>
+        <tr>
+            <th scope="col">Subject</th>
+            <th scope="col">Started by</th>
+            <th scope="col">Started</th>
+            <th scope="col">Ended</th>
+            <th scope="col">Present</th>
+            <th scope="col">Late</th>
+            <th scope="col">Absent</th>
+        </tr>
+
+        {% for row in sessions %}
+        <tr>
+            <td>{{ row.subject_code }} - {{ row.subject_name }}
+                {% if row.section %}({{ row.section }}){% endif %}</td>
+            <td>{{ row.started_by or "Unknown" }}</td>
+            <td>{{ row.started_at.strftime('%b %d, %Y %I:%M %p') }}</td>
+            <td>
+                {% if row.ended_at %}
+                    {{ row.ended_at.strftime('%I:%M %p') }}
+                {% else %}
+                    {# Running now, or the server never saw it end. #}
+                    <span class="status status-late">Not ended</span>
+                {% endif %}
+            </td>
+            <td>{{ row.present or 0 }}</td>
+            <td>{{ row.late or 0 }}</td>
+            <td>{{ row.absent or 0 }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="empty-state">No attendance session has run yet.</td></tr>
+        {% endfor %}
+    </table>
+    </div>
+
+    <h2 style="margin-top:30px;">Sign-ins
+        <span class="count-badge">{{ logins|length }}</span></h2>
+
+    <div class="subject-table-wrapper">
+    <table class="subject-table">
+        <caption>The latest {{ logins|length }} sign-in attempts, newest first.
+            Website: administrators and instructors. App: students.</caption>
+        <tr>
+            <th scope="col">When</th>
+            <th scope="col">User</th>
+            <th scope="col">Role</th>
+            <th scope="col">Where</th>
+            <th scope="col">Result</th>
+        </tr>
+
+        {% for login in logins %}
+        <tr>
+            <td>{{ login.occurred_at.strftime('%b %d, %Y %I:%M:%S %p') }}</td>
+            <td>{{ login.username }}</td>
+            <td>{{ (login.role or "-")|capitalize }}</td>
+            <td>{{ "Website" if login.channel == "web" else "Phone app" }}</td>
+            <td>
+                {% if login.outcome == "success" %}
+                    <span class="status status-present">Signed in</span>
+                {% elif login.outcome == "locked" %}
+                    <span class="status status-absent">Locked out</span>
+                {% else %}
+                    <span class="status status-absent">Wrong ID or password</span>
+                {% endif %}
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="empty-state">No sign-ins recorded yet.
+            Recording began with this page.</td></tr>
+        {% endfor %}
+    </table>
+    </div>
+{% endblock %}

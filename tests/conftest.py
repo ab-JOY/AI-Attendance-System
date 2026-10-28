@@ -131,6 +131,28 @@ import pytest  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def login_history_calls(monkeypatch):
+    """
+    Sign-ins recorded during a test, as `(username, role, outcome, channel)`.
+
+    ⚠️ Autouse because every login test would otherwise write rows into the
+    real `login_events` table whenever MySQL happens to be running - fake
+    administrators in the Activity page of the deployed system. A test of the
+    recorder itself calls the real function as `login_history_calls.real`.
+    """
+    from services import login_history
+
+    class Calls(list):
+        real = staticmethod(login_history.record)
+
+    calls = Calls()
+    monkeypatch.setattr(
+        login_history, "record", lambda *args: calls.append(args)
+    )
+    return calls
+
+
+@pytest.fixture(autouse=True)
 def no_real_exit_hooks(monkeypatch):
     """Collect exit hooks instead of registering them. Returns the list."""
     registered = []

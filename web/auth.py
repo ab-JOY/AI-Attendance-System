@@ -37,6 +37,7 @@ from security.passwords import (
     verify_password,
 )
 from security.rate_limit import LoginRateLimiter
+from services import login_history
 from web.errors import error_page
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,7 @@ def login():
             user_id,
             int(locked_for),
         )
+        login_history.record(user_id, None, login_history.LOCKED, "web")
         return render_template(
             'login.html',
             error=(
@@ -125,6 +127,7 @@ def login():
         # Deliberately identical whether the account exists or not, so the
         # response cannot be used to enumerate usernames.
         logger.info("Failed login for %r", user_id)
+        login_history.record(user_id, None, login_history.FAILED, "web")
 
         return render_template(
             'login.html',
@@ -132,6 +135,9 @@ def login():
         ), 401
 
     login_rate_limiter.record_success(rate_limit_key)
+
+    # Before the forced-change redirect below: that is still a sign-in.
+    login_history.record(user_id, role, login_history.SUCCESS, "web")
 
     session.clear()
     session.permanent = True

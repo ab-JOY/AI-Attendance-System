@@ -220,6 +220,7 @@ ADMIN_ONLY_GET_ROUTES = [
     "/manage_instructors",
     "/edit_instructor/SEC-TEST-NOONE",
     "/settings",
+    "/activity",
 ]
 
 ADMIN_ONLY_POST_ROUTES = [

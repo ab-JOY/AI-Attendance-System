@@ -162,6 +162,7 @@ def _register_blueprints(app):
     diagnose.
     """
     from web.account import account_bp
+    from web.activity import activity_bp
     from web.api import api_bp
     from web.auth import auth_bp
     from web.dashboard import dashboard_bp
@@ -182,6 +183,7 @@ def _register_blueprints(app):
         instructors_bp,
         sessions_bp,
         reports_bp,
+        activity_bp,
         api_bp,
     ):
         app.register_blueprint(blueprint)
