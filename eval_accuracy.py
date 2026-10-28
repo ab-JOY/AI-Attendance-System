@@ -26,10 +26,11 @@ import cv2
 from config.settings import settings
 from face_preprocessing import preprocess_for_lbph
 from train_model import LBPH_PARAMS, train_model
+from vision.student_models import StudentModels
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATASET_DIR = str(settings.dataset_dir)
-TRAINER_FILE = str(settings.trainer_file)
+MODELS_DIR = str(settings.student_models_dir)
 LABELS_FILE = str(settings.labels_file)
 DB_FILE = os.path.join(BASE_DIR, "test_attendance.db")
 
@@ -79,8 +80,8 @@ def test_model_training():
         print("[ERROR] Training failed!")
         return False
 
-    if not os.path.exists(TRAINER_FILE) or not os.path.exists(LABELS_FILE):
-        print("[ERROR] Trainer file or labels file missing after training!")
+    if not os.path.isdir(MODELS_DIR) or not os.path.exists(LABELS_FILE):
+        print("[ERROR] Student models or labels file missing after training!")
         return False
 
     print("[OK] Model training verified successfully.")
@@ -92,16 +93,9 @@ def evaluate_recognition_accuracy():
     print("2. EVALUATING LBPH RECOGNITION ACCURACY")
     print("=" * 60)
 
-    if not os.path.exists(TRAINER_FILE) or not os.path.exists(LABELS_FILE):
-        print("[ERROR] Cannot evaluate: trainer.yml or labels.txt not found.")
+    if not os.path.isdir(MODELS_DIR) or not os.path.exists(LABELS_FILE):
+        print("[ERROR] Cannot evaluate: student models or labels.txt not found.")
         return
-
-    # Parameters come from train_model.py so this can never drift from
-    # the shipped configuration. read() also restores them from the file.
-    recognizer = cv2.face.LBPHFaceRecognizer_create(
-        **LBPH_PARAMS
-    )
-    recognizer.read(TRAINER_FILE)
 
     # Load labels.
     #
@@ -120,6 +114,16 @@ def evaluate_recognition_accuracy():
                 continue
             parts = line.split(",", 1)
             label_map[int(parts[0])] = parts[1].strip()
+
+    # One model per student (todo.md §19), behind the same predict() the
+    # application uses. Parameters come from train_model.py so this can never
+    # drift from the shipped configuration; read() also restores them.
+    models = []
+    for label, student_id in label_map.items():
+        model = cv2.face.LBPHFaceRecognizer_create(**LBPH_PARAMS)
+        model.read(os.path.join(MODELS_DIR, f"{student_id}.yml"))
+        models.append((label, model))
+    recognizer = StudentModels(models)
 
     print(f"Loaded {len(label_map)} identities from labels.txt.")
 

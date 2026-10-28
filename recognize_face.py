@@ -29,6 +29,7 @@ from vision.session import (
     SessionHooks,
     SessionNotRunning,
 )
+from vision.student_models import StudentModels
 from vision.tracking import TrackConfig
 from vision.validation import (
     RECOGNITION_PROFILE,
@@ -59,7 +60,7 @@ __all__ = [
 # (PO-2). Kept as str because cv2.face read/write predate os.PathLike.
 # =====================================================
 
-TRAINER_FILE = str(settings.trainer_file)
+MODELS_DIR = str(settings.student_models_dir)
 
 LABELS_FILE = str(settings.labels_file)
 
@@ -87,20 +88,21 @@ def model_signature():
     """
     A cheap fingerprint of the model on disk, or None if it is not there.
 
-    Two stat() calls, against the 4.8 s an LBPH read costs. Size is included
-    alongside mtime because Phase 0's outage was a *partial* write: a truncated
-    trainer.yml can share an mtime with the write that produced it
+    Two stat() calls, against the seconds an LBPH read costs. Every retrain
+    promotes a freshly written students/ directory and labels.txt together
+    (`train_model.write_model_atomically`), so a new model always changes
+    both. Size is included alongside mtime because Phase 0's outage was a
+    *partial* write that shared an mtime with the write that produced it
     (tasks/lessons.md L1).
     """
     try:
-        trainer_stat = settings.trainer_file.stat()
+        models_stat = settings.student_models_dir.stat()
         labels_stat = settings.labels_file.stat()
     except OSError:
         return None
 
     return (
-        trainer_stat.st_mtime_ns,
-        trainer_stat.st_size,
+        models_stat.st_mtime_ns,
         labels_stat.st_mtime_ns,
         labels_stat.st_size,
     )
@@ -109,6 +111,10 @@ def model_signature():
 def load_model_and_labels():
     """
     Read the LBPH model and its labels. Returns `(recognizer, label_map)`.
+
+    `recognizer` is a `StudentModels`: one LBPH model per student behind the
+    same `predict()` the single model had, giving the same answers
+    (vision/student_models.py, todo.md §19).
 
     Raises rather than returning a sentinel: a missing or malformed model is
     not a condition the caller can paper over, and RecognitionSession turns
@@ -122,9 +128,12 @@ def load_model_and_labels():
             "python -m pip install opencv-contrib-python==4.10.0.84"
         )
 
-    if not settings.trainer_file.exists():
+    if not os.path.isdir(MODELS_DIR):
+        # An installation trained before todo.md §19 has trainer.yml and no
+        # students/. Name the fix rather than leave "not found" to decode.
         raise FileNotFoundError(
-            f"trainer.yml was not found: {TRAINER_FILE}"
+            f"Student models were not found: {MODELS_DIR}. "
+            "Run: python train_model.py"
         )
 
     if not settings.labels_file.exists():
@@ -132,20 +141,54 @@ def load_model_and_labels():
             f"labels.txt was not found: {LABELS_FILE}"
         )
 
-    new_recognizer = (
-        cv2.face.LBPHFaceRecognizer_create()
-    )
-    # Both files are open only inside the lock, so a retrain finishing
+    # The files are open only inside the lock, so a retrain finishing
     # meanwhile waits to rename them rather than failing (lessons.md L36).
     with MODEL_FILES_LOCK:
-        new_recognizer.read(TRAINER_FILE)
-
         with open(
             LABELS_FILE,
             encoding="utf-8"
         ) as labels_file:
             label_lines = labels_file.readlines()
 
+        new_label_map = _parse_label_lines(label_lines)
+
+        models = []
+
+        for label, entry in new_label_map.items():
+            model_path = os.path.join(
+                MODELS_DIR, f"{entry['student_id']}.yml"
+            )
+
+            if not os.path.exists(model_path):
+                raise FileNotFoundError(
+                    f"labels.txt lists {entry['student_id']} but "
+                    f"{model_path} is missing. Run: python train_model.py"
+                )
+
+            recognizer = cv2.face.LBPHFaceRecognizer_create()
+            recognizer.read(model_path)
+            models.append((label, recognizer))
+
+    _attach_display_names(new_label_map)
+
+    logger.info(
+        "Trainer loaded successfully: %d student identities",
+        len(new_label_map)
+    )
+
+    return (
+        StudentModels(models, pool=_STUDENT_POOL, workers=_STUDENT_WORKERS),
+        new_label_map,
+    )
+
+
+def _parse_label_lines(label_lines):
+    """
+    `{label: {"student_id", "name"}}` from the lines of labels.txt.
+
+    The name starts as the student ID; `_attach_display_names` replaces it.
+    The ID is validated here, before it names a model file (SE-3).
+    """
     new_label_map = {}
     loaded_student_ids = set()
 
@@ -202,14 +245,7 @@ def load_model_and_labels():
             "labels.txt does not contain any students."
         )
 
-    _attach_display_names(new_label_map)
-
-    logger.info(
-        "Trainer loaded successfully: %d student identities",
-        len(new_label_map)
-    )
-
-    return new_recognizer, new_label_map
+    return new_label_map
 
 
 def _attach_display_names(label_map):
@@ -422,6 +458,17 @@ STREAM_FRAME_DELAY = 0.0
 _PREDICT_POOL = ThreadPoolExecutor(
     max_workers=min(8, os.cpu_count() or 1),
     thread_name_prefix="lbph-predict",
+)
+
+# Inside one face's predict, the per-student models run over this pool
+# (vision/student_models.py, todo.md §19): 302 -> 96 ms per face at 17
+# students, results equal. ⚠️ A separate pool, because `_PREDICT_POOL`'s
+# workers are the callers and waiting on their own pool can deadlock it.
+_STUDENT_WORKERS = os.cpu_count() or 1
+
+_STUDENT_POOL = ThreadPoolExecutor(
+    max_workers=_STUDENT_WORKERS,
+    thread_name_prefix="lbph-student",
 )
 
 

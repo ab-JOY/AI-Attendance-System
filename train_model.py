@@ -1,5 +1,6 @@
 import logging
 import os
+import shutil
 import sys
 import threading
 
@@ -26,11 +27,13 @@ DATASET_DIR = str(settings.dataset_dir)
 
 TRAINER_DIR = str(settings.trainer_dir)
 
-TRAINER_FILE = str(settings.trainer_file)
+# One `{student_id}.yml` per student (todo.md §19). It replaced trainer.yml,
+# a single model that capped the system near 31 students (PE-2).
+MODELS_DIR = str(settings.student_models_dir)
 
 LABELS_FILE = str(settings.labels_file)
 
-# Held while the live trainer.yml/labels.txt pair is renamed, and by
+# Held while the live students/ + labels.txt pair is renamed, and by
 # recognize_face.load_model_and_labels() while it reads them. In-process
 # only: training runs on a thread of the web server (services/training.py).
 MODEL_FILES_LOCK = threading.Lock()
@@ -139,38 +142,44 @@ def looks_like_a_pre_migration_folder(folder_name):
     )
 
 
-def write_model_atomically(recognizer, label_dict):
+def write_model_atomically(write_models):
     """
-    Writes trainer.yml and labels.txt as an all-or-nothing pair.
+    Writes students/ and labels.txt as an all-or-nothing pair.
 
-    `label_dict` maps LBPH label -> student ID, and each line of labels.txt is
-    `{label},{student_id}`. It used to be `{label},{student_id}_{name}`;
-    the name is now read from the `students` table by
-    `recognize_face.load_model_and_labels()`, so a rename cannot leave the
-    overlay showing a stale one (todo.md §7.5).
+    `write_models(directory)` writes one `{student_id}.yml` per student into
+    `directory` and returns `label_dict`, which maps LBPH label -> student ID;
+    each line of labels.txt is `{label},{student_id}`. A callback rather than a
+    dict of recognizers so that only one student's model is ever in memory
+    (todo.md §19): at 2,000 students the dict would be gigabytes. An empty
+    `label_dict` writes nothing and leaves the live model as it was.
 
-    Both files are written to temporary paths first, so a failure
-    part-way through can never destroy the model that is currently
-    in use. The previous good pair is kept as .bak for one
-    generation so a bad retrain can be reverted by hand.
+    Both halves are written to temporary paths first, so a failure part-way
+    through can never destroy the model that is currently in use. The
+    previous good pair is kept as .bak for one generation so a bad retrain can
+    be reverted by hand. Returns `label_dict`.
     """
 
-    temporary_trainer = TRAINER_FILE + ".tmp"
+    temporary_models = MODELS_DIR + ".tmp"
     temporary_labels = LABELS_FILE + ".tmp"
 
-    backup_trainer = TRAINER_FILE + ".bak"
+    backup_models = MODELS_DIR + ".bak"
     backup_labels = LABELS_FILE + ".bak"
 
+    def remove_temporaries():
+        if os.path.isdir(temporary_models):
+            shutil.rmtree(temporary_models)
+        if os.path.exists(temporary_labels):
+            os.remove(temporary_labels)
+
     # Clear leftovers from an earlier interrupted run.
-    for leftover in (temporary_trainer, temporary_labels):
-        if os.path.exists(leftover):
-            os.remove(leftover)
+    remove_temporaries()
+    os.makedirs(temporary_models)
 
     # 1. Write the new pair to temporary paths.
     #    The live model is still untouched at this point, so any
     #    failure here leaves the running system exactly as it was.
     try:
-        recognizer.write(temporary_trainer)
+        label_dict = write_models(temporary_models)
 
         with open(
             temporary_labels,
@@ -183,10 +192,12 @@ def write_model_atomically(recognizer, label_dict):
                 )
 
     except Exception:
-        for leftover in (temporary_trainer, temporary_labels):
-            if os.path.exists(leftover):
-                os.remove(leftover)
+        remove_temporaries()
         raise
+
+    if not label_dict:
+        remove_temporaries()
+        return label_dict
 
     # Steps 2 and 3 rename the live pair, which Windows refuses while this
     # process is reading it (lessons.md L36). The attendance model is now
@@ -194,31 +205,40 @@ def write_model_atomically(recognizer, label_dict):
     # for a read in progress instead of failing the retrain.
     with MODEL_FILES_LOCK:
         # 2. Move the previous good pair aside. A pair is only worth
-        #    keeping if both halves are present; an orphaned trainer.yml
-        #    with no labels.txt is unusable and is simply overwritten.
+        #    keeping if both halves are present; an orphaned students/
+        #    with no labels.txt is unusable and is simply replaced.
         had_previous_model = (
-            os.path.exists(TRAINER_FILE)
+            os.path.isdir(MODELS_DIR)
             and os.path.exists(LABELS_FILE)
         )
 
         if had_previous_model:
-            for backup in (backup_trainer, backup_labels):
-                if os.path.exists(backup):
-                    os.remove(backup)
+            if os.path.isdir(backup_models):
+                shutil.rmtree(backup_models)
+            if os.path.exists(backup_labels):
+                os.remove(backup_labels)
 
-            os.replace(TRAINER_FILE, backup_trainer)
+            os.replace(MODELS_DIR, backup_models)
             os.replace(LABELS_FILE, backup_labels)
+
+        elif os.path.isdir(MODELS_DIR):
+            # os.replace() overwrites a file but not a directory.
+            shutil.rmtree(MODELS_DIR)
 
         # 3. Promote the new pair, restoring the backup if this fails.
         try:
-            os.replace(temporary_trainer, TRAINER_FILE)
+            os.replace(temporary_models, MODELS_DIR)
             os.replace(temporary_labels, LABELS_FILE)
 
         except Exception:
             if had_previous_model:
-                os.replace(backup_trainer, TRAINER_FILE)
+                if os.path.isdir(MODELS_DIR):
+                    shutil.rmtree(MODELS_DIR)
+                os.replace(backup_models, MODELS_DIR)
                 os.replace(backup_labels, LABELS_FILE)
             raise
+
+    return label_dict
 
 
 # =====================================================
@@ -353,124 +373,148 @@ def train_model(report=None):
         logger.error("No valid student dataset folders found")
         return False, "No valid student dataset folders found."
 
-    faces = []
-    labels = []
-    label_dict = {}
     skipped_folders = []
-
-    current_label = 0
+    image_count = 0
 
     logger.info(
         "Training start: shared preprocessing (resize 200x200 + CLAHE), "
         "each dataset image processed exactly once"
     )
 
-    stage(f"Reading images for {len(folder_records)} student(s)")
+    logger.info("Training one LBPH model per student with %s", LBPH_PARAMS)
 
-    for record in folder_records:
-        folder_name = record[
-            "folder_name"
-        ]
+    def write_models(directory):
+        """
+        Train and write each student's model in turn (todo.md §19).
 
-        folder_path = record[
-            "folder_path"
-        ]
+        One student's images and model are in memory at a time, where the
+        single model needed every image of every student at once.
+        """
+        nonlocal image_count
 
-        logger.info("Processing: %s", folder_name)
+        label_dict = {}
 
-        student_faces = []
-        skipped_images = 0
-        usable_count = 0
+        for number, record in enumerate(folder_records, start=1):
+            folder_name = record["folder_name"]
+            folder_path = record["folder_path"]
 
-        for filename in sorted(
-            os.listdir(folder_path)
-        ):
-            if not filename.lower().endswith(
-                VALID_IMAGE_EXTENSIONS
+            stage(f"Training student {number} of {len(folder_records)}")
+            logger.info("Processing: %s", folder_name)
+
+            student_faces = []
+            skipped_images = 0
+            usable_count = 0
+
+            for filename in sorted(
+                os.listdir(folder_path)
             ):
-                continue
+                if not filename.lower().endswith(
+                    VALID_IMAGE_EXTENSIONS
+                ):
+                    continue
 
-            image_path = os.path.join(
-                folder_path,
-                filename
-            )
-
-            image = cv2.imread(
-                image_path,
-                cv2.IMREAD_GRAYSCALE
-            )
-
-            if image is None:
-                logger.warning("Skipped unreadable image: %s", filename)
-                skipped_images += 1
-                continue
-
-            try:
-                processed_face = preprocess_for_lbph(
-                    image
+                image_path = os.path.join(
+                    folder_path,
+                    filename
                 )
 
-            except Exception:
+                image = cv2.imread(
+                    image_path,
+                    cv2.IMREAD_GRAYSCALE
+                )
+
+                if image is None:
+                    logger.warning("Skipped unreadable image: %s", filename)
+                    skipped_images += 1
+                    continue
+
+                try:
+                    processed_face = preprocess_for_lbph(
+                        image
+                    )
+
+                except Exception:
+                    logger.warning(
+                        "Skipped image with preprocessing error: %s",
+                        filename,
+                        exc_info=True
+                    )
+                    skipped_images += 1
+                    continue
+
+                if processed_face.shape != (200, 200):
+                    logger.warning(
+                        "Skipped image with unexpected size: %s %s",
+                        filename,
+                        processed_face.shape
+                    )
+                    skipped_images += 1
+                    continue
+
+                usable_count += 1
+                student_faces.append(
+                    processed_face
+                )
+
+            logger.info(
+                "  usable images: %d, skipped: %d",
+                usable_count,
+                skipped_images
+            )
+
+            # One incomplete folder must not block every other student.
+            # Skip it, keep training the rest, and report it back to the
+            # caller so the operator knows who still needs a recapture.
+            if usable_count < MIN_IMAGES_PER_STUDENT:
                 logger.warning(
-                    "Skipped image with preprocessing error: %s",
-                    filename,
-                    exc_info=True
+                    "Skipping %s - too few usable images (required %d, found "
+                    "%d). Recapture this student, then train again.",
+                    folder_name,
+                    MIN_IMAGES_PER_STUDENT,
+                    usable_count
                 )
-                skipped_images += 1
+
+                skipped_folders.append(folder_name)
                 continue
 
-            if processed_face.shape != (200, 200):
-                logger.warning(
-                    "Skipped image with unexpected size: %s %s",
-                    filename,
-                    processed_face.shape
-                )
-                skipped_images += 1
-                continue
+            # The student ID, not the folder name. They are the same string
+            # today and this line is what keeps that an implementation detail:
+            # labels.txt is a map from LBPH label to *student ID*, and the
+            # recognition side looks the display name up in the database
+            # from it. Labels follow folder order, as they did in the single
+            # model, which is what keeps tie-breaking identical
+            # (vision/student_models.py).
+            label = len(label_dict)
+            label_dict[label] = record["student_id"]
 
-            usable_count += 1
-            student_faces.append(
-                processed_face
+            recognizer = cv2.face.LBPHFaceRecognizer_create(
+                **LBPH_PARAMS
             )
 
-        logger.info(
-            "  usable images: %d, skipped: %d",
-            usable_count,
-            skipped_images
-        )
-
-        # One incomplete folder must not block every other student.
-        # Skip it, keep training the rest, and report it back to the
-        # caller so the operator knows who still needs a recapture.
-        if usable_count < MIN_IMAGES_PER_STUDENT:
-            logger.warning(
-                "Skipping %s - too few usable images (required %d, found "
-                "%d). Recapture this student, then train again.",
-                folder_name,
-                MIN_IMAGES_PER_STUDENT,
-                usable_count
+            recognizer.train(
+                student_faces,
+                np.full(len(student_faces), label, dtype=np.int32)
             )
 
-            skipped_folders.append(folder_name)
-            continue
+            recognizer.write(
+                os.path.join(directory, f"{record['student_id']}.yml")
+            )
 
-        # The student ID, not the folder name. They are the same string today
-        # and this line is what keeps that an implementation detail: labels.txt
-        # is a map from LBPH label to *student ID*, and the recognition side
-        # looks the display name up in the database from it.
-        label_dict[current_label] = record["student_id"]
+            image_count += len(student_faces)
 
-        faces.extend(
-            student_faces
+        return label_dict
+
+    try:
+        label_dict = write_model_atomically(write_models)
+
+    except Exception as error:
+        logger.exception(
+            "Could not save the trained model. The previously trained "
+            "model was left in place."
         )
+        return False, f"Could not save the trained model: {error}"
 
-        labels.extend(
-            [current_label] * len(student_faces)
-        )
-
-        current_label += 1
-
-    if not faces:
+    if not label_dict:
         logger.error("No training images were loaded")
 
         if skipped_folders:
@@ -484,48 +528,21 @@ def train_model(report=None):
     logger.info(
         "Dataset summary: %d person(s), %d image(s)",
         len(label_dict),
-        len(faces)
+        image_count
     )
 
-    recognizer = cv2.face.LBPHFaceRecognizer_create(
-        **LBPH_PARAMS
-    )
-
-    logger.info("Training LBPH model with %s", LBPH_PARAMS)
-
-    stage(f"Training on {len(faces)} image(s) from {len(label_dict)} student(s)")
-
-    recognizer.train(
-        faces,
-        np.asarray(
-            labels,
-            dtype=np.int32
-        )
-    )
-
-    logger.info("Saving model")
-
-    stage("Saving model")
-
-    try:
-        write_model_atomically(
-            recognizer,
-            label_dict
-        )
-
-    except Exception as error:
-        logger.exception(
-            "Could not save the trained model. The previously trained "
-            "model was left in place."
-        )
-        return False, f"Could not save the trained model: {error}"
-
-    trainer_size = os.path.getsize(
-        TRAINER_FILE
+    models_size = sum(
+        os.path.getsize(os.path.join(MODELS_DIR, name))
+        for name in os.listdir(MODELS_DIR)
     )
 
     logger.info("Training completed successfully")
-    logger.info("Trainer: %s (%s bytes)", TRAINER_FILE, f"{trainer_size:,}")
+    logger.info(
+        "Models : %s (%d file(s), %s bytes)",
+        MODELS_DIR,
+        len(label_dict),
+        f"{models_size:,}"
+    )
     logger.info("Labels : %s", LABELS_FILE)
 
     for label, student_id in (

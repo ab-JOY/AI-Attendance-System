@@ -92,7 +92,7 @@ if __name__ == '__main__':
 
     sweep_abandoned_enrolments()
 
-    # So the first Start after a restart does not wait for trainer.yml.
+    # So the first Start after a restart does not wait for the model.
     preload_model_in_background()
 
     if app_config.proxy_hops == 0:

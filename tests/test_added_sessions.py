@@ -378,7 +378,7 @@ def test_training_reads_the_images_and_ignores_the_manifest(store, monkeypatch, 
 
     monkeypatch.setattr(train_model, "DATASET_DIR", str(dataset))
     monkeypatch.setattr(train_model, "TRAINER_DIR", str(trainer))
-    monkeypatch.setattr(train_model, "TRAINER_FILE", str(trainer / "trainer.yml"))
+    monkeypatch.setattr(train_model, "MODELS_DIR", str(trainer / "students"))
     monkeypatch.setattr(train_model, "LABELS_FILE", str(trainer / "labels.txt"))
 
     with caplog.at_level("INFO"):

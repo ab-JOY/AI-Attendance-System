@@ -88,7 +88,7 @@ def test_trainer_and_labels_paths_are_derived_from_trainer_dir(tmp_path):
         _env_file=NO_ENV_FILE, secret_key="x" * 32, trainer_dir=tmp_path
     )
 
-    assert config.trainer_file == tmp_path / "trainer.yml"
+    assert config.student_models_dir == tmp_path / "students"
     assert config.labels_file == tmp_path / "labels.txt"
 
 

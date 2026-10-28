@@ -45,7 +45,7 @@ def loader(monkeypatch, tmp_path):
 
     Deliberately the real function rather than a reimplementation of its
     parsing loop: a test that restates the rules it is checking passes while
-    production breaks (lessons.md L3). `LABELS_FILE` and `TRAINER_FILE` are
+    production breaks (lessons.md L3). `LABELS_FILE` and `MODELS_DIR` are
     module-level strings captured at import, so both are redirected here.
     """
 
@@ -53,11 +53,11 @@ def loader(monkeypatch, tmp_path):
         def read(self, path):
             self.path = path
 
-    trainer = tmp_path / "trainer.yml"
-    trainer.write_text("not a real model", encoding="utf-8")
+    models = tmp_path / "students"
+    models.mkdir()
 
     monkeypatch.setattr(recognize_face.settings, "trainer_dir", tmp_path)
-    monkeypatch.setattr(recognize_face, "TRAINER_FILE", str(trainer))
+    monkeypatch.setattr(recognize_face, "MODELS_DIR", str(models))
     monkeypatch.setattr(
         recognize_face.cv2.face, "LBPHFaceRecognizer_create", lambda: FakeRecognizer()
     )
@@ -66,6 +66,13 @@ def loader(monkeypatch, tmp_path):
         labels = tmp_path / "labels.txt"
         labels.write_text(contents, encoding="utf-8")
         monkeypatch.setattr(recognize_face, "LABELS_FILE", str(labels))
+
+        # One model file per listed student, as train_model() writes them.
+        # A malformed line is refused while parsing, before any file is read.
+        for line in contents.splitlines():
+            _, _, student_id = line.partition(",")
+            if student_id.strip() and "/" not in student_id and "\\" not in student_id:
+                (models / f"{student_id.strip()}.yml").write_text("model", encoding="utf-8")
 
         if names is not None:
             monkeypatch.setattr(
@@ -143,6 +150,38 @@ def test_a_duplicate_label_is_refused(loader):
 def test_an_empty_labels_file_is_refused(loader):
     with pytest.raises(ValueError, match="does not contain any students"):
         loader("\n\n", names={})
+
+
+def test_each_label_reads_its_own_students_model(loader, tmp_path):
+    """
+    todo.md §19: label N must predict with student N's file. A swap here
+    would recognise every face as somebody else, with no error anywhere.
+    """
+    loader("0,23-1-1-0559\n1,23-1-1-0918\n", names={})
+
+    recognizer, _ = recognize_face.load_model_and_labels()
+
+    assert [(label, model.path) for label, model in recognizer._models] == [
+        (0, str(tmp_path / "students" / "23-1-1-0559.yml")),
+        (1, str(tmp_path / "students" / "23-1-1-0918.yml")),
+    ]
+
+
+def test_a_listed_student_with_no_model_file_is_refused(loader, tmp_path):
+    loader("0,23-1-1-0559\n", names={})
+    (tmp_path / "students" / "23-1-1-0559.yml").unlink()
+
+    with pytest.raises(FileNotFoundError, match="23-1-1-0559.*train_model.py"):
+        recognize_face.load_model_and_labels()
+
+
+def test_an_installation_trained_before_per_student_models_names_the_fix(loader, tmp_path):
+    loader("0,23-1-1-0559\n", names={})
+    (tmp_path / "students" / "23-1-1-0559.yml").unlink()
+    (tmp_path / "students").rmdir()
+
+    with pytest.raises(FileNotFoundError, match="Run: python train_model.py"):
+        recognize_face.load_model_and_labels()
 
 
 # ---------------------------------------------------------------------------

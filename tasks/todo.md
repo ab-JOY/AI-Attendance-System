@@ -1432,7 +1432,7 @@ The friend still has to pass the face + liveness check as themselves, live, so i
 at that moment. Stronger options not built (open decisions): campus-network IP allowlist via `CF-Connecting-IP`;
 GPS geofence (spoofable, 10-50 m indoors).
 
-## 19. PE-2 — per-student LBPH models + one central server (2026-10-28) — **PLANNED, NOT BUILT: user chose to build it later**
+## 19. PE-2 — per-student LBPH models + one central server (2026-10-28) — **step 1 BUILT 2026-10-28 (user: "commit then start the step 1"); steps 2, 6-9 open**
 
 User: "a change in the system which can accommodate a large number of students and also centralized".
 Keeps LBPH (§7 Q1 stands). Recommendation accepted by the user; build deferred.
@@ -1449,12 +1449,21 @@ class-list changes need no retrain, no duplication across subjects. Phone path a
 **Cost:** per-face compare work grows with class size (40 × 100 images ≈ 3× today's 1,200-histogram 64 ms,
 estimated, not measured). Mitigation: fewer, more varied images per student (step 7), with re-evaluation.
 
-- [ ] 1. Training writes one model per student; enrolment/recapture trains only that student
+- [x] 1. Training writes one model per student (`trainer/students/{id}.yml`, promoted with labels.txt as an
+      all-or-nothing pair, .bak kept). ⚠️ **Not yet incremental:** every retrain still trains every student
+      (28 s at 17). "Enrolment trains only that student" is still open.
 - [ ] 2. Session start loads + caches the class list's models
-- [ ] 3. Recognition = min distance across those models; **differential test vs the current single model on the
-      17 real students must show identical label + distance** (L2: never change the distance scale silently)
-- [ ] 4. Phone verification reads the student's own model file
-- [ ] 5. One-shot migration script from `trainer.yml` -> per-student files (dry-run by default)
+- [x] 3. Recognition = min distance across those models (`vision/student_models.py`). **Differential test passed:
+      1,700 probes (every dataset image mirrored + shifted), 1,700 bit-exact - same student, same distance.** Range
+      48.5-75.8 (spans 58.0); 297 probes' nearest is another student, matched identically. Per-face predict:
+      single 212 ms, per-student sequential 302 ms (17 query-histogram computations instead of 1), per-student over
+      `_STUDENT_POOL` **96 ms** in isolation / 41 ms via the loader - results equal. With many faces in one frame
+      total CPU is ~40% above the single model.
+- [ ] 4. Phone verification reads the student's own model file. *Works unchanged today* (it filters the shared
+      `label_map`), so this is an optimisation, not a correctness item.
+- [x] 5. Migration = `python train_model.py` once (no script needed; labels.txt came out byte-identical). The
+      loader refuses an old install with "Run: python train_model.py". Old `trainer.yml` + `.bak` (636 MB of
+      biometric templates) are **left on disk, unused** - the user's to delete.
 - [ ] 6. Measure load time, ms/face, disk at a realistic class size; update `docs/walkthrough.md` §4.5
 - [ ] 7. (Optional) Trim to ~30-40 diverse images/student; re-run held-out + impostor evaluation
 - [ ] 8. Centralization: always-on campus server, `serve.py` as an auto-start service, classroom-code passes moved

@@ -51,7 +51,7 @@ def dataset(tmp_path, monkeypatch):
 
     monkeypatch.setattr(train_model, "DATASET_DIR", str(dataset_dir))
     monkeypatch.setattr(train_model, "TRAINER_DIR", str(trainer_dir))
-    monkeypatch.setattr(train_model, "TRAINER_FILE", str(trainer_dir / "trainer.yml"))
+    monkeypatch.setattr(train_model, "MODELS_DIR", str(trainer_dir / "students"))
     monkeypatch.setattr(train_model, "LABELS_FILE", str(trainer_dir / "labels.txt"))
 
     # 70 real images per student would make this test slow for no extra
@@ -74,7 +74,8 @@ def test_underpopulated_folder_is_skipped_and_the_rest_still_train(dataset):
     assert "23-1-1-0918" in message
 
     # The complete student made it into a usable model.
-    assert (trainer_dir / "trainer.yml").exists()
+    assert (trainer_dir / "students" / "23-1-1-0559.yml").exists()
+    assert not (trainer_dir / "students" / "23-1-1-0918.yml").exists()
 
     labels = (trainer_dir / "labels.txt").read_text(encoding="utf-8")
     assert "23-1-1-0559" in labels

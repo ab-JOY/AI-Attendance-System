@@ -118,7 +118,7 @@ class BackgroundJob:
         Begin a run. False if one is already going.
 
         Refusing rather than queueing is deliberate: two concurrent trainings
-        would both write `trainer/trainer.yml`, and although
+        would both write `trainer/students/`, and although
         `write_model_atomically()` makes each write safe on its own, the loser's
         model would silently replace the winner's. One at a time is the
         correct semantics, not a simplification.

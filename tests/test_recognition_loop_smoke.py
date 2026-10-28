@@ -66,7 +66,7 @@ from vision.session import RecognitionSession, SessionBusy, SessionHooks
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATASET_DIR = PROJECT_ROOT / "dataset"
-TRAINER_FILE = PROJECT_ROOT / "trainer" / "trainer.yml"
+MODELS_DIR = PROJECT_ROOT / "trainer" / "students"
 LABELS_FILE = PROJECT_ROOT / "trainer" / "labels.txt"
 
 FRAME_WIDTH = 1280
@@ -94,7 +94,7 @@ def _requirements_present() -> bool:
     return (
         DATASET_DIR.is_dir()
         and any(DATASET_DIR.iterdir())
-        and TRAINER_FILE.exists()
+        and MODELS_DIR.is_dir()
         and LABELS_FILE.exists()
     )
 

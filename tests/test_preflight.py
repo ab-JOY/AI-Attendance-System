@@ -74,7 +74,7 @@ def model(tmp_path, monkeypatch):
 def write_labels(trainer_dir, student_ids):
     lines = [f"{label},{sid}" for label, sid in enumerate(student_ids)]
     (trainer_dir / "labels.txt").write_text("\n".join(lines), encoding="utf-8")
-    (trainer_dir / "trainer.yml").write_text("model", encoding="utf-8")
+    (trainer_dir / "students").mkdir(exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +173,7 @@ def test_a_model_older_than_the_dataset_fails(model):
     image = folder / "1.jpg"
     image.write_bytes(b"face")
 
-    model_mtime = (trainer_dir / "trainer.yml").stat().st_mtime
+    model_mtime = (trainer_dir / "labels.txt").stat().st_mtime
     import os
 
     os.utime(image, (model_mtime + 600, model_mtime + 600))

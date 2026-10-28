@@ -318,8 +318,11 @@ class Settings(BaseSettings):
         return self.tls_enabled
 
     @property
-    def trainer_file(self) -> Path:
-        return self.trainer_dir / "trainer.yml"
+    def student_models_dir(self) -> Path:
+        # One LBPH model per student, `{student_id}.yml` (todo.md §19). It
+        # replaced a single trainer.yml that grew ~18.7 MB per student and
+        # that cv::FileStorage cannot read back past 0.57-1.84 GB (PE-0/PE-2).
+        return self.trainer_dir / "students"
 
     @property
     def labels_file(self) -> Path:

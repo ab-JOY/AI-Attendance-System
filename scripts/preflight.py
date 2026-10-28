@@ -188,13 +188,17 @@ def check_no_stray_identities(cursor):
 
 def check_model_is_not_stale():
     """D2: a model older than the data it should have been built from."""
+    # labels.txt is promoted together with students/ on every retrain
+    # (train_model.write_model_atomically), so its mtime is the model's.
     try:
-        model_mtime = settings.trainer_file.stat().st_mtime
+        if not settings.student_models_dir.is_dir():
+            raise FileNotFoundError(settings.student_models_dir)
+        model_mtime = settings.labels_file.stat().st_mtime
     except OSError:
         return Result(
             "model is newer than the dataset",
             FAIL,
-            f"{settings.trainer_file} is missing",
+            f"{settings.student_models_dir} or {settings.labels_file} is missing",
             "Run: python train_model.py",
         )
 
@@ -219,7 +223,7 @@ def check_model_is_not_stale():
         return Result(
             "model is newer than the dataset",
             FAIL,
-            f"{newest_name} has images {gap} newer than trainer.yml",
+            f"{newest_name} has images {gap} newer than the model",
             "The model predates the face data, so the last retrain either "
             "failed or never ran. The previous model is still in place and "
             "the application will look healthy. Run: python train_model.py",
@@ -228,7 +232,7 @@ def check_model_is_not_stale():
     return Result(
         "model is newer than the dataset",
         PASS,
-        "trainer.yml is newer than every dataset image",
+        "the model is newer than every dataset image",
     )
 
 
