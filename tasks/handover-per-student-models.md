@@ -49,5 +49,21 @@ grew 18.7 MB/student and `cv::FileStorage` cannot read past 0.57-1.84 GB, so ~31
 
 ## 4. Next (todo.md §19)
 
-2: load only the running class list's models (the RAM fix: ~6.5 MB of histograms per student in memory).
-9: one `RecognitionSession` per running class. 6: measure at a realistic class size. 8: central server setup.
+~~2: load only the running class list's models~~ done, as option B - see §5.
+Incremental training (enrol one student, train one). 9: one `RecognitionSession` per running class. 6: measure at a realistic class size. 8: central server setup.
+
+## 5. Same evening: step 2, option B (class list only over the limit)
+
+- User's live test showed Jeff as Chrizol: **no dataset captured in that room** (Jeff and Chrizol are close; 17
+  of Chrizol's probes are nearest Jeff). Recapture in the room fixed it (user, 21:27). Not this change: old and new
+  models gave identical answers on the same input. Nothing was recorded - 85% agreement + liveness held.
+- ⚠️ That recapture changed `dataset/23-1-1-0918`, so the 17:35 `trainer.yml` is **stale**: comparing against it
+  gives 1,639/1,700 (all 61 involve Jeff). The valid comparison is a fresh in-memory single model from the current
+  dataset: **1,700/1,700**.
+- Option B: `settings.recognition_load_all_limit` (50, `RECOGNITION_LOAD_ALL_LIMIT`). Session hooks
+  `loads_everyone()` and `students_to_load(subject)`; the in-memory model is keyed by (files, student set).
+  `load_model_and_labels(student_ids)` keeps labels.txt labels. Parallel file reads: 11.5 s -> 1.9 s.
+- Tests 1,944 passed / 99 skipped. Mutations (ignore the student set in the cache key; preload over the limit)
+  each fail a test.
+- **The class-list mode has never run in a live room** - only with the limit lowered in a script (7-student class,
+  0.66 s). Before relying on it: set `RECOGNITION_LOAD_ALL_LIMIT=5` in `.env`, restart, run a class.

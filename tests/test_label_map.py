@@ -167,6 +167,34 @@ def test_each_label_reads_its_own_students_model(loader, tmp_path):
     ]
 
 
+def test_a_class_list_loads_only_its_students_and_keeps_their_labels(loader, tmp_path):
+    """
+    Option B, large school. A student keeps their labels.txt label in every
+    set, so a label never names a different person from one class to the next.
+    """
+    loader("0,23-1-1-0559\n1,23-1-1-0918\n2,23-1-1-0920\n", names={})
+
+    recognizer, label_map = recognize_face.load_model_and_labels(
+        frozenset({"23-1-1-0918", "23-1-1-0920", "not-trained"})
+    )
+
+    assert {label: entry["student_id"] for label, entry in label_map.items()} == {
+        1: "23-1-1-0918",
+        2: "23-1-1-0920",
+    }
+    assert [(label, model.path) for label, model in recognizer._models] == [
+        (1, str(tmp_path / "students" / "23-1-1-0918.yml")),
+        (2, str(tmp_path / "students" / "23-1-1-0920.yml")),
+    ]
+
+
+def test_a_class_list_with_no_trained_student_is_refused(loader):
+    loader("0,23-1-1-0559\n", names={})
+
+    with pytest.raises(ValueError, match="class list has a trained face model"):
+        recognize_face.load_model_and_labels(frozenset({"23-1-1-0918"}))
+
+
 def test_a_listed_student_with_no_model_file_is_refused(loader, tmp_path):
     loader("0,23-1-1-0559\n", names={})
     (tmp_path / "students" / "23-1-1-0559.yml").unlink()

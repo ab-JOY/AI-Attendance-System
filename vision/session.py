@@ -141,6 +141,17 @@ class SessionHooks:
     # see `_seed_recognized`.
     already_recorded: Callable[[Any], dict[str, str]] | None = None
 
+    # () -> True while every trained student is loaded for every session.
+    # Cheap. False means the school is over the limit and each session loads
+    # only its class list, so preloading everyone would be the very cost the
+    # limit avoids (todo.md §19, option B). Optional: absent means always.
+    loads_everyone: Callable[[], bool] | None = None
+
+    # (subject) -> None for everyone, or the student IDs to load for this
+    # subject, passed to `load_model(student_ids)`. May raise: start() then
+    # refuses with the reason logged. Optional: absent means everyone.
+    students_to_load: Callable[[Any], Any] | None = None
+
 
 @dataclass(frozen=True)
 class SessionSnapshot:
@@ -257,7 +268,14 @@ class RecognitionSession:
 
     # -- the model (PE-4) --------------------------------------------------
 
-    def _refresh_model(self) -> bool:
+    def _students_to_load(self, subject_code: Any) -> Any:
+        """None for every trained student, or this subject's class list."""
+        if self._hooks.students_to_load is None:
+            return None
+
+        return self._hooks.students_to_load(subject_code)
+
+    def _refresh_model(self, subject_code: Any = None) -> bool:
         """
         Load the model if the one on disk is not the one in memory.
 
@@ -266,13 +284,26 @@ class RecognitionSession:
 
         Uses the model `preload_model()` staged when it matches the one on
         disk, and waits for a preload in progress rather than loading twice.
+
+        The model in memory is keyed by the files on disk *and* the students
+        it holds, so a class-list session reloads for a different class.
         """
         with self._model_lock:
-            signature = self._hooks.model_signature()
+            disk_signature = self._hooks.model_signature()
 
-            if signature is None:
+            if disk_signature is None:
                 logger.error("No trained model available, cannot start attendance")
                 return False
+
+            try:
+                student_ids = self._students_to_load(subject_code)
+            except Exception:
+                logger.exception(
+                    "Could not read the class list, cannot start attendance"
+                )
+                return False
+
+            signature = (disk_signature, student_ids)
 
             if signature == self._model_signature and self._recognizer is not None:
                 logger.info(
@@ -288,7 +319,11 @@ class RecognitionSession:
                 logger.info("Using the model loaded in the background")
             else:
                 try:
-                    recognizer, label_map = self._hooks.load_model()
+                    recognizer, label_map = (
+                        self._hooks.load_model()
+                        if student_ids is None
+                        else self._hooks.load_model(student_ids)
+                    )
                 except Exception:
                     logger.exception("Model load failed, cannot start attendance")
                     return False
@@ -317,11 +352,20 @@ class RecognitionSession:
         Never raises. A failure here costs only the head start: start() loads
         the model itself and reports the failure where the operator sees it.
         """
-        with self._model_lock:
-            signature = self._hooks.model_signature()
+        if self._hooks.loads_everyone is not None and not self._hooks.loads_everyone():
+            logger.info(
+                "Not preloading: over the limit, each session loads its own class list"
+            )
+            return
 
-            if signature is None:
+        with self._model_lock:
+            disk_signature = self._hooks.model_signature()
+
+            if disk_signature is None:
                 return
+
+            # The key _refresh_model() uses for "every student".
+            signature = (disk_signature, None)
 
             if signature == self._model_signature and self._recognizer is not None:
                 return
@@ -387,7 +431,7 @@ class RecognitionSession:
                 )
                 return False
 
-            if not self._refresh_model():
+            if not self._refresh_model(subject_code):
                 return False
 
             if self._capture is None:

@@ -193,6 +193,17 @@ class Settings(BaseSettings):
     # -----------------------------------------------------------------
     recognition_threshold: float = 58.0
 
+    # At or under this many trained students, a session loads every one of
+    # them, so a student from another class is recognised as themselves and
+    # refused ("Not in this class"). Over it, a session loads only its class
+    # list, because each face is compared with every loaded student and the
+    # whole school would be too slow (todo.md §19, option B, chosen by the
+    # user 2026-10-28). ⚠️ The price of the class-list mode, measured on the
+    # 17 enrolled students: an outsider's frame falls under 58.0 for some
+    # classmate 2.3% of the time (one look-alike pair: 34%). 50 is a starting
+    # value from speed (~5.6 ms per student per face, 12 CPUs), not a tuned one.
+    recognition_load_all_limit: int = 50
+
     # -----------------------------------------------------------------
     # Logging
     # -----------------------------------------------------------------

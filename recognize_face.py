@@ -15,6 +15,7 @@ from face_preprocessing import align_face, preprocess_for_lbph
 from infra.camera import CameraReader
 from infra.db import db_cursor
 from repositories import attendance as attendance_repo
+from repositories import enrolments as enrolments_repo
 from security.paths import UnsafeStudentPathError, validate_student_id
 from services.punctuality import derive_status
 from train_model import MODEL_FILES_LOCK
@@ -108,13 +109,19 @@ def model_signature():
     )
 
 
-def load_model_and_labels():
+def load_model_and_labels(student_ids=None):
     """
     Read the LBPH model and its labels. Returns `(recognizer, label_map)`.
 
     `recognizer` is a `StudentModels`: one LBPH model per student behind the
     same `predict()` the single model had, giving the same answers
     (vision/student_models.py, todo.md §19).
+
+    `student_ids`, when given, loads only those students - a class list, when
+    the school is over `recognition_load_all_limit` (`students_to_load`).
+    Labels stay those of labels.txt, so a student keeps one label whichever
+    set they are loaded in. A listed student with no trained model is left
+    out; the session shows them nothing rather than refusing the class.
 
     Raises rather than returning a sentinel: a missing or malformed model is
     not a condition the caller can paper over, and RecognitionSession turns
@@ -152,7 +159,20 @@ def load_model_and_labels():
 
         new_label_map = _parse_label_lines(label_lines)
 
-        models = []
+        if student_ids is not None:
+            new_label_map = {
+                label: entry
+                for label, entry in new_label_map.items()
+                if entry["student_id"] in student_ids
+            }
+
+            if not new_label_map:
+                raise ValueError(
+                    f"None of the {len(student_ids)} student(s) on this class "
+                    "list has a trained face model."
+                )
+
+        model_paths = {}
 
         for label, entry in new_label_map.items():
             model_path = os.path.join(
@@ -165,9 +185,14 @@ def load_model_and_labels():
                     f"{model_path} is missing. Run: python train_model.py"
                 )
 
-            recognizer = cv2.face.LBPHFaceRecognizer_create()
-            recognizer.read(model_path)
-            models.append((label, recognizer))
+            model_paths[label] = model_path
+
+        # Read side by side: cv::FileStorage parses with the GIL released,
+        # and in the class-list mode every Start reads its own class.
+        models = list(zip(
+            model_paths,
+            _STUDENT_POOL.map(_read_student_model, model_paths.values()),
+        ))
 
     _attach_display_names(new_label_map)
 
@@ -180,6 +205,59 @@ def load_model_and_labels():
         StudentModels(models, pool=_STUDENT_POOL, workers=_STUDENT_WORKERS),
         new_label_map,
     )
+
+
+def _read_student_model(model_path):
+    recognizer = cv2.face.LBPHFaceRecognizer_create()
+    recognizer.read(model_path)
+    return recognizer
+
+
+def trained_student_count():
+    """How many students labels.txt lists. Cheap: no model is read."""
+    try:
+        with open(LABELS_FILE, encoding="utf-8") as labels_file:
+            return sum(1 for line in labels_file if line.strip())
+    except OSError:
+        return 0
+
+
+def loads_everyone():
+    """
+    True while the school is small enough to load every student (option B).
+
+    Every student loaded is what lets a student from another class be
+    recognised as themselves and refused, instead of being matched to the
+    closest classmate (config/settings.py, `recognition_load_all_limit`).
+    """
+    return trained_student_count() <= settings.recognition_load_all_limit
+
+
+def students_to_load(subject):
+    """
+    `None` for everyone, or the student IDs on this subject's class list.
+
+    The `students_to_load` hook. Raises if the class list cannot be read: in
+    the class-list mode there is nothing else to recognise against, and a
+    refused Start with the reason logged beats a session that knows no one.
+    """
+    if loads_everyone():
+        return None
+
+    with db_cursor(dictionary=True) as cursor:
+        roster = enrolments_repo.enrolled_in(cursor, subject.subject_id)
+
+    student_ids = frozenset(row["student_id"] for row in roster)
+
+    logger.info(
+        "%d trained students is over the limit of %d: loading only the %d on "
+        "this class list",
+        trained_student_count(),
+        settings.recognition_load_all_limit,
+        len(student_ids),
+    )
+
+    return student_ids
 
 
 def _parse_label_lines(label_lines):
@@ -584,6 +662,8 @@ session = RecognitionSession(
         make_reader=lambda capture: CameraReader(capture),
         configure_camera=configure_camera,
         already_recorded=already_recorded_today,
+        loads_everyone=loads_everyone,
+        students_to_load=students_to_load,
     ),
     config=TRACK_CONFIG,
 )

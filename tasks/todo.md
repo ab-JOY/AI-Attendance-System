@@ -1432,7 +1432,7 @@ The friend still has to pass the face + liveness check as themselves, live, so i
 at that moment. Stronger options not built (open decisions): campus-network IP allowlist via `CF-Connecting-IP`;
 GPS geofence (spoofable, 10-50 m indoors).
 
-## 19. PE-2 — per-student LBPH models + one central server (2026-10-28) — **step 1 BUILT 2026-10-28 (user: "commit then start the step 1"); steps 2, 6-9 open**
+## 19. PE-2 — per-student LBPH models + one central server (2026-10-28) — **steps 1-3, 5 BUILT 2026-10-28; 4, 6-9 open**
 
 User: "a change in the system which can accommodate a large number of students and also centralized".
 Keeps LBPH (§7 Q1 stands). Recommendation accepted by the user; build deferred.
@@ -1452,7 +1452,15 @@ estimated, not measured). Mitigation: fewer, more varied images per student (ste
 - [x] 1. Training writes one model per student (`trainer/students/{id}.yml`, promoted with labels.txt as an
       all-or-nothing pair, .bak kept). ⚠️ **Not yet incremental:** every retrain still trains every student
       (28 s at 17). "Enrolment trains only that student" is still open.
-- [ ] 2. Session start loads + caches the class list's models
+- [x] 2. **Option B, chosen by the user 2026-10-28** after the trade-off was measured: at or under
+      `recognition_load_all_limit` (50) trained students a session loads **everyone** (outsiders still refused as
+      "Not in this class"); over it, only the class list (`recognize_face.students_to_load`). ⚠️ **Measured price of
+      the class-list mode** (17 students, each treated as an outsider in turn, 1,700 mirrored probes): **2.3%** of
+      outsider frames fall under 58.0 for some classmate; one look-alike pair (2087 -> 0920) **34%**; closest 56.2.
+      A live Jeff was shown as Chrizol the same evening (no dataset in that room; fixed by recapture) - live is
+      worse than these probes. Thesis limitation. Model files now load in parallel: **11.5 s -> 1.9 s** for 17;
+      a real 7-student class list in 0.66 s. Preload is skipped over the limit. Re-verified on the current
+      dataset: fresh single model vs per-student, **1,700/1,700 bit-exact**.
 - [x] 3. Recognition = min distance across those models (`vision/student_models.py`). **Differential test passed:
       1,700 probes (every dataset image mirrored + shifted), 1,700 bit-exact - same student, same distance.** Range
       48.5-75.8 (spans 58.0); 297 probes' nearest is another student, matched identically. Per-face predict:
