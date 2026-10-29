@@ -69,6 +69,7 @@ from security.paths import (
     validate_student_id,
     validate_student_name,
 )
+from services import capture_history
 from services.enrolment import DetectorClosed, EnrolmentSlot
 from services.training import training_job
 from vision.enrolment import (
@@ -670,6 +671,7 @@ def enrol_finish():
         dataset_store.promote(student_id, expected=MAX_IMAGES)
     except (dataset_store.DatasetStoreError, UnsafeStudentPathError, OSError):
         logger.exception("Could not promote the enrolment for %s", student_id)
+        capture_history.record(capture_session, capture_history.CAPTURE_FAILED)
         enrolment_slot.abandon()
         return enrolment_json(
             "The captured images could not be saved. Nothing was changed.",
@@ -763,6 +765,7 @@ def enrol_finish():
 
     except mysql.connector.Error:
         logger.exception("Enrolment images saved but the student row failed")
+        capture_history.record(capture_session, capture_history.CAPTURE_FAILED)
         enrolment_slot.release()
         return enrolment_json(
             "The images were saved but the student record could not be "
@@ -771,6 +774,7 @@ def enrol_finish():
         )
 
     enrolment_slot.release()
+    capture_history.record(capture_session, capture_history.COMPLETED)
 
     logger.info(
         "Enrolment complete for %s (%s) from %s; starting a retrain",
@@ -847,6 +851,7 @@ def enrol_cancel():
         _describe_uploads(capture_session),
     )
 
+    capture_history.record(capture_session, capture_history.CANCELLED)
     enrolment_slot.abandon()
 
     return jsonify({"success": True, "message": "Capture cancelled."})

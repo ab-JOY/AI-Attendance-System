@@ -75,3 +75,22 @@ def test_the_page_renders_from_the_real_tables(client, login_history_calls):
 
     assert response.status_code == 200
     assert "INS-001" in response.get_data(as_text=True)
+
+
+def test_a_recorded_capture_is_committed_and_read_back(capture_history_calls):
+    from types import SimpleNamespace
+
+    capture = SimpleNamespace(
+        student_id="INT-TEST-0001", student_name="Integration Test",
+        started_by="Ana Cruz", record={}, added_session=None, captured=100,
+    )
+
+    capture_history_calls.real(capture, "completed")
+
+    with db_cursor(dictionary=True) as cursor:
+        (row,) = activity_repo.recent_captures(cursor)
+
+    assert (row["student_id"], row["performed_by"], row["kind"],
+            row["outcome"], row["images"]) == (
+        "INT-TEST-0001", "Ana Cruz", "Recapture", "completed", 100,
+    )

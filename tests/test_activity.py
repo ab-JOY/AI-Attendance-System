@@ -157,6 +157,7 @@ def page_data(monkeypatch):
     monkeypatch.setattr(activity_module, "db_cursor", fake_cursor)
     monkeypatch.setattr(activity_module.activity_repo, "recent_logins", lambda _c: data["logins"])
     monkeypatch.setattr(activity_module.activity_repo, "recent_sessions", lambda _c: data["sessions"])
+    monkeypatch.setattr(activity_module.activity_repo, "recent_captures", lambda _c: [])
     return data
 
 

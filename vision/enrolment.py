@@ -460,6 +460,15 @@ class EnrolmentSession:
         """
         return self._hooks.now() - self._last_frame_at
 
+    @property
+    def running_seconds(self) -> float:
+        """
+        Seconds since Start. For display only (the Activity page).
+
+        Not `age_seconds`, which is idle time and what a capture is swept by.
+        """
+        return self._hooks.now() - self._started_at
+
     def progress(self) -> FrameVerdict:
         """The current state with no frame offered, for a page that just loaded."""
         with self._lock:

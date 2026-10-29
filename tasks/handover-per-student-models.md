@@ -81,3 +81,19 @@ grew 18.7 MB/student and `cv::FileStorage` cannot read past 0.57-1.84 GB, so ~31
   Mutations (drop the mtime check; ignore the fingerprint) fail 3 and 1 tests.
 - The live `students/` was rebuilt twice by the CLI this session (first run trained everyone to write the
   fingerprint). `serve.py` picks it up on the next Start or restart.
+
+## 7. 2026-10-28/29: the administrator's Activity page (`/activity`, admin only)
+
+User request: the admin should see what the system is doing. Three sections:
+- **Face captures** - the one capture running now, read live from `enrolment_slot` (who, whose, X of 100, how
+  long), and history in `capture_events` (migration 014): completed / cancelled / failed / abandoned, recorded
+  by `services/capture_history.py` at every end of a capture, including the idle sweep in `EnrolmentSlot.current()`.
+- **Attendance sessions** - existing `attendance_sessions`, with Present/Late/Absent counts. "Not ended" also
+  marks 3 sessions from 2026-09-01 the server never saw end.
+- **Sign-ins** - `login_events` (migration 013): web + app, success / failed / locked. No IP stored.
+
+⚠️ Both recorders **never raise** and use `db_cursor(commit=True)` - the first version lacked it and silently
+rolled back every row; `tests/integration/test_activity_history.py` fails if that returns. ⚠️ `tests/conftest.py`
+stubs both recorders for every test (`login_history_calls`, `capture_history_calls`, `.real` for the original):
+without that, route tests write fake rows into the real database whenever MySQL is up.
+Migrations 013 and 014 apply automatically on the next `serve.py` start. Tests 2,011 passed; integration 100.

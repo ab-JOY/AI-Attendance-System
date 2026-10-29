@@ -153,6 +153,26 @@ def login_history_calls(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def capture_history_calls(monkeypatch):
+    """
+    Face captures recorded during a test, as `(capture_session, outcome)`.
+
+    Autouse for the reason `login_history_calls` is: without it, the capture
+    route tests would write rows into the real `capture_events` table.
+    """
+    from services import capture_history
+
+    class Calls(list):
+        real = staticmethod(capture_history.record)
+
+    calls = Calls()
+    monkeypatch.setattr(
+        capture_history, "record", lambda *args: calls.append(args)
+    )
+    return calls
+
+
+@pytest.fixture(autouse=True)
 def no_real_exit_hooks(monkeypatch):
     """Collect exit hooks instead of registering them. Returns the list."""
     registered = []

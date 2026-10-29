@@ -31,6 +31,7 @@ from config.settings import settings
 from face_preprocessing import align_face
 from infra import dataset_store
 from infra.facemesh import make_enrolment_detector
+from services import capture_history
 from vision.enrolment import (
     DEFAULT_PLAN,
     MAX_IMAGES,
@@ -151,6 +152,7 @@ class EnrolmentSlot:
                 session_in_progress.student_id,
                 session_in_progress.age_seconds,
             )
+            capture_history.record(session_in_progress, capture_history.ABANDONED)
             self.abandon()
             return None
 

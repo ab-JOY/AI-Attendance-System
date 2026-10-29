@@ -1,7 +1,8 @@
 """
 Reads and writes behind the administrator's Activity page.
 
-Sign-ins live in `login_events` (migration 013). Sessions already lived in
+Sign-ins live in `login_events` (migration 013), face captures in
+`capture_events` (014). Sessions already lived in
 `attendance_sessions` (migration 003), with who started each one; this only
 reads them back with the counts the register holds for each.
 """
@@ -65,6 +66,45 @@ def recent_sessions(cursor, limit=50):
         GROUP BY s.id, s.started_by, s.started_at, s.ended_at,
                  sub.subject_code, sub.subject_name, sub.section
         ORDER BY s.started_at DESC, s.id DESC
+        LIMIT %s
+        """,
+        (limit,),
+    )
+    return cursor.fetchall()
+
+
+# Face captures (migration 014). Outcomes of a capture that has ended.
+COMPLETED = "completed"
+CANCELLED = "cancelled"
+CAPTURE_FAILED = "failed"
+ABANDONED = "abandoned"
+
+
+def record_capture(cursor, student_id, student_name, performed_by, kind, outcome, images):
+    cursor.execute(
+        """
+        INSERT INTO capture_events
+            (student_id, student_name, performed_by, kind, outcome, images)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        """,
+        (
+            str(student_id)[:100],
+            None if student_name is None else str(student_name)[:255],
+            None if performed_by is None else str(performed_by)[:100],
+            kind,
+            outcome,
+            images,
+        ),
+    )
+
+
+def recent_captures(cursor, limit=50):
+    cursor.execute(
+        """
+        SELECT student_id, student_name, performed_by, kind, outcome, images,
+               occurred_at
+        FROM capture_events
+        ORDER BY occurred_at DESC, id DESC
         LIMIT %s
         """,
         (limit,),

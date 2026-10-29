@@ -91,6 +91,7 @@ _SCRATCH_NAME = re.compile(r"^test_[A-Za-z0-9_]+$")
 DATA_TABLES = (
     "attendance_audit",
     "login_events",
+    "capture_events",
     "attendance",
     "enrolments",
     "attendance_sessions",

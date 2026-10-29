@@ -13,7 +13,66 @@
 {% block content %}
     <h1>Activity</h1>
 
-    <h2>Attendance sessions
+    {#
+        Face captures first: collecting biometric data is the most sensitive
+        thing this system does (migration 014). Refresh to update.
+    #}
+    <h2>Face captures
+        <span class="count-badge">{{ captures|length }}</span></h2>
+
+    {% if live_capture %}
+        <p role="status">
+            <span class="status status-late">Capturing now</span>
+            <strong>{{ live_capture.student_name }}</strong>
+            ({{ live_capture.student_id }}) by
+            <strong>{{ live_capture.performed_by or "Unknown" }}</strong>
+            - {{ live_capture.kind }},
+            {{ live_capture.captured }} of {{ live_capture.total }} images,
+            started {% if live_capture.minutes %}{{ live_capture.minutes }} min ago{% else %}less than a minute ago{% endif %}.
+        </p>
+    {% else %}
+        <p class="empty-state">No face capture is running right now.</p>
+    {% endif %}
+
+    <div class="subject-table-wrapper">
+    <table class="subject-table">
+        <caption>The latest {{ captures|length }} captures that ended, newest first.</caption>
+        <tr>
+            <th scope="col">When</th>
+            <th scope="col">Student</th>
+            <th scope="col">Captured by</th>
+            <th scope="col">Type</th>
+            <th scope="col">Images</th>
+            <th scope="col">Result</th>
+        </tr>
+
+        {% for capture in captures %}
+        <tr>
+            <td>{{ capture.occurred_at.strftime('%b %d, %Y %I:%M %p') }}</td>
+            <td>{{ capture.student_name or "" }} ({{ capture.student_id }})</td>
+            <td>{{ capture.performed_by or "Unknown" }}</td>
+            <td>{{ capture.kind }}</td>
+            <td>{{ capture.images }}</td>
+            <td>
+                {% if capture.outcome == "completed" %}
+                    <span class="status status-present">Completed</span>
+                {% elif capture.outcome == "cancelled" %}
+                    <span class="status status-late">Cancelled</span>
+                {% elif capture.outcome == "abandoned" %}
+                    <span class="status status-late">Abandoned</span>
+                {% else %}
+                    <span class="status status-absent">Failed</span>
+                {% endif %}
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="empty-state">No capture recorded yet.
+            Recording began with this page.</td></tr>
+        {% endfor %}
+    </table>
+    </div>
+
+    <h2 style="margin-top:30px;">Attendance sessions
         <span class="count-badge">{{ sessions|length }}</span></h2>
 
     <div class="subject-table-wrapper">
