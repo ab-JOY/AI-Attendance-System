@@ -97,9 +97,12 @@
             <td>
                 {% if row.ended_at %}
                     {{ row.ended_at.strftime('%I:%M %p') }}
+                {% elif row.id in running_session_ids %}
+                    <span class="status status-present">Running now</span>
                 {% else %}
-                    {# Running now, or the server never saw it end. #}
-                    <span class="status status-late">Not ended</span>
+                    {# Open in the database, but no class is running it: the
+                       server stopped mid-class and never saw it end. #}
+                    <span class="status status-absent">Never ended</span>
                 {% endif %}
             </td>
             <td>{{ row.present or 0 }}</td>

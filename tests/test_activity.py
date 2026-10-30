@@ -170,7 +170,36 @@ def test_the_admin_sees_sign_ins_and_sessions(client, page_data):
     assert "Wrong ID or password" in page
     assert "Phone app" in page and "23-1-1-0918" in page
     assert "Ana Cruz" in page and "new - New Subject" in page
-    assert "Not ended" in page
+
+
+def test_an_unended_session_no_class_is_running_never_ended(client, page_data, monkeypatch):
+    """The 2026-09-01 rows: open in the database, the server stopped mid-class."""
+    import recognize_face
+    from tests.fake_sessions import FakeRegistry
+
+    monkeypatch.setattr(recognize_face, "sessions", FakeRegistry())
+    sign_in_as(client, "admin")
+
+    page = client.get("/activity").get_data(as_text=True)
+
+    assert "Never ended" in page and "Running now" not in page
+
+
+def test_an_unended_session_that_is_running_says_running_now(client, page_data, monkeypatch):
+    from types import SimpleNamespace
+
+    import recognize_face
+    from tests.fake_sessions import FakeRegistry
+
+    running = SimpleNamespace(
+        is_running=True, subject=SimpleNamespace(subject_id=58, session_id=214)
+    )
+    monkeypatch.setattr(recognize_face, "sessions", FakeRegistry(running))
+    sign_in_as(client, "admin")
+
+    page = client.get("/activity").get_data(as_text=True)
+
+    assert "Running now" in page and "Never ended" not in page
 
 
 def test_a_typed_username_is_shown_as_text_not_run(client, page_data):

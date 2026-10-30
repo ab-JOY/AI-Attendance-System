@@ -223,6 +223,19 @@ def enrol_many(cursor, student_id, subject_ids):
     )
 
 
+def subject_ids_for(cursor, student_id):
+    """The offerings this student is in, as a set of subject ids."""
+    cursor.execute(
+        "SELECT subject_id FROM enrolments WHERE student_id = %s",
+        (student_id,)
+    )
+
+    return {
+        row["subject_id"] if isinstance(row, dict) else row[0]
+        for row in cursor.fetchall()
+    }
+
+
 def count_for_student(cursor, student_id):
     """How many offerings this student is in. Zero is the interesting answer."""
     cursor.execute(

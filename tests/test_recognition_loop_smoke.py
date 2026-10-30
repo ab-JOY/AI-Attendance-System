@@ -375,7 +375,8 @@ def driven_session(
             config=module.TRACK_CONFIG,
         )
 
-        patch.setattr(module, "session", session)
+        # Passed to the loop functions directly: there is no module
+        # session any more, one per running class (todo.md §19 step 9).
 
         # Started through the real `start()`, so the model load, the tracker
         # reset and the lifecycle guards are exercised rather than bypassed.
@@ -389,7 +390,7 @@ def driven_session(
         # `generate_frames()` would run the same function on a thread, racing
         # the script.
         overlays = []
-        module.run_recognition(token, overlays.append, reader.exhausted)
+        module.run_recognition(session, token, overlays.append, reader.exhausted)
 
         # Then the stream, for a few parts, then closed - which is what a
         # browser tab closing does to the generator. Deliberately *not*
@@ -397,7 +398,7 @@ def driven_session(
         # tracker is what most of the assertions below read. Closing the
         # stream instead is also the RE-10 case, so the camera state after this
         # line is evidence rather than incidental.
-        stream = module.generate_frames(token)
+        stream = module.generate_frames(session, token)
         parts = list(itertools.islice(stream, STREAM_PARTS))
         stream.close()
 
@@ -558,13 +559,14 @@ def interrupted_session(recognition_module, enrolled_student, interrupted_frames
             config=module.TRACK_CONFIG,
         )
 
-        patch.setattr(module, "session", session)
+        # Passed to the loop functions directly: there is no module
+        # session any more, one per running class (todo.md §19 step 9).
 
         if not session.start("SMOKE-TEST-SUBJECT"):
             pytest.skip("no LBPH model loaded - run train_model.py first")
 
         token = session.acquire_viewer()
-        module.run_recognition(token, lambda _overlays: None, reader.exhausted)
+        module.run_recognition(session, token, lambda _overlays: None, reader.exhausted)
 
         yield {
             "module": module,
@@ -718,7 +720,7 @@ def test_the_picture_does_not_wait_for_recognition(driven_session, monkeypatch):
     module = driven_session["module"]
     session = driven_session["session"]
 
-    def slow_recognition(token, publish, stopped):
+    def slow_recognition(_session, token, publish, stopped):
         while not stopped():
             time.sleep(0.5)
             publish([])
@@ -726,7 +728,7 @@ def test_the_picture_does_not_wait_for_recognition(driven_session, monkeypatch):
     monkeypatch.setattr(module, "run_recognition", slow_recognition)
 
     token = session.acquire_viewer()
-    stream = module.generate_frames(token)
+    stream = module.generate_frames(session, token)
 
     try:
         started = time.monotonic()
@@ -774,7 +776,8 @@ def test_recognition_stops_once_its_stream_loses_the_slot(
     try:
         deadline = time.monotonic() + 0.5
         module.run_recognition(
-            current - 1, lambda _overlays: None, lambda: time.monotonic() > deadline
+            session, current - 1, lambda _overlays: None,
+            lambda: time.monotonic() > deadline,
         )
     finally:
         session.release_viewer(current)
@@ -1121,7 +1124,8 @@ def browser_session(recognition_module, enrolled_student, scripted_frames):
             config=module.TRACK_CONFIG,
         )
 
-        patch.setattr(module, "session", session)
+        # Passed to the loop functions directly: there is no module
+        # session any more, one per running class (todo.md §19 step 9).
 
         if not session.start("SMOKE-TEST-SUBJECT", camera=BrowserCamera()):
             pytest.skip("no LBPH model loaded - run train_model.py first")
@@ -1147,7 +1151,7 @@ def browser_session(recognition_module, enrolled_student, scripted_frames):
         feeder.start()
 
         overlays = []
-        module.run_recognition(token, overlays.append, done.is_set)
+        module.run_recognition(session, token, overlays.append, done.is_set)
         feeder.join(timeout=5.0)
 
         yield {

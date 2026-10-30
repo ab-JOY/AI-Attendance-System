@@ -60,8 +60,18 @@ def sign_in(client):
 
 
 class FakeSession:
+    uses_browser_camera = False
+
     def __init__(self, subject):
         self.subject = subject
+
+    @property
+    def is_running(self):
+        return self.subject is not None
+
+    def stop(self):
+        # Faithful to RecognitionSession.stop(): the subject is cleared.
+        self.subject = None
 
 
 class Recorder:
@@ -138,7 +148,7 @@ def recorder(monkeypatch):
         lambda _cursor: log.open_sessions,
     )
 
-    def stop_camera():
+    def stop_camera(subject):
         log.camera_stopped = True
 
         # ⚠️ **The real one clears the subject** - RecognitionSession.stop()
@@ -146,8 +156,9 @@ def recorder(monkeypatch):
         # why FS-16 was invisible here for two sprints. Ending a session in the
         # browser POSTs /stop_camera *before* the form, so the route the tests
         # below drive was never reached in the state production reaches it in.
-        # Keep this faithful.
-        sessions_module.recognition_session.subject = None
+        # Keep this faithful. Since todo.md §19 step 9 it stops one subject's
+        # session and leaves any other class running.
+        sessions_module.recognition_sessions.stop(subject)
 
     monkeypatch.setattr(sessions_module, "stop_camera", stop_camera)
 
@@ -157,8 +168,10 @@ def recorder(monkeypatch):
 def running(monkeypatch, subject):
     import web.sessions as sessions_module
 
+    from tests.fake_sessions import FakeRegistry
+
     monkeypatch.setattr(
-        sessions_module, "recognition_session", FakeSession(subject)
+        sessions_module, "recognition_sessions", FakeRegistry(FakeSession(subject))
     )
 
 
@@ -414,3 +427,99 @@ def test_the_attendance_template_does_not_hand_out_the_stop_url():
     )
 
     assert "stop_camera_route" not in JINJA_COMMENT.sub("", markup)
+
+
+# ---------------------------------------------------------------------------
+# Several classes at once (todo.md §19 step 9)
+# ---------------------------------------------------------------------------
+
+SECOND = ActiveSubject(subject_id=2, session_id=8, subject_code="CS402")
+
+
+def two_classes(monkeypatch):
+    import web.sessions as sessions_module
+    from tests.fake_sessions import FakeRegistry
+
+    first, second = FakeSession(RUNNING), FakeSession(SECOND)
+    monkeypatch.setattr(
+        sessions_module, "recognition_sessions", FakeRegistry(first, second)
+    )
+    return first, second
+
+
+def operating(client, subject_id):
+    from web.sessions import OPERATING_SUBJECT_KEY
+
+    with client.session_transaction() as session:
+        session[OPERATING_SUBJECT_KEY] = subject_id
+
+
+def test_ending_one_class_leaves_the_other_running(client, monkeypatch, recorder):
+    first, second = two_classes(monkeypatch)
+    sign_in(client)
+    operating(client, SECOND.subject_id)
+
+    response = client.post("/end-attendance", data={"subject_id": str(SECOND.subject_id)})
+
+    assert response.status_code == 200
+    assert recorder.registers_read == [SECOND.subject_id]
+    assert recorder.absences == [("SEC-TEST-NOBODY", SECOND.subject_id, SECOND.session_id)]
+    assert recorder.closed_sessions == [SECOND.session_id]
+    assert second.subject is None, "the ended class is stopped"
+    assert first.subject == RUNNING, "another class was stopped by this End"
+
+
+def test_another_running_class_is_not_a_mismatch(client, monkeypatch, recorder):
+    """
+    R3 is about *this login's* class. While CS401 runs for someone else, this
+    login ending its own CS402 is not a mis-selection and must not be refused.
+    """
+    two_classes(monkeypatch)
+    sign_in(client)
+    operating(client, SECOND.subject_id)
+
+    response = client.post("/end-attendance", data={"subject_id": str(SECOND.subject_id)})
+
+    assert response.status_code == 200
+
+
+def test_r3_still_refuses_a_subject_with_no_session_while_this_logins_class_runs(
+    client, monkeypatch, recorder
+):
+    two_classes(monkeypatch)
+    sign_in(client)
+    operating(client, SECOND.subject_id)
+
+    response = client.post("/end-attendance", data={"subject_id": "99"})
+
+    assert response.status_code == 409
+    assert "CS402" in response.get_data(as_text=True)
+    assert recorder.absences == [] and recorder.closed_sessions == []
+
+
+def test_a_running_class_open_in_the_database_does_not_block_another_end(
+    client, monkeypatch, recorder
+):
+    """
+    FS-16's refusal names a *forgotten* open session. CS401 is open in the
+    database because it is running right now - another operator's live class -
+    and says nothing about what this form meant.
+    """
+    import web.sessions as sessions_module
+    from tests.fake_sessions import FakeRegistry
+
+    monkeypatch.setattr(
+        sessions_module, "recognition_sessions", FakeRegistry(FakeSession(RUNNING))
+    )
+    recorder.open_sessions = [{"id": RUNNING.session_id, "subject_id": RUNNING.subject_id}]
+    sign_in(client)
+
+    # This login is running nothing of its own (an admin's page would otherwise
+    # default to the only running class, which is a different rule's test).
+    monkeypatch.setattr(sessions_module, "_running_subject_id", lambda: None)
+
+    response = client.post("/end-attendance", data={"subject_id": str(OTHER_SUBJECT_ID)})
+
+    assert response.status_code == 200
+    assert recorder.closed_sessions == []
+    assert recorder.registers_read == [OTHER_SUBJECT_ID]

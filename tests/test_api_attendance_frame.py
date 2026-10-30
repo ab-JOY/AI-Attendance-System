@@ -60,7 +60,7 @@ class FakePhones:
             mark_recognized(student_id, "Present")
         return self.result
 
-    def discard_all(self):
+    def discard(self, _student_id):
         self.discarded += 1
 
 
@@ -75,7 +75,8 @@ def flask_app():
 @pytest.fixture
 def session(monkeypatch):
     fake = FakeSession()
-    monkeypatch.setattr(recognize_face, "session", fake)
+    # The running class this student's phone belongs to (todo.md §19).
+    monkeypatch.setattr(api, "_session_for_student", lambda _student_id: fake)
     return fake
 
 
@@ -186,7 +187,9 @@ def test_a_pipeline_fault_is_a_500_not_a_verdict(flask_app, session, phones):
 def test_no_running_session_is_refused_and_releases_phones(
     flask_app, monkeypatch, phones
 ):
-    monkeypatch.setattr(recognize_face, "session", FakeSession(running=False))
+    # The running class this student's phone belongs to (todo.md §19).
+    ended = FakeSession(running=False)
+    monkeypatch.setattr(api, "_session_for_student", lambda _student_id: ended)
 
     response = upload(flask_app)
 
@@ -198,9 +201,9 @@ def test_no_running_session_is_refused_and_releases_phones(
 def test_an_already_recorded_student_is_done_without_recognition(
     flask_app, monkeypatch, phones
 ):
-    monkeypatch.setattr(
-        recognize_face, "session", FakeSession(recognized={STUDENT_ID: "Present"})
-    )
+    # The running class this student's phone belongs to (todo.md §19).
+    recorded = FakeSession(recognized={STUDENT_ID: "Present"})
+    monkeypatch.setattr(api, "_session_for_student", lambda _student_id: recorded)
 
     body = upload(flask_app).get_json()
 
@@ -282,3 +285,65 @@ def test_one_unusable_frame_refuses_the_request_before_any_is_judged(
 
     assert response.status_code == 400
     assert phones.frames == []
+
+
+# ---------------------------------------------------------------------------
+# Which class a phone belongs to, with several running (todo.md §19 step 9)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def classes_running(monkeypatch):
+    import contextlib
+
+    from tests.fake_sessions import FakeRegistry
+
+    def running_class(subject_id, session_id):
+        return SimpleNamespace(
+            is_running=True,
+            subject=SimpleNamespace(subject_id=subject_id, session_id=session_id),
+        )
+
+    registry = FakeRegistry(running_class(1, 10), running_class(2, 11), running_class(3, 12))
+    monkeypatch.setattr(recognize_face, "sessions", registry)
+
+    enrolled = {"subjects": set()}
+
+    @contextlib.contextmanager
+    def fake_cursor(*_args, **_kwargs):
+        yield object()
+
+    monkeypatch.setattr(api, "db_cursor", fake_cursor)
+    monkeypatch.setattr(
+        api.enrolments_repo, "subject_ids_for",
+        lambda _cursor, _student_id: enrolled["subjects"],
+    )
+    return enrolled
+
+
+def test_a_phone_joins_the_running_class_its_student_is_in(classes_running):
+    classes_running["subjects"] = {2, 7}
+
+    assert api._session_for_student(STUDENT_ID).subject.subject_id == 2
+
+
+def test_a_phone_never_joins_a_class_its_student_is_not_in(classes_running):
+    """Otherwise a student could be recorded in someone else's class."""
+    classes_running["subjects"] = {7, 8}
+
+    assert api._session_for_student(STUDENT_ID) is None
+
+
+def test_two_of_a_students_classes_running_picks_the_newest(classes_running):
+    classes_running["subjects"] = {1, 3}
+
+    assert api._session_for_student(STUDENT_ID).subject.session_id == 12
+
+
+def test_nothing_running_asks_no_database(monkeypatch):
+    from tests.fake_sessions import FakeRegistry
+
+    monkeypatch.setattr(recognize_face, "sessions", FakeRegistry())
+    monkeypatch.setattr(api, "db_cursor", lambda *a, **k: pytest.fail("queried"))
+
+    assert api._session_for_student(STUDENT_ID) is None

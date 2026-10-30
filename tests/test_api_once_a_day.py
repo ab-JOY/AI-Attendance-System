@@ -81,7 +81,8 @@ def flask_app():
 @pytest.fixture
 def session(monkeypatch):
     fake = FakeSession()
-    monkeypatch.setattr(recognize_face, "session", fake)
+    # The running class this student's phone belongs to (todo.md §19).
+    monkeypatch.setattr(api, "_session_for_student", lambda _student_id: fake)
     return fake
 
 
@@ -115,7 +116,7 @@ class Phones(list):
             mark_recognized(student_id, "Present")
         return self.result
 
-    def discard_all(self):
+    def discard(self, _student_id):
         pass
 
 
@@ -175,7 +176,8 @@ def test_the_sessions_own_list_is_enough_without_asking_the_register(
     flask_app, monkeypatch, register, saves
 ):
     fake = FakeSession(recognized={STUDENT_ID: "Present"})
-    monkeypatch.setattr(recognize_face, "session", fake)
+    # The running class this student's phone belongs to (todo.md §19).
+    monkeypatch.setattr(api, "_session_for_student", lambda _student_id: fake)
 
     body = upload(flask_app).get_json()
 

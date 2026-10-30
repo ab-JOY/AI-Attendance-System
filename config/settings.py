@@ -204,6 +204,15 @@ class Settings(BaseSettings):
     # value from speed (~5.6 ms per student per face, 12 CPUs), not a tuned one.
     recognition_load_all_limit: int = 50
 
+    # How many classes may take attendance at once (todo.md §19 step 9). Every
+    # face in every running class is recognised on this machine's CPU, so past
+    # this a Start is refused rather than every running class slowing down.
+    # Measured 2026-10-30 on the 12-core server laptop, one face per class:
+    # 5 classes verified in 6.1 s each (as fast as one) at 74% CPU, peaking at
+    # 94% - the ceiling there. Crowded frames cost more; on other hardware,
+    # re-measure (todo.md §19 9e) before raising it.
+    max_concurrent_sessions: int = 5
+
     # -----------------------------------------------------------------
     # Logging
     # -----------------------------------------------------------------

@@ -465,7 +465,7 @@ def test_a_successful_retrain_preloads_the_model_and_a_failed_one_does_not(
     )
     preloads = []
     monkeypatch.setattr(
-        recognize_face.session, "preload_model", lambda: preloads.append(1)
+        recognize_face, "preload_model", lambda: preloads.append(1)
     )
 
     assert training_module.train_and_preload() == (trained, "done")

@@ -31,7 +31,9 @@ from infra.db import db_cursor
 from infra.uploads import UploadRejected, decode_frame
 from recognize_face import (
     ActiveSubject,
+    ServerCameraBusy,
     SessionBusy,
+    SessionLimitReached,
     SessionNotRunning,
     latest_upload_overlays,
     open_video_stream,
@@ -40,11 +42,10 @@ from recognize_face import (
     stop_camera,
 )
 
-# Aliased away from `session`, which is Flask's request-scoped session in this
-# module. Two different things called `session` in one file is the
-# import-shadowing trap lessons.md L5 records, and here it would be a live
-# collision rather than a latent one.
-from recognize_face import session as recognition_session
+# One recognition session per running class (todo.md §19 step 9). Named away
+# from `session`, which is Flask's request-scoped session in this module - the
+# import-shadowing trap lessons.md L5 records.
+from recognize_face import sessions as recognition_sessions
 from repositories import attendance as attendance_repo
 from repositories import enrolments as enrolments_repo
 from repositories import subjects as subjects_repo
@@ -73,6 +74,11 @@ CAMERA_SOURCES = ("server", "browser")
 # `_may_use_subject()` - a database query - for every one of ~8 frames a
 # second, and it means only the browser that started a session can feed it.
 BROWSER_CAMERA_KEY = "browser_camera_session_id"
+
+# Flask-session key holding the subject_id of the session this login started
+# (todo.md §19 step 9). With several classes running, "the running session"
+# no longer means anything on its own; for this page it means this one.
+OPERATING_SUBJECT_KEY = "operating_subject_id"
 
 
 # The three statuses this system produces. Deliberately not free text: the
@@ -277,16 +283,55 @@ def _class_list_action(subject_id):
 
 def _running_subject_id():
     """
-    The subject of the session running right now, or None.
+    The subject of the session this login is running, or None.
 
-    What the End form's dropdown is locked to (R3/FS-16). The register a
-    session writes is decided by the *session*, never by that control, so
-    while one is running there is exactly one answer the control may carry and
-    the operator should not be invited to pick a different one.
+    What the End form's dropdown is locked to (R3/FS-16). With several classes
+    running (todo.md §19 step 9) that is *this login's* class: the one it
+    started; failing that - the cookie lost by signing in again, or an
+    administrator who started nothing - the only running class this login may
+    use. With one class running that is exactly the old behaviour; with
+    several and no way to tell, None, and the page asks rather than guesses.
     """
-    active = recognition_session.subject
+    usable = [
+        running.subject.subject_id
+        for running in recognition_sessions.running()
+        if running.subject is not None
+        and _may_use_subject(running.subject.subject_id)
+    ]
 
-    return getattr(active, "subject_id", None)
+    operating = session.get(OPERATING_SUBJECT_KEY)
+
+    if operating in usable:
+        return operating
+
+    if len(usable) == 1:
+        return usable[0]
+
+    return None
+
+
+def _session_for_request():
+    """
+    The running session a /attendance/live or /video_feed request means.
+
+    `?subject_id=` names it - checked against `_may_use_subject()`, so an
+    instructor cannot watch another instructor's class. Without it, this
+    login's own running session, which is what the attendance page wants.
+    """
+    requested = request.args.get('subject_id', '').strip()
+
+    if requested.isdigit():
+        subject_id = int(requested)
+
+        if not _may_use_subject(subject_id):
+            return None
+    else:
+        subject_id = _running_subject_id()
+
+    if subject_id is None:
+        return None
+
+    return recognition_sessions.get(subject_id)
 
 
 @sessions_bp.route('/attendance')
@@ -445,6 +490,24 @@ def start_attendance():
         else:
             started = start_camera(active)
 
+    except (SessionLimitReached, ServerCameraBusy) as refusal:
+        # Several classes run at once now (todo.md §19 step 9); these are the
+        # two things that still refuse a Start. Not errors: said as they are.
+        attendance_service.close_session(session_row_id)
+        logger.warning(
+            "Refused to start attendance for %s: %s", active.subject_code, refusal
+        )
+
+        return jsonify({
+            "success": False,
+            "message": (
+                f"{refusal} End one first, or try again when a class finishes."
+                if isinstance(refusal, SessionLimitReached)
+                else f"{refusal} Choose \"This device's camera\" to use the "
+                "camera of the computer in front of you."
+            ),
+        })
+
     except Exception:
         logger.exception("Camera error while starting attendance")
         attendance_service.close_session(session_row_id)
@@ -456,20 +519,33 @@ def start_attendance():
         })
 
     if not started:
-        # Refused because a session is already running. The row just opened
-        # would otherwise sit forever with no end.
+        # Refused because *this subject's* session is already running (other
+        # classes may run beside it). The row just opened would otherwise sit
+        # forever with no end.
         attendance_service.close_session(session_row_id)
 
         return jsonify({
             "success": False,
-            "message": "An attendance session is already running."
+            "message": "This subject's attendance session is already running."
+        })
+
+    running = recognition_sessions.get(subject_id)
+
+    if running is None:
+        # Started and already gone - its camera failed at once. Nothing to
+        # keep the row open for.
+        attendance_service.close_session(session_row_id)
+
+        return jsonify({
+            "success": False,
+            "message": "The camera could not be started."
         })
 
     # `start()` answers True without starting anything when this subject is
     # already running - with whichever camera it was started on. Asking for
     # the other one must not look like success: a browser told "running"
     # would upload into a session that refuses its frames.
-    if (camera_source == "browser") != recognition_session.uses_browser_camera:
+    if (camera_source == "browser") != running.uses_browser_camera:
         attendance_service.close_session(session_row_id)
 
         return jsonify({
@@ -482,11 +558,13 @@ def start_attendance():
             )
         })
 
+    session[OPERATING_SUBJECT_KEY] = subject_id
+
     if camera_source == "browser":
         session[BROWSER_CAMERA_KEY] = session_row_id
         # Recognition for uploads runs on the server's own thread; the page
         # does not open /video_feed in this mode (see recognize_face.py).
-        start_upload_recognition()
+        start_upload_recognition(running)
     else:
         session.pop(BROWSER_CAMERA_KEY, None)
 
@@ -515,13 +593,18 @@ def attendance_frame():
     409 when there is nothing to feed: no session, a classroom-camera session,
     or a session this login did not start. The page stops uploading on a 409.
     """
-    active = recognition_session.subject
+    # The session this browser started (todo.md §19 step 9: there can be
+    # several). Matched on the attendance_sessions row, which is unique per
+    # Start - so only the browser that started a class can feed it.
+    feeding = session.get(BROWSER_CAMERA_KEY)
+    running = (
+        None if feeding is None else recognition_sessions.find(
+            lambda candidate: candidate.uses_browser_camera
+            and getattr(candidate.subject, "session_id", None) == feeding
+        )
+    )
 
-    if (
-        active is None
-        or not recognition_session.uses_browser_camera
-        or session.get(BROWSER_CAMERA_KEY) != active.session_id
-    ):
+    if running is None:
         return jsonify({
             "success": False,
             "message": "No session is waiting for this device's camera.",
@@ -537,14 +620,14 @@ def attendance_frame():
         # Safe to relay: infra/uploads.py's messages describe the picture.
         return jsonify({"success": False, "message": str(error)}), 400
 
-    if not recognition_session.submit_frame(frame):
+    if not running.submit_frame(frame):
         # The session ended between the check above and now.
         return jsonify({
             "success": False,
             "message": "The session has ended.",
         }), 409
 
-    return jsonify({"success": True, "faces": latest_upload_overlays()})
+    return jsonify({"success": True, "faces": latest_upload_overlays(running)})
 
 
 def _may_correct(record):
@@ -577,8 +660,15 @@ def stop_camera_route():
 
     What remains is an operator escape hatch: free the device without writing
     an absent register.
+
+    ⚠️ **This login's class only** (todo.md §19 step 9). With one session it
+    freed "the" camera; with several, stopping them all would end other
+    instructors' classes from one button.
     """
-    stop_camera()
+    subject_id = _running_subject_id()
+
+    if subject_id is not None:
+        stop_camera(subject_id)
 
     return jsonify({"success": True})
 
@@ -635,9 +725,13 @@ def end_attendance():
     `attendance_sessions`: a row written before the camera opened, which
     survives a stop, a restart and a different operator's browser. A client
     cannot talk the route out of it by choosing what to POST first.
-    """
-    active = recognition_session.subject
 
+    **Several classes at once (todo.md §19 step 9).** The session ended is the
+    one *for the submitted subject*, so ending one class never touches
+    another. The R3 refusal is now about this login: while its own class is
+    running, a form naming a subject with no running session is the
+    mis-selection R3 is, and is refused exactly as before.
+    """
     submitted = request.form.get('subject_id', '').strip()
 
     if not submitted.isdigit():
@@ -657,30 +751,43 @@ def end_attendance():
 
         return error_page(403, NOT_YOUR_SUBJECT)
 
-    if active is not None and submitted_id != active.subject_id:
+    target = recognition_sessions.get(submitted_id)
+    active = target.subject if target is not None else None
+
+    operating = _running_subject_id()
+    own = (
+        recognition_sessions.get(operating)
+        if active is None and operating is not None
+        and operating != submitted_id
+        else None
+    )
+
+    if own is not None:
         # ⚠️ Refused *before* stop_camera() and before the transaction. Nothing
         # is written and the session is still running, so the operator can
         # correct the dropdown and end the right class. Closing the session on
         # a refusal would make the mistake unrecoverable - the register the
         # session was for could then never be written at all.
+        own_code = own.subject.subject_code
+
         logger.warning(
             "Refused to end attendance: %s is running, but subject_id %s was "
             "submitted",
-            active.subject_code, submitted_id,
+            own_code, submitted_id,
         )
 
         return error_page(
             409,
-            f"The running session is for {active.subject_code}. The form "
+            f"The running session is for {own_code}. The form "
             "asked to end a different subject, so nothing was recorded and "
             "the session is still running. Choose "
-            f"{active.subject_code} and try again.",
+            f"{own_code} and try again.",
         )
 
     subject_id = active.subject_id if active is not None else submitted_id
     session_row_id = active.session_id if active is not None else None
 
-    stop_camera()
+    stop_camera(subject_id)
 
     try:
         # ⚠️ One block, so the absent register and the session's end time
@@ -692,7 +799,18 @@ def end_attendance():
                 # the camera before submitting (FS-16). The form is *not* the
                 # only source left: `attendance_sessions` still holds the row
                 # written before the camera opened.
-                open_rows = attendance_repo.open_sessions_today(cursor)
+                # Rows of classes running *now* belong to other operators'
+                # live sessions (todo.md §19 step 9) and say nothing about
+                # this form. Only a forgotten one - open in the database, gone
+                # from memory - is evidence of what this End was meant for.
+                running_ids = {
+                    running.subject.subject_id
+                    for running in recognition_sessions.running()
+                }
+                open_rows = [
+                    row for row in attendance_repo.open_sessions_today(cursor)
+                    if row['subject_id'] not in running_ids
+                ]
 
                 mine = next(
                     (
@@ -711,7 +829,14 @@ def end_attendance():
                     subject_id = submitted_id
                     session_row_id = mine['id']
 
-                elif open_rows:
+                elif open_rows and any(
+                    _may_use_subject(row['subject_id']) for row in open_rows
+                ):
+                    open_rows = [
+                        row for row in open_rows
+                        if _may_use_subject(row['subject_id'])
+                    ]
+
                     # Something is open and it is not what the form named.
                     # Refusing is the whole point of FS-16: nothing is written,
                     # and the operator is told which class is actually waiting
@@ -833,7 +958,9 @@ def list_cameras():
     from a live attendance session. Refusing with a reason beats a scan that
     quietly returns the wrong answer.
     """
-    if recognition_session.is_running:
+    # Only a session on the server's own camera holds it; classes running on
+    # their browsers' cameras do not (todo.md §19 step 9).
+    if recognition_sessions.server_camera_in_use():
         return jsonify({
             "success": False,
             "cameras": [],
@@ -895,7 +1022,9 @@ def select_camera():
 
     index = int(raw_index)
 
-    if recognition_session.is_running:
+    # Only a session on the server's own camera holds it; classes running on
+    # their browsers' cameras do not (todo.md §19 step 9).
+    if recognition_sessions.server_camera_in_use():
         return jsonify({
             "success": False,
             "message": (
@@ -985,25 +1114,27 @@ def attendance_live():
     register: the question being asked is "is the camera doing anything?", and
     a row written by an earlier session today would answer it wrongly.
     """
-    active = recognition_session.subject
+    # This login's class, or the one `?subject_id=` names (todo.md §19 step 9).
+    running = _session_for_request()
+    active = running.subject if running is not None else None
 
-    if not recognition_session.is_running or active is None:
+    if running is None or active is None:
         return jsonify({"running": False, "students": []})
 
     # ⚠️ `recognized_ids` is a method, not a property, and it is called here
-    # deliberately: `sorted(recognition_session.recognized_ids)` reads as
+    # deliberately: `sorted(running.recognized_ids)` reads as
     # working code, raises `TypeError: 'method' object is not iterable`, and is
     # unreachable until a session is actually running - which is the state no
     # test constructed. It answered 500 on every poll, in every session, from
     # the day this route was written. tests/test_attendance_live.py now stubs a
     # running session so the state is covered.
-    student_ids = sorted(recognition_session.recognized_ids())
+    student_ids = sorted(running.recognized_ids())
 
     # "browser" only for the login that started it: that is the page which
     # should resume uploading after a reload. Anyone else is watching.
     camera = (
         "browser"
-        if recognition_session.uses_browser_camera
+        if running.uses_browser_camera
         and session.get(BROWSER_CAMERA_KEY) == active.session_id
         else "server"
     )
@@ -1057,9 +1188,14 @@ def attendance_live():
 @sessions_bp.route('/video_feed')
 @authenticated
 def video_feed():
+    # This login's class, or the one `?subject_id=` names (todo.md §19 step 9).
+    running = _session_for_request()
 
     try:
-        stream = open_video_stream()
+        if running is None:
+            raise SessionNotRunning()
+
+        stream = open_video_stream(running)
 
     except SessionBusy:
         logger.warning("Refused a second video stream: one is already open")

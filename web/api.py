@@ -43,6 +43,7 @@ from config.settings import settings as app_config
 from infra.db import db_cursor
 from infra.uploads import UploadRejected, decode_letterboxed
 from repositories import attendance as attendance_repo
+from repositories import enrolments as enrolments_repo
 from repositories import students as students_repo
 from repositories import subjects as subjects_repo
 from security.access import public
@@ -290,19 +291,24 @@ def api_attendance_history():
 @student_required
 def api_attendance_live():
     """Live session status — who has been recognized so far."""
-    # Import here to avoid the heavy recognize_face import at module scope
-    from recognize_face import session as recognition_session
+    student_id = request.jwt_user.get("user_id")
 
-    active = recognition_session.subject
+    # This student's class, among however many are running (todo.md §19).
+    try:
+        running = _session_for_student(student_id)
+    except mysql.connector.Error:
+        logger.exception("Could not read the classes of %s", student_id)
+        return jsonify({"success": False, "message": "Attendance could not be checked."}), 503
 
-    if not recognition_session.is_running or active is None:
-        # Every app on this screen polls here, so it is where phones left
-        # from a session that has ended get their detectors released.
-        _discard_phones()
+    active = running.subject if running is not None else None
+
+    if active is None:
+        # Every app on this screen polls here, so it is where a phone left
+        # from a session that has ended gets its detector released.
+        _discard_phone(student_id)
         return jsonify({"success": True, "running": False, "students": []})
 
-    student_id = request.jwt_user.get("user_id")
-    student_ids = sorted(recognition_session.recognized_ids())
+    student_ids = sorted(running.recognized_ids())
 
     try:
         with db_cursor(dictionary=True) as cursor:
@@ -364,20 +370,30 @@ def api_attendance_frame():
     Refused before any face is judged, in this order: no session; already
     recorded today; no classroom-code pass.
     """
-    from recognize_face import session as recognition_session
     from services.phone_verification import PhonesBusy
 
-    snapshot = recognition_session.snapshot()
+    student_id = request.jwt_user.get("user_id")
+
+    # This student's class, among however many are running (todo.md §19).
+    try:
+        running = _session_for_student(student_id)
+    except mysql.connector.Error:
+        logger.exception("Could not read the classes of %s", student_id)
+        return jsonify({
+            "success": False,
+            "message": "Attendance could not be checked. Please try again.",
+        }), 503
+
+    snapshot = running.snapshot() if running is not None else None
 
     if (
-        not snapshot.running
+        snapshot is None
+        or not snapshot.running
         or snapshot.subject is None
         or snapshot.recognizer is None
     ):
-        _discard_phones()
+        _discard_phone(student_id)
         return jsonify({"success": False, "message": "No active attendance session."}), 409
-
-    student_id = request.jwt_user.get("user_id")
 
     # ⚠️ **Once a day, per class, checked before any face is judged.** A
     # student who already has Present or Late for this subject today is
@@ -461,7 +477,7 @@ def api_attendance_frame():
                 student_id,
                 snapshot,
                 frame,
-                recognition_session.mark_recognized,
+                running.mark_recognized,
                 first_of_request=index == 0,
                 capture_ms=capture_ms,
             )
@@ -531,7 +547,41 @@ def _phone_verifications():
         return _phones
 
 
-def _discard_phones():
-    """No session is running: release every phone's detector, if any exist."""
+def _discard_phone(student_id):
+    """No class of this student's is running: release their phone's detector."""
     if _phones is not None:
-        _phones.discard_all()
+        _phones.discard(student_id)
+
+
+def _session_for_student(student_id):
+    """
+    The running session for one of this student's classes, or None.
+
+    With several classes at once (todo.md §19 step 9) "the running session"
+    means nothing on its own; a phone belongs to the class its student is in.
+    If two of their classes are somehow running, the most recently started.
+    Raises mysql.connector.Error; both callers fail closed on it.
+
+    recognize_face is imported here, not at module scope: importing it costs
+    seconds and loads MediaPipe, which nothing else in this module needs.
+    """
+    from recognize_face import sessions as recognition_sessions
+
+    running = recognition_sessions.running()
+
+    if not running:
+        return None
+
+    with db_cursor() as cursor:
+        enrolled = enrolments_repo.subject_ids_for(cursor, student_id)
+
+    mine = [
+        candidate for candidate in running
+        if candidate.subject is not None
+        and candidate.subject.subject_id in enrolled
+    ]
+
+    if not mine:
+        return None
+
+    return max(mine, key=lambda candidate: candidate.subject.session_id)

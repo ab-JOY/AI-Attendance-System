@@ -51,6 +51,8 @@ from datetime import date
 import mysql.connector
 import pytest
 
+from tests.fake_sessions import FakeRegistry
+
 import web.sessions as sessions_module
 from recognize_face import ActiveSubject
 from repositories import enrolments as enrolments_repo
@@ -83,10 +85,16 @@ def sign_in(client, role="admin"):
 
 
 class FakeSession:
-    """Stands in for the recognition session's `subject` property."""
+    """Stands in for one class's recognition session."""
+
+    uses_browser_camera = False
 
     def __init__(self, subject):
         self.subject = subject
+
+    @property
+    def is_running(self):
+        return self.subject is not None
 
 
 @pytest.fixture
@@ -111,8 +119,14 @@ def started(monkeypatch):
     def close_session(session_row_id):
         calls["closed_sessions"].append(session_row_id)
 
-    def start_camera(_active):
+    # The route asks the registry for the session it just started (todo.md
+    # §19 step 9), so a started class has to be in it, as the real one is.
+    registry = FakeRegistry()
+    monkeypatch.setattr(sessions_module, "recognition_sessions", registry)
+
+    def start_camera(active):
         calls["cameras_started"] += 1
+        registry.sessions.append(FakeSession(active))
         return True
 
     monkeypatch.setattr(sessions_module, "db_cursor", fake_cursor)
@@ -297,12 +311,12 @@ def test_the_dropdown_marks_a_subject_with_no_class_list(client, monkeypatch):
 def running(monkeypatch, subject_id):
     monkeypatch.setattr(
         sessions_module,
-        "recognition_session",
-        FakeSession(
+        "recognition_sessions",
+        FakeRegistry(FakeSession(
             ActiveSubject(
                 subject_id=subject_id, session_id=7, subject_code=SUBJECT_CODE
             )
-        ),
+        )),
     )
 
 

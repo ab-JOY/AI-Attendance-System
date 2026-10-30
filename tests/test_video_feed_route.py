@@ -53,6 +53,21 @@ def test_video_feed_still_requires_authentication(client):
     assert "multipart" not in response.headers.get("Content-Type", "")
 
 
+def a_running_class(monkeypatch):
+    """One class running, which is what /video_feed streams (todo.md §19)."""
+    from types import SimpleNamespace
+
+    import web.sessions as sessions_module
+    from tests.fake_sessions import FakeRegistry
+
+    running = SimpleNamespace(
+        is_running=True, uses_browser_camera=False,
+        subject=SimpleNamespace(subject_id=1, session_id=1, subject_code="CS401"),
+    )
+    monkeypatch.setattr(sessions_module, "recognition_sessions", FakeRegistry(running))
+    return running
+
+
 def test_a_second_stream_is_refused_with_409(client, flask_app, monkeypatch):
     """
     The RE-2 symptom, at the layer the operator meets it.
@@ -63,7 +78,9 @@ def test_a_second_stream_is_refused_with_409(client, flask_app, monkeypatch):
     """
     import web.sessions as sessions_module
 
-    def already_open():
+    a_running_class(monkeypatch)
+
+    def already_open(_session):
         raise SessionBusy("the camera stream is already open in another window")
 
     monkeypatch.setattr(sessions_module, "open_video_stream", already_open)
@@ -83,7 +100,7 @@ def test_streaming_without_a_session_is_refused_with_409(client, monkeypatch):
     """
     import web.sessions as sessions_module
 
-    def not_running():
+    def not_running(_session):
         raise SessionNotRunning("no attendance session is running")
 
     monkeypatch.setattr(sessions_module, "open_video_stream", not_running)
@@ -94,6 +111,22 @@ def test_streaming_without_a_session_is_refused_with_409(client, monkeypatch):
     assert response.status_code == 409
 
 
+def test_no_class_running_at_all_is_refused_before_any_stream(client, monkeypatch):
+    """With nothing in the registry the route refuses without opening a stream."""
+    import web.sessions as sessions_module
+    from tests.fake_sessions import FakeRegistry
+
+    monkeypatch.setattr(sessions_module, "recognition_sessions", FakeRegistry())
+    monkeypatch.setattr(
+        sessions_module, "open_video_stream",
+        lambda _session: pytest.fail("opened a stream with no class running"),
+    )
+
+    sign_in(client)
+
+    assert client.get("/video_feed").status_code == 409
+
+
 def test_a_refusal_is_a_readable_page_not_a_raw_error(client, monkeypatch):
     """
     US-1 and SE-10: failures render the error template, and never leak the
@@ -101,10 +134,11 @@ def test_a_refusal_is_a_readable_page_not_a_raw_error(client, monkeypatch):
     """
     import web.sessions as sessions_module
 
+    a_running_class(monkeypatch)
     monkeypatch.setattr(
         sessions_module,
         "open_video_stream",
-        lambda: (_ for _ in ()).throw(SessionBusy("internal detail")),
+        lambda _session: (_ for _ in ()).throw(SessionBusy("internal detail")),
     )
 
     sign_in(client)
@@ -119,7 +153,9 @@ def test_a_granted_stream_is_served_as_mjpeg(client, monkeypatch):
     """The success path still produces the multipart response an <img> needs."""
     import web.sessions as sessions_module
 
-    def one_frame():
+    a_running_class(monkeypatch)
+
+    def one_frame(_session):
         yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n\xff\xd8\xff\xd9\r\n"
 
     monkeypatch.setattr(sessions_module, "open_video_stream", one_frame)

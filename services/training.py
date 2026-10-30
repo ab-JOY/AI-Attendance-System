@@ -32,9 +32,10 @@ def train_and_preload(report=None):
 
         # Deferred: importing recognize_face costs seconds and loads
         # MediaPipe, which nothing else in this module needs.
-        from recognize_face import session
+        # Into the cache every class's session loads from (todo.md §19).
+        from recognize_face import preload_model
 
-        session.preload_model()
+        preload_model()
 
     return ok, message
 

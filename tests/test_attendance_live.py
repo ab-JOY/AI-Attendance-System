@@ -81,7 +81,9 @@ class FakeSession:
 def stub_session(monkeypatch, session):
     import web.sessions as sessions_module
 
-    monkeypatch.setattr(sessions_module, "recognition_session", session)
+    from tests.fake_sessions import FakeRegistry
+
+    monkeypatch.setattr(sessions_module, "recognition_sessions", FakeRegistry(session))
 
 
 def stub_register(monkeypatch, rows=None, error=None):
@@ -255,7 +257,9 @@ def test_a_fault_answers_json_rather_than_an_html_page(client, monkeypatch):
         def recognized_ids(self):
             raise RuntimeError("something unexpected")
 
-    monkeypatch.setattr(sessions_module, "recognition_session", Exploding())
+    from tests.fake_sessions import FakeRegistry
+
+    monkeypatch.setattr(sessions_module, "recognition_sessions", FakeRegistry(Exploding()))
 
     sign_in(client)
     response = client.get("/attendance/live")

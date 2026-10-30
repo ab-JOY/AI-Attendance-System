@@ -97,3 +97,25 @@ rolled back every row; `tests/integration/test_activity_history.py` fails if tha
 stubs both recorders for every test (`login_history_calls`, `capture_history_calls`, `.real` for the original):
 without that, route tests write fake rows into the real database whenever MySQL is up.
 Migrations 013 and 014 apply automatically on the next `serve.py` start. Tests 2,011 passed; integration 100.
+
+## 8. 2026-10-30: several classes at once (§19 step 9)
+
+`recognize_face.session` is gone. `recognize_face.sessions` is a `vision.session.SessionRegistry`: one
+`RecognitionSession` per running subject (key `subject_id`). Read `tasks/todo.md` §19 "Step 9 plan" for the design.
+
+- **Limits** (both under one lock, racing Starts tested): `settings.max_concurrent_sessions` (5, measured ceiling
+  on this laptop - see todo.md 9e) and **one session on the server's own camera** (`ServerCameraBusy`); other
+  rooms use "This device's camera". Per-session `recognition_lock` and upload overlays (were module globals).
+- **Shared models**: `load_shared_model()` caches by (files on disk, student set); `preload_model()` warms it.
+- **Which session a request means** (`web/sessions.py`): `OPERATING_SUBJECT_KEY` set at Start; else the only
+  running class this login may use; else None. `/attendance/live` and `/video_feed` take `?subject_id=`.
+  Uploads find their session by `BROWSER_CAMERA_KEY` (= attendance_sessions row). `/stop_camera` stops only
+  this login's class.
+- **End** ends the submitted subject's session only. ⚠️ R3/FS-16 kept: while this login's class runs, a subject
+  with no session is refused; the DB fallback ignores open rows of classes *running now* (another operator's)
+  and refuses only on a forgotten open row this login may use.
+- **Phone**: `web.api._session_for_student()` - a running class the student is enrolled in, newest first; never
+  another class (tested).
+- **Activity**: "Running now" vs "Never ended" for unended rows.
+- Tests: `tests/fake_sessions.FakeRegistry` replaces the old `recognition_session` swaps.
+- ⚠️ **Not yet tried with two real devices running two classes at once.** First thing to do live.

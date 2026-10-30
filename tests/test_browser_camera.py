@@ -25,6 +25,8 @@ import cv2
 import numpy as np
 import pytest
 
+from tests.fake_sessions import FakeRegistry
+
 from infra.camera import BrowserCamera, CameraReader
 from recognize_face import ActiveSubject
 from vision.pose import RECOGNITION_FRAME_HEIGHT, RECOGNITION_FRAME_WIDTH
@@ -214,6 +216,10 @@ class FakeRecognition:
         self.uses_browser_camera = browser
         self.frames = []
 
+    @property
+    def is_running(self):
+        return self.subject is not None
+
     def submit_frame(self, frame):
         self.frames.append(frame)
         return True
@@ -224,7 +230,7 @@ def recognition(monkeypatch):
     import web.sessions as sessions_module
 
     fake = FakeRecognition()
-    monkeypatch.setattr(sessions_module, "recognition_session", fake)
+    monkeypatch.setattr(sessions_module, "recognition_sessions", FakeRegistry(fake))
     return fake
 
 
@@ -268,18 +274,45 @@ def test_a_classroom_camera_session_refuses_uploads(client, monkeypatch):
     import web.sessions as sessions_module
 
     fake = FakeRecognition(browser=False)
-    monkeypatch.setattr(sessions_module, "recognition_session", fake)
+    monkeypatch.setattr(sessions_module, "recognition_sessions", FakeRegistry(fake))
     sign_in(client, browser_session_id=SUBJECT.session_id)
 
     assert upload(client, jpeg(1280, 720)).status_code == 409
     assert fake.frames == []
 
 
+def test_two_classrooms_each_feed_only_their_own_class(client, flask_app, monkeypatch):
+    """
+    Several classes at once (todo.md §19 step 9): each browser's frames reach
+    the session *it* started, matched on its attendance_sessions row. A frame
+    from one room counted in another would record students in a class they
+    are not sitting in.
+    """
+    import web.sessions as sessions_module
+
+    room_a = FakeRecognition(subject=SUBJECT)
+    room_b = FakeRecognition(
+        subject=ActiveSubject(subject_id=2, session_id=8, subject_code="CS402")
+    )
+    monkeypatch.setattr(sessions_module, "recognition_sessions", FakeRegistry(room_a, room_b))
+
+    # `client` turned CSRF off for the app, so a second client shares that.
+    browser_a, browser_b = client, flask_app.test_client()
+    sign_in(browser_a, browser_session_id=7)
+    sign_in(browser_b, browser_session_id=8)
+
+    assert upload(browser_b, jpeg(1280, 720)).status_code == 200
+    assert upload(browser_b, jpeg(1280, 720)).status_code == 200
+    assert upload(browser_a, jpeg(1280, 720)).status_code == 200
+
+    assert len(room_a.frames) == 1
+    assert len(room_b.frames) == 2
+
+
 def test_no_running_session_refuses_uploads(client, monkeypatch):
     import web.sessions as sessions_module
 
-    monkeypatch.setattr(
-        sessions_module, "recognition_session", FakeRecognition(subject=None)
+    monkeypatch.setattr(sessions_module, "recognition_sessions", FakeRegistry(FakeRecognition(subject=None))
     )
     sign_in(client, browser_session_id=SUBJECT.session_id)
 
@@ -349,7 +382,7 @@ def startable(monkeypatch):
         "close_session",
         lambda row_id: calls["closed"].append(row_id),
     )
-    def start_upload_recognition():
+    def start_upload_recognition(_session):
         calls["recognition_started"] = calls.get("recognition_started", 0) + 1
         return True
 
@@ -372,8 +405,7 @@ def test_starting_with_the_browser_camera_supplies_one_and_remembers_the_login(
 ):
     import web.sessions as sessions_module
 
-    monkeypatch.setattr(
-        sessions_module, "recognition_session", FakeRecognition(browser=True)
+    monkeypatch.setattr(sessions_module, "recognition_sessions", FakeRegistry(FakeRecognition(browser=True))
     )
     sign_in(client)
 
@@ -391,8 +423,7 @@ def test_starting_with_the_browser_camera_supplies_one_and_remembers_the_login(
 def test_starting_with_the_classroom_camera_supplies_none(client, monkeypatch, startable):
     import web.sessions as sessions_module
 
-    monkeypatch.setattr(
-        sessions_module, "recognition_session", FakeRecognition(browser=False)
+    monkeypatch.setattr(sessions_module, "recognition_sessions", FakeRegistry(FakeRecognition(browser=False))
     )
     sign_in(client)
 
@@ -410,8 +441,7 @@ def test_asking_for_the_browser_camera_on_a_classroom_session_is_refused(
     # would then upload into a session refusing its frames.
     import web.sessions as sessions_module
 
-    monkeypatch.setattr(
-        sessions_module, "recognition_session", FakeRecognition(browser=False)
+    monkeypatch.setattr(sessions_module, "recognition_sessions", FakeRegistry(FakeRecognition(browser=False))
     )
     sign_in(client)
 
@@ -437,7 +467,7 @@ def test_each_upload_returns_the_latest_results_to_draw(client, recognition, mon
 
     faces = [{"box": [1, 2, 3, 4], "name": "One", "status": "Present",
               "score": "30.0", "color": "#00ff00"}]
-    monkeypatch.setattr(sessions_module, "latest_upload_overlays", lambda: faces)
+    monkeypatch.setattr(sessions_module, "latest_upload_overlays", lambda _session: faces)
     sign_in(client, browser_session_id=SUBJECT.session_id)
 
     assert upload(client, jpeg(1280, 720)).get_json()["faces"] == faces

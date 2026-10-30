@@ -103,12 +103,16 @@ def bench(monkeypatch):
     monkeypatch.setattr(
         sessions_module, "save_camera_index", lambda index: state["saved"].append(index)
     )
+    from tests.fake_sessions import FakeRegistry
+
+    # A session on the server's own camera, which is what a scan collides
+    # with. Classes on browser cameras do not hold it (todo.md §19 step 9).
     monkeypatch.setattr(
-        sessions_module, "recognition_session", FakeSession(running=False)
+        sessions_module, "recognition_sessions", FakeRegistry(FakeSession(running=False))
     )
 
     state["set_running"] = lambda running: monkeypatch.setattr(
-        sessions_module, "recognition_session", FakeSession(running=running)
+        sessions_module, "recognition_sessions", FakeRegistry(FakeSession(running=running))
     )
 
     return state
@@ -174,6 +178,26 @@ def test_the_scan_is_refused_while_a_session_is_running(client, bench):
     assert body["cameras"] == []
     assert "session" in body["message"].lower()
     assert bench["scans"] == 0, "a device was opened during a running session"
+
+
+def test_a_class_on_a_browser_camera_does_not_block_the_scan(client, bench, monkeypatch):
+    """
+    Several classes run at once (todo.md §19 step 9), most on their own
+    browsers' cameras. Only a session on the server's camera holds the device
+    a scan would open, so only that one may refuse it.
+    """
+    import web.sessions as sessions_module
+    from tests.fake_sessions import FakeRegistry
+
+    on_a_browser = FakeSession(running=True)
+    on_a_browser.uses_browser_camera = True
+    monkeypatch.setattr(sessions_module, "recognition_sessions", FakeRegistry(on_a_browser))
+    sign_in(client)
+
+    body = client.get("/cameras").get_json()
+
+    assert body["success"]
+    assert bench["scans"] == 1
 
 
 def test_a_scan_that_raises_does_not_break_the_page(client, bench):

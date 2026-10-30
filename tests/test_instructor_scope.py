@@ -409,7 +409,7 @@ def sessions(monkeypatch):
         calls["opened"] += 1
         return None, None
 
-    def stop_camera():
+    def stop_camera(_subject):
         calls["stopped"] += 1
 
     monkeypatch.setattr(sessions_module, "db_cursor", fake_cursor)
@@ -479,10 +479,9 @@ def test_an_instructor_cannot_end_a_class_that_is_not_theirs(
     """Refused before the camera is stopped, so whatever is running still is."""
     sessions_module, calls = sessions
 
-    class NothingRunning:
-        subject = None
+    from tests.fake_sessions import FakeRegistry
 
-    monkeypatch.setattr(sessions_module, "recognition_session", NothingRunning())
+    monkeypatch.setattr(sessions_module, "recognition_sessions", FakeRegistry())
     monkeypatch.setattr(
         sessions_module.subjects_repo, "is_taught_by", lambda *_args: False
     )

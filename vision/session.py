@@ -228,6 +228,12 @@ class RecognitionSession:
         self._subject: Any = None
         self._recognized: dict[str, str | None] = {}
 
+        # Held around one frame's recognition, so a stream handing over to the
+        # next one never has two loops advancing this tracker at once. It was
+        # a module global while there was one session; per session now, or
+        # every running class would wait for every other (todo.md §19 step 9).
+        self.recognition_lock = threading.Lock()
+
         self._viewer: int | None = None
         self._next_viewer_token = 1
         # When the current viewer last produced a frame. See
@@ -742,3 +748,151 @@ class RecognitionSession:
         """Record that this student's attendance has been written."""
         with self._lock:
             self._recognized[student_id] = status
+
+
+# ---------------------------------------------------------------------------
+# Several classes at once (todo.md §19 step 9)
+# ---------------------------------------------------------------------------
+
+
+class SessionLimitReached(RuntimeError):
+    """As many sessions are running as the server is configured to carry."""
+
+
+class ServerCameraBusy(RuntimeError):
+    """Another session is using the camera attached to the server."""
+
+
+def subject_key(subject: Any) -> Any:
+    """The registry key for a subject: its `subject_id`, or itself."""
+    return getattr(subject, "subject_id", subject)
+
+
+class SessionRegistry:
+    """
+    One `RecognitionSession` per running subject.
+
+    This replaced the module singleton that made the whole server one
+    classroom: a second instructor pressing Start was told "An attendance
+    session is already running". Each session keeps everything that was
+    already per-session - its camera, tracker, model, viewer and who was
+    recognised - so two classes never share a vote, a stream or a register.
+
+    Two limits, both checked under one lock so two Starts cannot both pass:
+
+    * **One session on the server's own camera.** There is one physical
+      device; a second session opening it would steal the picture. Other
+      classrooms use their own browser camera, which is what a central server
+      is for.
+    * **`max_sessions` at once.** Every face in every running class is
+      recognised on this machine's CPU; past the limit a new Start is refused
+      rather than every running class slowing down together.
+
+    The lock is held through `RecognitionSession.start()`, which can take a
+    second or two (model load, camera open). Starts are rare and a correct
+    limit is worth that; frames and streams never take this lock.
+    """
+
+    def __init__(
+        self,
+        make_session: Callable[[], RecognitionSession],
+        max_sessions: Callable[[], int] | int = 5,
+    ) -> None:
+        self._make_session = make_session
+        self._max_sessions = max_sessions
+        self._lock = threading.Lock()
+        self._sessions: dict[Any, RecognitionSession] = {}
+
+    def _limit(self) -> int:
+        limit = self._max_sessions
+        return limit() if callable(limit) else limit
+
+    def _prune(self) -> None:
+        # A session can stop itself (its camera died); drop it here so it
+        # neither counts towards the limit nor keeps its model alive.
+        for key in [k for k, s in self._sessions.items() if not s.is_running]:
+            del self._sessions[key]
+
+    def start(self, subject: Any, camera: Any = None) -> bool:
+        """
+        Start `subject`'s session. False if it is already running differently.
+
+        Raises `SessionLimitReached` or `ServerCameraBusy`. `camera` None means
+        the server's camera, exactly as `RecognitionSession.start()` takes it.
+        """
+        key = subject_key(subject)
+
+        with self._lock:
+            self._prune()
+
+            existing = self._sessions.get(key)
+
+            if existing is not None:
+                # The same subject again: RecognitionSession decides, as it
+                # always has (True for the same session, False otherwise).
+                return existing.start(subject, camera=camera)
+
+            if len(self._sessions) >= self._limit():
+                raise SessionLimitReached(
+                    f"{len(self._sessions)} sessions are already running, the "
+                    f"most this server is set to carry."
+                )
+
+            if camera is None and self._server_camera_session() is not None:
+                raise ServerCameraBusy(
+                    "Another class is using the camera attached to the server."
+                )
+
+            new_session = self._make_session()
+
+            if not new_session.start(subject, camera=camera):
+                return False
+
+            self._sessions[key] = new_session
+            return True
+
+    def _server_camera_session(self) -> RecognitionSession | None:
+        return next(
+            (s for s in self._sessions.values()
+             if s.is_running and not s.uses_browser_camera),
+            None,
+        )
+
+    def get(self, subject: Any) -> RecognitionSession | None:
+        """The running session for this subject (or `subject_id`), or None."""
+        with self._lock:
+            self._prune()
+            return self._sessions.get(subject_key(subject))
+
+    def running(self) -> list[RecognitionSession]:
+        """Every running session, in the order they started."""
+        with self._lock:
+            self._prune()
+            return list(self._sessions.values())
+
+    def server_camera_in_use(self) -> bool:
+        with self._lock:
+            self._prune()
+            return self._server_camera_session() is not None
+
+    def find(self, predicate: Callable[[RecognitionSession], bool]) -> RecognitionSession | None:
+        """The first running session `predicate` accepts, or None."""
+        return next((s for s in self.running() if predicate(s)), None)
+
+    def stop(self, subject: Any) -> bool:
+        """Stop this subject's session. False if it was not running."""
+        with self._lock:
+            found = self._sessions.pop(subject_key(subject), None)
+
+        if found is None:
+            return False
+
+        found.stop()
+        return True
+
+    def stop_all(self) -> None:
+        with self._lock:
+            sessions, self._sessions = list(self._sessions.values()), {}
+
+        for each in sessions:
+            each.stop()

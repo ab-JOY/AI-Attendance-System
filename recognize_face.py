@@ -1,6 +1,7 @@
 import logging
 import os
 import threading
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from enum import Enum
@@ -26,9 +27,12 @@ from vision.pose import RECOGNITION_FRAME_HEIGHT, RECOGNITION_FRAME_WIDTH
 from vision.quality import RECOGNITION_QUALITY, quality_issue
 from vision.session import (
     RecognitionSession,
+    ServerCameraBusy,
     SessionBusy,
     SessionHooks,
+    SessionLimitReached,
     SessionNotRunning,
+    SessionRegistry,
 )
 from vision.student_models import StudentModels
 from vision.tracking import TrackConfig
@@ -43,11 +47,13 @@ logger = logging.getLogger(__name__)
 # Re-exported so app.py can catch them without importing vision.session
 # directly. `generate_frames` is the only thing that raises them.
 __all__ = [
+    "ServerCameraBusy",
     "SessionBusy",
+    "SessionLimitReached",
     "SessionNotRunning",
     "generate_frames",
     "open_video_stream",
-    "session",
+    "sessions",
     "start_camera",
     "stop_camera",
 ]
@@ -653,19 +659,78 @@ def already_recorded_today(subject):
         return {}
 
 
-session = RecognitionSession(
-    hooks=SessionHooks(
-        open_camera=open_best_camera,
-        load_model=load_model_and_labels,
-        model_signature=model_signature,
-        make_detector=make_detector,
-        make_reader=lambda capture: CameraReader(capture),
-        configure_camera=configure_camera,
-        already_recorded=already_recorded_today,
-        loads_everyone=loads_everyone,
-        students_to_load=students_to_load,
-    ),
-    config=TRACK_CONFIG,
+# =====================================================
+# SHARED FACE MODELS (todo.md §19 step 9)
+#
+# Every running class is its own RecognitionSession, and a new session has no
+# model in memory. Loading through this cache means three classes that need
+# the same students hold one copy, not three, and the second class to start
+# does not read the files again. Keyed by the files on disk *and* the student
+# set, so a retrain or a different class list is a different entry.
+#
+# ⚠️ Safe to share because nothing writes to a loaded label map or model
+# after load_model_and_labels() returns: the names are attached inside it,
+# and LBPH predict() only reads (it already runs on many threads at once).
+# =====================================================
+
+MODEL_CACHE_ENTRIES = 8
+
+_model_cache = {}
+_model_cache_lock = threading.Lock()
+
+
+def load_shared_model(student_ids=None):
+    """`load_model_and_labels()`, loaded once per (files on disk, students)."""
+    signature = model_signature()
+    key = (signature, student_ids)
+
+    with _model_cache_lock:
+        cached = _model_cache.get(key)
+
+        if cached is not None:
+            return cached
+
+        loaded = (
+            load_model_and_labels()
+            if student_ids is None
+            else load_model_and_labels(student_ids)
+        )
+
+        # A retrain makes every older entry unreachable; drop them so their
+        # histograms are freed, then keep the cache from growing without end.
+        for stale in [k for k in _model_cache if k[0] != signature]:
+            del _model_cache[stale]
+
+        while len(_model_cache) >= MODEL_CACHE_ENTRIES:
+            del _model_cache[next(iter(_model_cache))]
+
+        _model_cache[key] = loaded
+        return loaded
+
+
+SESSION_HOOKS = SessionHooks(
+    open_camera=open_best_camera,
+    load_model=load_shared_model,
+    model_signature=model_signature,
+    make_detector=make_detector,
+    make_reader=lambda capture: CameraReader(capture),
+    configure_camera=configure_camera,
+    already_recorded=already_recorded_today,
+    loads_everyone=loads_everyone,
+    students_to_load=students_to_load,
+)
+
+
+def make_session():
+    """One class's recognition session."""
+    return RecognitionSession(hooks=SESSION_HOOKS, config=TRACK_CONFIG)
+
+
+# One RecognitionSession per running class (todo.md §19 step 9). This was a
+# single `session` - the whole server was one classroom.
+sessions = SessionRegistry(
+    make_session=make_session,
+    max_sessions=lambda: settings.max_concurrent_sessions,
 )
 
 
@@ -1056,23 +1121,45 @@ def start_camera(subject, camera=None):
     "already running" decision all belong to the session, which holds the lock
     that makes them one atomic transition (RE-2).
     """
-    return session.start(subject, camera=camera)
+    return sessions.start(subject, camera=camera)
 
 
-def stop_camera():
-    """End the session and release the camera."""
-    session.stop()
+def stop_camera(subject):
+    """End this subject's session and release its camera. Others keep running."""
+    return sessions.stop(subject)
+
+
+def preload_model():
+    """
+    Load every student's models into the shared cache now, if a session will
+    want them - so Start does not wait for the files.
+
+    Over `recognition_load_all_limit` each class loads its own list instead,
+    and loading everyone would be the cost that limit exists to avoid.
+    Never raises: a failure costs only the head start.
+    """
+    if not loads_everyone():
+        logger.info(
+            "Not preloading: over the limit, each session loads its own class list"
+        )
+        return
+
+    try:
+        _, label_map = load_shared_model()
+    except Exception:
+        logger.warning(
+            "Background model load failed; Start will load it instead",
+            exc_info=True,
+        )
+        return
+
+    logger.info("Model loaded in the background: %d student identities", len(label_map))
 
 
 def preload_model_in_background():
-    """
-    Read the model on a daemon thread, so Start does not wait 8-21 s for it.
-
-    See `RecognitionSession.preload_model`. Called when the server starts;
-    after a retrain, the training job calls `session.preload_model()` itself.
-    """
+    """`preload_model()` on a daemon thread. Called when the server starts."""
     threading.Thread(
-        target=session.preload_model,
+        target=preload_model,
         name="model-preload",
         daemon=True,
     ).start()
@@ -1981,7 +2068,7 @@ def hint_for_weak_track(box):
 # =====================================================
 
 
-def open_video_stream():
+def open_video_stream(session):
     """
     Claim the single stream slot and return the frame generator.
 
@@ -1996,10 +2083,10 @@ def open_video_stream():
     """
     token = session.acquire_viewer()
 
-    return generate_frames(token)
+    return generate_frames(session, token)
 
 
-def generate_frames(token):
+def generate_frames(session, token):
     """
     The MJPEG stream: every camera frame, for as long as the session runs.
 
@@ -2025,14 +2112,14 @@ def generate_frames(token):
 
     worker = threading.Thread(
         target=_recognition_worker,
-        args=(token, latest.publish, stop.is_set),
+        args=(session, token, latest.publish, stop.is_set),
         name="recognition",
         daemon=True,
     )
     worker.start()
 
     try:
-        for part in _stream_frames(latest, worker):
+        for part in _stream_frames(session, latest, worker):
             # The heartbeat that lets an abandoned slot be reclaimed. The
             # `finally` below is the tidy path and it is not reliable: a
             # generator's `finally` runs when it is closed or collected, and
@@ -2110,7 +2197,7 @@ def draw_overlays(frame, overlays):
         draw_face_result(frame, *overlay)
 
 
-def _stream_frames(latest, worker):
+def _stream_frames(session, latest, worker):
     """Each new camera frame, with the latest results drawn on it."""
     sequence = 0
 
@@ -2150,16 +2237,15 @@ def _stream_frames(latest, worker):
     # is actually over.
 
 
-# One frame of recognition at a time, whichever stream asked for it. With
-# `holds_viewer()` checked inside it, an old stream's recognition and its
-# replacement's can never touch the tracker at the same time.
-_recognition_lock = threading.Lock()
+# One frame of recognition at a time per session is `session.recognition_lock`
+# (vision/session.py). It was a module lock here while there was one session;
+# shared by several classes it would make every class wait for every other.
 
 
-def _recognition_worker(token, publish, stopped):
+def _recognition_worker(session, token, publish, stopped):
     """`run_recognition()` on its thread. Logs a crash instead of losing it."""
     try:
-        run_recognition(token, publish, stopped)
+        run_recognition(session, token, publish, stopped)
     except Exception:
         logger.exception(
             "Recognition stopped with an error. The video stream ends with it."
@@ -2183,10 +2269,23 @@ def _recognition_worker(token, publish, stopped):
 # (`RecognitionSession.submit_frame`).
 # =====================================================
 
-_upload_overlays = _LatestOverlays()
+# The newest results of each browser-camera session, for its page. Weak keys:
+# a session that ends and is dropped by the registry takes its entry with it.
+_upload_overlays = weakref.WeakKeyDictionary()
+_upload_overlays_lock = threading.Lock()
 
 
-def start_upload_recognition():
+def _overlays_for(session):
+    with _upload_overlays_lock:
+        latest = _upload_overlays.get(session)
+
+        if latest is None:
+            latest = _upload_overlays[session] = _LatestOverlays()
+
+        return latest
+
+
+def start_upload_recognition(session):
     """
     Run recognition over a browser-camera session's uploads, on a thread.
 
@@ -2200,11 +2299,12 @@ def start_upload_recognition():
     except SessionBusy:
         return False
 
-    _upload_overlays.publish(None)
+    latest = _overlays_for(session)
+    latest.publish(None)
 
     threading.Thread(
         target=_recognition_worker,
-        args=(token, _upload_overlays.publish, lambda: False),
+        args=(session, token, latest.publish, lambda: False),
         name="recognition-upload",
         daemon=True,
     ).start()
@@ -2225,9 +2325,9 @@ def overlay_as_json(overlay):
     }
 
 
-def latest_upload_overlays():
+def latest_upload_overlays(session):
     """The newest results for the page, or None before the first frame is judged."""
-    overlays = _upload_overlays.get()
+    overlays = _overlays_for(session).get()
 
     if overlays is None:
         return None
@@ -2235,7 +2335,7 @@ def latest_upload_overlays():
     return [overlay_as_json(overlay) for overlay in overlays]
 
 
-def run_recognition(token, publish, stopped=lambda: False):
+def run_recognition(session, token, publish, stopped=lambda: False):
     """
     The recognition loop: every frame recognition has time for, in order.
 
@@ -2262,7 +2362,7 @@ def run_recognition(token, publish, stopped=lambda: False):
             # noticed.
             continue
 
-        with _recognition_lock:
+        with session.recognition_lock:
             if not session.holds_viewer(token):
                 break
 

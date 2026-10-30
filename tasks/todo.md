@@ -1489,6 +1489,28 @@ estimated, not measured). Mitigation: fewer, more varied images per student (ste
       at 1/3/5 concurrent sessions before promising a number - only one session has ever been measured.
       Already true today: one camera tracks up to 10 faces at once (`infra/facemesh.py:29`).
 
+### Step 9 plan (user: "can we make the multi session right now", 2026-10-30)
+
+Design: `vision.session.SessionRegistry` - one `RecognitionSession` per running subject (key `subject_id`),
+replacing the module singleton `recognize_face.session`. `RecognitionSession` was already "not a singleton by
+construction" and every per-frame function takes a snapshot (`context`), so the change is at the edges.
+- [x] 9a Registry: start/get/stop/running; refuses past `max_concurrent_sessions` (setting, default 5) and a
+      second session on the **server** camera (one physical device; other rooms use their browser camera).
+      Per-session `recognition_lock` and upload overlays (both were module globals). Face models shared through
+      a load cache keyed by (files on disk, student set) - one copy, not one per class.
+- [x] 9b Routes: start (no "another session is running" refusal), frame (session found by this login's
+      `BROWSER_CAMERA_KEY`), live + video_feed (`?subject_id=`, default: this login's running session), end
+      (ends *that* subject only; R3/FS-16 guards kept per subject), cameras (refused only while the server
+      camera is in use).
+- [x] 9c Phone API: the running session for a class the student is enrolled in.
+- [x] 9d Activity page: "Running now" vs "Never ended".
+- [x] 9e Tests per stage; then measure CPU and verify time at 1/3 concurrent browser-camera sessions.
+      **Measured 2026-10-30** (this laptop, 12 cores; real sessions/MediaPipe/LBPH/liveness, browser frames
+      960px q60 at 8 fps, one face per class): 1 class 6.0 s, CPU 26% avg / 36% peak; 3 classes 6.0 s each,
+      52% / 68%; 5 classes 6.1 s each, 74% / **94%**. Verification time is set by the frame rate, not CPU, up
+      to 5 - and 5 is the ceiling here, hence `max_concurrent_sessions = 5`. ⚠️ One face per class: a crowded
+      frame costs more, so fewer classes. Tests 2,034 passed, integration 100.
+
 **Correction 2026-10-28:** an earlier reply told the user steps 1-8 make the system "centralized as one server".
 They remove the enrolment ceiling only; running many classes at once is step 9.
 

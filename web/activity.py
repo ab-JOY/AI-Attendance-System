@@ -44,7 +44,25 @@ def activity():
         sessions=sessions,
         captures=captures,
         live_capture=_capture_in_progress(),
+        running_session_ids=_running_session_ids(),
     )
+
+
+def _running_session_ids():
+    """
+    The attendance_sessions ids of the classes running right now.
+
+    An unended row is either one of these or a session the server never saw
+    end (stopped mid-class); only the registry can tell them apart, so the
+    page can say "Running now" for one and "Never ended" for the other.
+    """
+    from recognize_face import sessions as recognition_sessions
+
+    return {
+        running.subject.session_id
+        for running in recognition_sessions.running()
+        if getattr(running.subject, "session_id", None) is not None
+    }
 
 
 def _capture_in_progress():
