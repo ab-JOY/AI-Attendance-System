@@ -118,4 +118,7 @@ Migrations 013 and 014 apply automatically on the next `serve.py` start. Tests 2
   another class (tested).
 - **Activity**: "Running now" vs "Never ended" for unended rows.
 - Tests: `tests/fake_sessions.FakeRegistry` replaces the old `recognition_session` swaps.
-- ⚠️ **Not yet tried with two real devices running two classes at once.** First thing to do live.
+- ✅ **Confirmed working live by the user (2026-10-30)** after the two-device test plan (THS2 + tt10 run
+  side by side on two laptops via faceattend.me). Pushed as `72977ba`.
+- Still a server-wide cap, not per class: `MAX_PHONES = 4` phone verifications at once
+  (`services/phone_verification.py`). With several classes a 5th phone gets 429 and retries.
